@@ -31,8 +31,10 @@ Comments are the same as in c# or c++ as there is no need to change time proven 
 * multi-line comment
 */
 ```
+Duck is case sensitive
 
-Class definitions in Duck. Duck has struct/class combined into one type called container.
+## Class definitions in Duck.
+Duck has struct/class combined into one type called container.
 ``` c++
 Example { // <-- this is declaration of container
 
@@ -62,7 +64,8 @@ Example {
 }
 ```
 
-Access protection in duck. In real world application access protection is around 50%/50% between public and private members (if we ignore protected), meaning there is no right answer to this age old question what the default protection access should be. But because container are struct/class and we believe all developers are trained professionals.
+## Access protection in duck
+In real world application access protection is around 50%/50% between public and private members (if we ignore protected), meaning there is no right answer to this age old question what the default protection access should be. But because container are struct/class and we believe all developers are trained professionals.
 
 The default protection access is **public**.
 
@@ -80,7 +83,8 @@ Setting Access protection in Duck. we use non-verbose way to specify what the pr
 ```
 The protected sign +- or -+ is different from the UML model's #, as it seems to me that # sign in this case makes no sense at all. Also # in Duck is used differently. The +- has been chosen as protected access is logicly something between public and private.
 
-Function calling in duck. Duck is object-oriented language and so we can use object call.
+## Function calling in duck
+Duck is object-oriented language and so we can use object call.
 ``` c++
 // declaration
 Example {  
@@ -98,7 +102,8 @@ We can also shorten the varible decleration for object by using
 Example ex();           // <-- create variable ex that is type Example, expresion equivalent to Example ex = Example();
 ```
 
-Duck typing in Duck. Duck supports Duck typing so it let's you call functions that are not accessible or do not exist inside the container
+## Duck typing in Duck
+Duck supports Duck typing so it let's you call functions that are not accessible or do not exist inside the container
 ``` c++
 Example {  
    -Foo(){  // same as before but now Foo is private
@@ -108,3 +113,115 @@ Example ex();
 ex.Foo();  // <-- this call should not work as Foo is private, so what will happen this line simply will be omitted from the compiled code and won't be executed
 // but it is not considered as error
 ```
+
+## Null references in Duck
+Containers main parent can be forced to destroy resource by seting it to null.
+``` c++
+Example ex(); 
+ex.Foo();     // <--valid call
+ex = null;
+ex.Foo();     // <-- not valid call, ex container no longer exists
+```
+
+we can check if varibale is null by
+``` c++
+if ex
+  ex.Foo();
+// or
+?ex.Foo();   // <-- shorter version of if not null above. will be only executed it ex is valid
+
+// this checks all containers in call so it can be something like
+Parent{
+  Example ex(); 
+}
+
+Parent p();
+?p.ex.Foo(); // <-- in this case it checks not null for ex and for p containers
+```
+
+
+## Static calls in Duck
+We have chosen # to represent static meanings depending on context. we can define static Container by # before its body
+``` c++
+Example #{
+   // everything in here is static
+}
+```
+and we can call static function by
+``` c++
+Example #{
+   Foo(){ // <-- static function
+   
+   }
+}
+
+Example.Foo(); // <-- static function call
+```
+
+we can also chain static and non-static bodies of container to get object definition and static functions with the same name but this separation will hopefully make logical blocks more visible
+``` c++
+Example #{
+  // static part, everything in here is static
+}
+{
+  // object part, everything in here is bound to object
+}
+```
+
+we can chain as many as we want together
+``` c++
+Example #{}{}#{}#{}{} // <-- still valid code
+```
+
+if multiple containers have the same name and parent container thay are considered the same container. 
+``` c++
+Example {  // <--  non-static  container
+
+    Foo () // <-- not accessebele by  Example.Foo();
+    {
+
+    }
+}
+
+Example #{ // <--  only-static container any variables or fucntions in here are static
+
+    Foo () // <-- accessebele by  Example.Foo();
+    {
+
+    }
+}
+```
+So above and below example is equivalent
+``` c++
+Example {  // <--  non-static  container
+
+    Foo () // <-- not accessebele by  Example.Foo();
+    {
+
+    }
+}
+#{ // <--  only-static container any variables or fucntions in here are static
+    Foo () // <-- accessebele by  Example.Foo();
+    {
+
+    }
+}
+```
+
+## Compile time execution in Duck
+any function call that have # before it, will get compiled into it's return at compile time (this is also known as baking). It can be very useful for optimalizations.
+``` c++
+Example {
+    int Foo (int i) 
+    {
+            return (2^4)*i + (i > 0)? Foo(i-1) : 0;
+    }
+    int Foo2()
+    {
+       int fooResult = #Foo(5); // <-- this gets replaced by whatever Result of this function is at compile time.
+       fooResult++;
+       return fooResult;
+    }
+}
+```
+
