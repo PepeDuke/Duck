@@ -115,7 +115,7 @@ ex.Foo();  // <-- this call should not work as Foo is private, so what will happ
 ```
 
 ## Null references in Duck
-Containers main parent can be forced to destroy resource by seting it to null.
+Containers main parent can be forced to destroy resource by setting it to null.
 ``` c++
 Example ex(); 
 ex.Foo();     // <--valid call
@@ -224,4 +224,68 @@ Example {
     }
 }
 ```
+
+## Varibales in Duck
+all variables are lower case, no uppercase types exist, if in Duck you want to get type Max you do int.Max();
+List of allowed types:
+``` c++
+bool
+byte
+short
+int
+long
+float
+double
+string
+char
+uint
+uint8
+uint16
+uint32
+uint64
+int8
+int16
+int32
+int64
+date
+time
+datetime
+// speciall types are
+big   // <--- that holds arbitrery size of int number --- should be used only for working with very large numbers
+ubig
+tiny  // <--- holds floating point number of 69 digits  --- should be used only for working with very small numbers to get precision
+utiny 
+```
+
+## Automatic type declaration in Duck
+if you want to let the compiler decide what the type is. i have found that var, let, auto or whatever you call this type is only used to tell the compiler that infact is his job to decide, insted we cose non-verbose way to tell this compiler with : sign.
+``` c++ 
+age : 54; // <- this will be compiled as int age = 54;
+```
+
+## object references in Duck
+In Duck there is only one Owner of the Value called parent and but this value can still have many more refrences.
+``` c++ 
+Example{} // decleration
+
+Example e();
+Example e2 = e; // <-- holds now reference to e value but it is not it's parent
+e = null; 
+Print(e2);      // <-- e2 prints out null as the refrenced value is now null 
+```
+
+you can pass Value Parenthood with : sign
+``` c++ 
+Example e();
+e2 : e;     // <-- now e2 is main parent of e value
+e = null;
+Print(e2);  // <-- e2 is still valid
+```
+in context to varibales : sign is only for declering new variables
+``` c++ 
+e : 50;
+e : 5; // <-- not valid, variable e has already been declared
+```
+this is mostly to keep consistency between = and : but also to let programers know the importance of the : sign.
+
 
