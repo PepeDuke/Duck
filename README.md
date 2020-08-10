@@ -256,6 +256,11 @@ ubig
 tiny  // <--- holds floating point number of 69 digits  --- should be used only for working with very small numbers to get precision
 utiny 
 ```
+## Constant varibales in Duck
+as cont sign we use the same as static
+``` c++
+#int age; // <- this is constant value, so it can't be chagnged
+```
 
 ## Automatic type declaration in Duck
 if you want to let the compiler decide what the type is. i have found that var, let, auto or whatever you call this type is only used to tell the compiler that infact is his job to decide, insted we cose non-verbose way to tell this compiler with : sign.
@@ -287,5 +292,84 @@ e : 50;
 e : 5; // <-- not valid, variable e has already been declared
 ```
 this is mostly to keep consistency between = and : but also to let programers know the importance of the : sign.
+*This might be too annoying in the real world, so this restriction might be removed*
 
+##  Collections in Duck
+in duck dynamic collection (in C# List, in C++ Vector) and dynamic array are one and the same and compiler decides what is the faster approach, as functionaly are almost equivalent. sumularly to JavaScript or Python.
+
+``` c++ 
+int [50] s1;  // <-- static array that holds 50 int values
+int [] s2;    // <-- dynamic array can hold any number of elements, might be same as (in C# List, in C++ Vector) or dynamic array
+```
+Other collection are sepert as they are functionaly different.
+``` c++
+int queue s1;
+int stack s2;
+string, string pair s3; // <-- in c++ map,  in C# called dictionary, and honestly the best name would be KayPair, but pair must do as it is shorter and clearly says what it does 
+```
+we can assign values by = and use { } quotes to insertet actual values.
+``` c++
+int []  s1 = {5,1,2}; 
+int queue s2 = {2,3,4}; // <- 2 is first and 4 last in queue so if we deque we will get 2
+int stack s3 = {2,3,4}; // <- 2 is first and 4 last in stack so if we pop we will get 4
+string, string pair s4 = {"name" : "Bob", "adress" : "Codesquare 5", "city": "New York"}; 
+```
+
+## Automatic type collections in Duck
+as with varibales we use.
+``` c++
+s1 : {5,1,2}; // will be interepreted as int []  s1 = {5,1,2}; 
+s2 : {"name" : "Bob", "adress" : "Codesquare 5"} // will be interpreted as pair
+```
+queue and stack has no automatic type decleration.
+## Working with collections in Duck
+in Duck we use non-verbose way to work with collections
+``` c++
+s += 5;    // adds value 5 to array
+s++;       // adds value 0 to array
+s[1] += 5; // adds 5 to a value in array with index 1
+s[0] = 5;  // changes value to be 5
+s -= [1];  // remove value at index 1, this does shifts all values after index 0 by i-1 positions in array
+s--;       // removes last value in array;
+s.Num();   // number of elements  of elements in array
+```
+working with pair collection
+``` c++
+string, string pair s;
+s += "name" : "Bob"; // add pair Key: "name", Value: "Bob" 
+s["name"] = "Tom";   // change Value of Key "name" to "Tom" 
+s++;                 //  <-- not valid expression as there is no default Key
+s--;                 //  <-- not valid expression as there is no default Key
+s -= ["name"];       // remove pair Key: "name", Value: "Tom"
+s.Clear();           // removes all elements in collection
+```
+## Bounds checking in Duck
+if you need to check if value is valid you can use IsValid() fucntion or use shorten if check
+``` c++
+int [5] s;
+if IsValid(s[6]) // this checks bound of the array s
+  s[6] = 5;      // this will not be executed as 6 is out of bounds
+//or
+?s[6] = 5;       // ? checks bound of the array s and will not be executed as 6 is out of bounds
+```
+## If statement in Duck
+if else statement work as in any other language.
+``` c++
+if i < 5 { // <-- if statement with multy line body 
+  i++;
+}
+else
+{
+ i--;
+}
+
+
+if i > 10 // <-- if statement with single line body
+   i--; 
+else
+   i++;
+   
+ i = (i == 5)?  0 | 1; // ternary if statement
+```
+even thou : is convention in ternary conditional operators, symbol | seams more logical to use as in programming || means logical OR and single | can mean pipe or disjunction, thas it  makes more sense as representation of if-else split
 
