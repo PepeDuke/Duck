@@ -63,7 +63,14 @@ Example {
   }
 }
 ```
-
+funtion paramerters have to be also type safe
+``` c++
+int Foo(int i) { <-- argument int i
+    return i*2;
+  } 
+```
+() can't be ommited as it is deterministic factor for functions
+Duck does not support Automatic type for return or arguments as it can lead to confusion, need for TypeOf functions and additional checking in runtime but on the other hand as it suports duck typing it can be utilized to bypass some of the strong type nature of functions.
 ## Access protection in duck
 In real world application access protection is around 50%/50% between public and private members (if we ignore protected), meaning there is no right answer to this age old question what the default protection access should be. But because container are struct/class and we believe all developers are trained professionals.
 
@@ -331,7 +338,7 @@ s[1] += 5; // adds 5 to a value in array with index 1
 s[0] = 5;  // changes value to be 5
 s -= [1];  // remove value at index 1, this does shifts all values after index 0 by i-1 positions in array
 s--;       // removes last value in array;
-s.Num();   // number of elements  of elements in array
+s.Len();   // number of elements in array
 ```
 working with pair collection
 ``` c++
@@ -352,6 +359,14 @@ if IsValid(s[6]) // this checks bound of the array s
 //or
 ?s[6] = 5;       // ? checks bound of the array s and will not be executed as 6 is out of bounds
 ```
+## Collection size prediction in Duck
+for Duck compiler to acurtlly calclulate time exection time for async separation, as programeres we cen help with that by adding our guesstimate into array decleration
+``` c++
+int [] s;  <-- dynamic array can hold any number of elements, compiler makes the guess how many elements might contain depending on it's uses in code
+int [*] s; <-- still dynamic array, but this says to compiler, expect huge amount of values in this array.
+int [50*] s; <--still dynamic array, but this says to compiler, expect arround 50 values +- some values in this array.
+```
+
 ## If statement in Duck
 if else statement work as in any other language.
 ``` c++
@@ -372,4 +387,31 @@ else
  i = (i == 5)?  0 | 1; // ternary if statement
 ```
 even thou : is convention in ternary conditional operators, symbol | seams more logical to use as in programming || means logical OR and single | can mean pipe or disjunction, thas it  makes more sense as representation of if-else split
+## Loops statement in Duck
+Duck uses for loop as a for and foreach, simularly to JavaScript
+``` c++
+int [10] loops;
+for int i = 0; i < loops.Len(); i++ { // <-- basic for loop
+ // loop body that in this case would be executed 10 times
+  loops[i].foo();
+}
+for i : 0; i < loops.Len(); i++ { // interpreted as loop above but we use automatic type deleration
+  loops[i].foo();
+}
+
+for loop : loops {      // <-- for each loop in loops
+  loop.foo();
+}
+for -loop : loops{      // <-- reverse for each loop in loops  -- prefered if removing elements
+if loops.PendingDestroy // if some variable is true
+  loops -= loop;        // <-- removes this element
+}
+```
+Duck omits type as for each value must be the same type, Duck allows for sequence decleration with .. operator as it is the most used way to use loops
+``` c++
+for i : 0..5 { // <-- form  0 to 5 Inclusively so 6 times in total
+}
+for -i : 0..5 { // <-- form  5 to 0 inclusevly
+}
+```
 
