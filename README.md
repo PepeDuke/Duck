@@ -403,7 +403,7 @@ for loop : loops {      // <-- for each loop in loops
   loop.foo();
 }
 for -loop : loops{      // <-- reverse for each loop in loops  -- prefered if removing elements
-if loops.PendingDestroy // if some variable is true
+if loop.PendingDestroy // if some variable is true
   loops -= loop;        // <-- removes this element
 }
 ```
