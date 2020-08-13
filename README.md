@@ -17,7 +17,7 @@ stages
 2. c++ bootstrap - write the compiler first in c++ basic lexer/parser might use lex/Yacc + C++
 3. write compiler in Duck - use c++ compiler to compile duck compilator so the final compilator is writen in duck and does not depend on c++
 4. refactor Duck compilator - there will be some functions that are inefficient by the c++ bootstrap and might need to be re-done in assembly.
-5. feature full compiler - it the synatx is feature full and it works as it should.
+5. feature full compiler - is the synatx feature full and does it works as it should.
 6. integration for debuging and IDEs - pre-compiler and pdb file emiter might be needed.
 7. Something, something advertise Duck
 
