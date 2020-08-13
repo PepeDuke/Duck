@@ -386,8 +386,8 @@ else
    
  i = (i == 5)?  0 | 1; // ternary if statement
 ```
-even thou : is convention in ternary conditional operators, symbol | seams more logical to use as in programming || means logical OR and single | can mean pipe or disjunction, thas it  makes more sense as representation of if-else split
-## Loops statement in Duck
+even thou : is convention in ternary conditional operators, symbol | seams more logical to use as in programming || means logical OR and single | can mean pipe or disjunction, it  makes more sense as representation of if-else split.
+## Loops in Duck
 Duck uses for loop as a for and foreach, simularly to JavaScript
 ``` c++
 int [10] loops;
@@ -409,9 +409,43 @@ if loop.PendingDestroy // if some variable is true
 ```
 Duck omits type as for each value must be the same type, Duck allows for sequence decleration with .. operator as it is the most used way to use loops
 ``` c++
-for i : 0..5 { // <-- form  0 to 5 Inclusively so 6 times in total
+for i : 0..5 { // <-- form  0 to 5 Inclusively, it executes loop body 6 times in total
 }
 for -i : 0..5 { // <-- form  5 to 0 inclusevly
 }
+```
+sequence decleration with .. operator can be used outside of loops
+``` c++
+n : 0..5  // this will be interepreted as int [] n = {0,1,2,3,4,5};
+```
+in .. operator we can also use varibales to achive the standart loop pattern "int i = 0; i < loops.Len(); i++"
+
+``` c++
+for i : 0..loops.Len()-1 {
+}
+```
+## Loop chaining in Duck 
+Duck intreducing non-verbose way to have nested loops, with the | symbol used as loop separator 
+``` c++
+for n : 0..3 |
+    i : 0..5 {print(n);} // <-- this are two nested for loops, the inner for loop has body of {print(n);} 
+// Result would be 000000111111222222333333 
+
+// verbose way
+for n : 0; n <= 3; n++ { 
+  for i : 0; i <= 5; i++ { 
+  print(n);
+  }
+}
+```
+we can also add body to the outer loop
+``` c++
+for n : 0..3 |{n++;} // <-- outer loop body is executed after inner loop due to | separator being in front of the body
+    i : 0..5 {print(n);} 
+// Result would be 000000222222  
+
+for n : 0..3 {n++;}| // <-- outer loop body is executed before inner loop due to | separator being in behind the body
+    i : 0..5 {print(n);} 
+// Result would be 111111333333   
 ```
 
