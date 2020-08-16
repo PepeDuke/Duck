@@ -604,7 +604,7 @@ Print(CommonNames.Tom); // prints Tom
 Print(CommonNames.Bob + " and " + CommonNames.Tom); // prints Bob and Thomas <-- direct cast  
 ```
 
-# Properties in Duck
+## Properties in Duck
 the @ symbol is used as representation to symalar to Get, with inclusion of any non-static varible in @ block the 
 ``` c++
 Person {
