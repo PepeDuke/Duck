@@ -231,7 +231,7 @@ any function call that have # before it, will get compiled into it's return at c
 Example {
     int Foo (int i) 
     {
-            return (2^4)*i + (i > 0)? Foo(i-1) : 0;
+            return (2^4)*i + (i > 0)? Foo(i-1) | 0;
     }
     int Foo2()
     {
