@@ -35,7 +35,7 @@ Comments are the same as in c# or c++ as there is no need to change time proven 
 * multi-line comment
 */
 ```
-Duck is case sensitive
+Duck is case sensitive.                  
 Duck is using for it's files the .dk extension
 
 ## Class definitions in Duck.
