@@ -36,9 +36,9 @@ Comments are the same as in c# or c++ as there is no need to change time proven 
 */
 ```
 Duck is case sensitive.                  
-Duck is using for it's files the .dk extension
+Duck is using for it's files the .dk extension.
 
-## Class definitions in Duck.
+## Class definitions in Duck
 Duck has struct/class combined into one type called container.
 ``` c++
 Example { // <-- this is declaration of container
@@ -537,7 +537,8 @@ Animal{
 Cat : Animal{ // Cat inherits Animal's public and protected members
 }
 
-Cat.Walk(); // this calls Walk() decleration in Animal
+Cat cat();
+cat.Walk(); // this calls Walk() decleration in Animal
 ```
 Overriding is not declared, Any function can be overridden, for most part there is not many reason to forbid Overriding, generaly if you override something you call the base fuction anyway and just add something before or after the base functionality.
 ``` c++
@@ -548,8 +549,8 @@ Animal{
 Cat : Animal{ // Cat inherits Animal's public and protected members
   Walk(){base.Walk();} // this overrides Walk() decleration in Animal
 }
-
-Cat.Walk(); // this calls Walk() decleration in Cat
+Cat cat();
+cat.Walk(); // this calls Walk() decleration in Cat
 ```
 if extending container that has inheritance it must be declared in all files to keep visible the fact that it is inheriting something. in this case it should be IDE's work to keep this fact consistant and auto fill to all files if changed.
 ``` c++
@@ -600,7 +601,7 @@ CommonNames : string #@{
 }
 
 Print(CommonNames.Tom); // prints Tom
-Print(CommonNames.Bob + " and " + CommonNames.Tom); // prints Bob and Thomas // this is direct cast  
+Print(CommonNames.Bob + " and " + CommonNames.Tom); // prints Bob and Thomas <-- direct cast  
 ```
 
 # Properties in Duck
