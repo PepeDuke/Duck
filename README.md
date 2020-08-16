@@ -125,6 +125,11 @@ Example ex();
 ex.Foo();  // <-- this call should not work as Foo is private, so what will happen this line simply will be omitted from the compiled code and won't be executed
 // but it is not considered as error
 ```
+any container can be casted to base perent object
+``` c++
+object ex = Example();
+ex.Foo();
+```
 
 ## Null references in Duck
 Containers main parent can be forced to destroy resource by setting it to null.
