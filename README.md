@@ -634,7 +634,7 @@ Population {
   FirstAge: ?ages[0] // checks if index 0 is valid and returns that value now it is 20, if index 0 is not valid it returns null
 }
 ```
-Setter are sumlarly set inside the ={} block by
+Setter are similarly set inside the ={} block by
 ``` c++
 Person {
   -int age = 20; // private varibale age
