@@ -7,9 +7,11 @@ No garbage collector, there should not be generated any garbage in the first pla
 
 Minor features: Some optimalization techniques should be done by the compiler it self, like bool stacking into bit flags. Support for full reflection.
 
-Duck syntax is based on my personal preferences and my imagination of the perfect syntax. i like type safety as in my opinion it makes code simpler to read especialy as you geting return from fucntion/method and you have to mouse over to see what it actualy returning, with type safety you see it right there. But on the other hand i'm not fan of verbose syntax, as it makes the whole code unnecessarily too large. Duck, as the name implies, also supports Duck typing, but instead of resolving in runtime by the interpreter, it is resolved by the compiler and simply returns error message in runtime if it's printed out or just omitts this execution from final compiled code if function decleration does not exist.
+Duck syntax is based on my personal preferences and my imagination of the perfect syntax. i like type safety as in my opinion it makes code simpler to read especialy as you geting return from fucntion/method and you have to mouse over to see what it actualy returning, with type safety you see it right there. But on the other hand i'm not fan of verbose syntax, as it makes the whole code unnecessarily too large.
 
-Duck forces type safety for fucntions as thay are the worse offenders in automatic return type or automatic arguments. i'm looking at you JavaScript.
+Duck, as the name implies, also supports Duck typing, but instead of resolving in runtime by the interpreter, it is resolved by the compiler and simply returns error message in runtime if it's printed out or just omitts this execution from final compiled code if function decleration does not exist.
+
+Duck forces type safety for fucntions as thay are the worse offenders in automatic return type or automatic arguments. i'm looking at you JavaScript. this can be bypassed to a certen extend with duck typing.
 
 # Project status
 Current status: design stage
@@ -46,7 +48,7 @@ Example { // <-- this is declaration of container
 }
 ```
 
-Functions/methods in Duck. In Duck we call them functions. The difference from container is thay must use () argument space to be declared.
+Functions/methods in Duck. In Duck we call them functions. The difference from container is thay must use () argument space to be declared. () can't be ommited as it is deterministic factor for functions.
 ``` c++
 Foo() { // <-- this is declaration of function
 
@@ -68,14 +70,13 @@ Example {
   }
 }
 ```
-funtion paramerters have to be also type safe
+funtion argument and return have to be type safe
 ``` c++
 int Foo(int i) { <-- argument int i
     return i*2;
   } 
 ```
-() can't be ommited as it is deterministic factor for functions
-Duck does not support Automatic type for return or arguments as it can lead to confusion, need for TypeOf functions and additional checking in runtime but on the other hand as it suports duck typing it can be utilized to bypass some of the strong type nature of functions.
+Duck does not support Automatic type for return or arguments as it can lead to confusion, need for TypeOf functions and additional checking in runtime but on the other hand as it suports duck typing with the obj type and it can be utilized to bypass some of the strong type nature of functions.
 ## Access protection in duck
 In real world application access protection is around 50%/50% between public and private members (if we ignore protected), meaning there is no right answer to this age old question what the default protection access should be. But because container are struct/class and we believe all developers are trained professionals.
 
@@ -125,38 +126,42 @@ Example ex();
 ex.Foo();  // <-- this call should not work as Foo is private, so what will happen this line simply will be omitted from the compiled code and won't be executed
 // but it is not considered as error
 ```
-any container can be casted to base perent object
+any container can be casted to base type obj
 ``` c++
-object ex = Example();
+obj ex = Example();
 ex.Foo();
 ```
-
-## Null references in Duck
-Containers main parent can be forced to destroy resource by setting it to null.
+this can be used to achieve polymorphism for any container no matter what is inheritance status is
 ``` c++
-Example ex(); 
-ex.Foo();     // <--valid call
-ex = null;
-ex.Foo();     // <-- not valid call, ex container no longer exists
-```
-
-we can check if varibale is null by
-``` c++
-if ex
-  ex.Foo();
-// or
-?ex.Foo();   // <-- shorter version of if not null above. will be only executed it ex is valid
-
-// this checks all containers in call so it can be something like
-Parent{
-  Example ex(); 
+TryToQuack(obj duck)
+{
+   duck.Quack();
 }
 
-Parent p();
-?p.ex.Foo(); // <-- in this case it checks not null for ex and for p containers
+Duck {
+  Quack(){print("Quack");}
+}
+
+Person{
+  Quack(){print("oh yes young chap, i most definitely can quack /kwak/, you see");}
+}
+
+Duck duck();
+Person person();
+
+TryToQuack(duck);      // it qucked so it is duck
+TryToQuack(person);    // it qucked so it also duck
 ```
-
-
+There might be cases where you actually want test if function can be called successfully or not. we can check with .?  operator
+``` c++
+TryToQuack(obj duck)
+{
+   if duck.?Quack() // this does not call Quack(). It just returns true if duck can Quack, if can't it returns false
+      duck.Quack();
+   else
+      print("this "+ duck +" can't quack");
+}
+```
 ## Static calls in Duck
 We have chosen # to represent static meanings depending on context. we can define static Container by # before its body
 ``` c++
@@ -175,7 +180,7 @@ Example #{
 Example.Foo(); // <-- static function call
 ```
 
-we can also chain static and non-static bodies of container to get object definition and static functions with the same name but this separation will hopefully make logical blocks more visible
+we can also chain static and non-static bodies of container to get object definition and static functions with the same name. This separation will hopefully make logical blocks, that programers can document and collaps as needed.
 ``` c++
 Example #{
   // static part, everything in here is static
@@ -208,7 +213,7 @@ Example #{ // <--  only-static container any variables or fucntions in here are 
     }
 }
 ```
-So above and below example is equivalent
+So above and below examples are equivalent
 ``` c++
 Example {  // <--  non-static  container
 
@@ -284,7 +289,30 @@ if you want to let the compiler decide what the type is. i have found that var, 
 ``` c++ 
 age : 54; // <- this will be compiled as int age = 54;
 ```
+## Null references in Duck
+Containers main parent can be forced to destroy resource by setting it to null.
+``` c++
+Example ex(); 
+ex.Foo();     // <--valid call
+ex = null;
+ex.Foo();     // <-- not valid call, ex container no longer exists
+```
 
+we can check if varibale is null by
+``` c++
+if ex
+  ex.Foo();
+// or
+?ex.Foo();   // <-- shorter version of if not null above. will be only executed it ex is valid
+
+// ? operator checks all containers in call so it can be something like
+Parent{
+  Example ex(); 
+}
+
+Parent p();
+?p.ex.Foo(); // <-- in this case it checks not null for ex and for p containers
+```
 ## object references in Duck
 In Duck there is only one Owner of the Value called parent and but this value can still have many more refrences.
 ``` c++ 
@@ -310,7 +338,6 @@ e : 5; // <-- not valid, variable e has already been declared
 ```
 this is mostly to keep consistency between = and : but also to let programers know the importance of the : sign.
 *This might be too annoying in the real world, so this restriction might be removed*
-
 ##  Collections in Duck
 in duck dynamic collection (in C# List, in C++ Vector) and dynamic array are one and the same and compiler decides what is the faster approach, as functionaly are almost equivalent. sumularly to JavaScript or Python.
 
