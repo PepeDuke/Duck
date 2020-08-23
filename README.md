@@ -637,13 +637,13 @@ Print(CommonNames.Bob + " and " + CommonNames.Tom); // prints Bob and Thomas <--
 ```
 
 ## Properties in Duck
-the @ symbol is used as representation to symalar to Get, with inclusion of any non-static varible in @ block the 
+the @ symbol is used as representation to symalar to Get, with inclusion of any non-static varible in @ block, by default anything after : is returned
 ``` c++
 Person {
       -int age = 20; // private varibale age
 }
 @{ // Get export for age // non-static block
-  Age: age
+  Age: age              
 }
 
 Person p;
