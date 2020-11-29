@@ -40,10 +40,12 @@ Comments are the same as in c# or c++ as there is no need to change time proven 
 Duck is case sensitive.                  
 Duck is using for it's files the .dk extension.
 
+
 ## Class definitions in Duck
 Duck has struct/class combined into one type called container.
 ``` c++
-Example { // <-- this is declaration of container
+Example // <-- this is declaration of container
+{ 
 
 }
 ```
@@ -57,24 +59,28 @@ Foo() { // <-- this is declaration of function
 
 If function does not return anything we ommit the void type. But if does return something it needs to specify the type.
 ``` c++
-int Foo() { // <-- this is declaration of function with return type
+int Foo() // <-- this is declaration of function with return type
+{ 
  return 5;
 }
 ```
 
 So in combination with container we might have something like 
 ``` c++
-Example { 
-  int Foo() { 
+Example 
+{ 
+  int Foo() 
+  { 
     return 5;
   }
 }
 ```
 funtion argument and return have to be type safe
 ``` c++
-int Foo(int i) { <-- argument int i
+int Foo(int i) <-- argument int i
+{
     return i*2;
-  } 
+} 
 ```
 Duck does not support Automatic type for return or arguments as it can lead to confusion, need for TypeOf functions and additional checking in runtime but on the other hand as it suports duck typing with the obj type and it can be utilized to bypass some of the strong type nature of functions.
 ## Access protection in duck
@@ -84,13 +90,16 @@ The default protection access is **public**.
 
 Setting Access protection in Duck. we use non-verbose way to specify what the protection is, as it is not most of the time the focus of programers but more used for the IDE that shows what this object can access. so we use + - operators inspered by UML models as it seams to be the most strait forward way to say what protection is in use.
 ``` c++
--InternalFoo(){  // <--  private function
+-InternalFoo() // <--  private function
+{ 
 
 } 
-+-ChildFoo(){   // <-- protected function // or -+
++-ChildFoo() // <-- protected function // or -+
+{   
 
 } 
-+Foo(){         // <-- public function
++Foo() // <-- public function
+{
 
 } 
 ```
@@ -100,8 +109,10 @@ The protected sign +- or -+ is different from the UML model's #, as it seems to 
 Duck is object-oriented language and so we can use object call.
 ``` c++
 // declaration
-Example {  
-    Foo(){
+Example 
+{  
+    Foo()
+    {
     
     }
 }
@@ -115,11 +126,31 @@ We can also shorten the varible decleration for object by using
 Example ex();           // <-- create variable ex that is type Example, expresion equivalent to Example ex = Example();
 ```
 
+## Program start in Duck
+each program start from main function that has to be declered outide of any container.
+``` c++
+main (string [] args) {
+ Print("Hello world");
+}
+``` 
+
+we can execute instructions just placed outside of containers inside file but we need to call the Exec function on the file as they do not run by default.
+``` c++
+// inside main.dk
+main (string [] args) {
+  Exec("hello.dk");
+}
+// inside hello.dk
+ Print("Hello world");
+``` 
+
 ## Duck typing in Duck
 Duck supports Duck typing so it let's you call functions that are not accessible or do not exist inside the container
 ``` c++
-Example {  
-   -Foo(){  // same as before but now Foo is private
+Example 
+{  
+   -Foo() // same as before but now Foo is private
+   {  
    }
 }
 Example ex(); 
@@ -138,11 +169,13 @@ TryToQuack(obj duck)
    duck.Quack();
 }
 
-Duck {
+Duck 
+{
   Quack(){print("Quack");}
 }
 
-Person{
+Person
+{
   Quack(){print("oh yes young chap, i most definitely can quack /kwak/, you see");}
 }
 
@@ -165,13 +198,15 @@ TryToQuack(obj duck)
 ## Static calls in Duck
 We have chosen # to represent static meanings depending on context. we can define static Container by # before its body
 ``` c++
-Example #{
+Example 
+#{
    // everything in here is static
 }
 ```
 and we can call static function by
 ``` c++
-Example #{
+Example 
+#{
    Foo(){ // <-- static function
    
    }
@@ -182,7 +217,8 @@ Example.Foo(); // <-- static function call
 
 we can also chain static and non-static bodies of container to get object definition and static functions with the same name. This separation will hopefully make logical blocks, that programers can document and collaps as needed.
 ``` c++
-Example #{
+Example 
+#{
   // static part, everything in here is static
 }
 {
@@ -197,7 +233,8 @@ Example #{}{}#{}#{}{} // <-- still valid code
 
 if multiple containers have the same name and parent container thay are considered the same container. 
 ``` c++
-Example {  // <--  non-static  container
+Example // <--  non-static  container
+{  
 
     Foo () // <-- not accessebele by  Example.Foo();
     {
@@ -205,7 +242,8 @@ Example {  // <--  non-static  container
     }
 }
 
-Example #{ // <--  only-static container any variables or fucntions in here are static
+Example  // <--  only-static container any variables or fucntions in here are static
+#{ // <-- static indicator #
 
     Foo () // <-- accessebele by  Example.Foo();
     {
@@ -215,14 +253,14 @@ Example #{ // <--  only-static container any variables or fucntions in here are 
 ```
 So above and below examples are equivalent
 ``` c++
-Example {  // <--  non-static  container
-
+Example // <--  non-static  container
+{  
     Foo () // <-- not accessebele by  Example.Foo();
     {
 
     }
 }
-#{ // <--  only-static container any variables or fucntions in here are static
+#{    // <--  only-static container any variables or fucntions in here are static
     Foo () // <-- accessebele by  Example.Foo();
     {
 
@@ -233,7 +271,8 @@ Example {  // <--  non-static  container
 ## Compile time execution in Duck
 any function call that have # before it, will get compiled into it's return at compile time (this is also known as baking). It can be very useful for optimalizations.
 ``` c++
-Example {
+Example 
+{
     int Foo (int i) 
     {
             return (2^4)*i + (i > 0)? Foo(i-1) | 0;
@@ -306,7 +345,8 @@ if ex
 ?ex.Foo();   // <-- shorter version of if not null above. will be only executed it ex is valid
 
 // ? operator checks all containers in call so it can be something like
-Parent{
+Parent
+{
   Example ex(); 
 }
 
@@ -422,7 +462,8 @@ int [50*] s; <--still dynamic array, but this says to compiler, expect arround 5
 ## If statement in Duck
 if else statement work as in any other language.
 ``` c++
-if i < 5 { // <-- if statement with multy line body 
+if i < 5 // <-- if statement with multy line body 
+{ 
   i++;
 }
 else
@@ -454,7 +495,7 @@ for i : 0; i < loops.Len; i++ { // interpreted as loop above but we use automati
 for loop : loops {      // <-- for each loop in loops
   loop.foo();
 }
-for -loop : loops{      // <-- reverse for each loop in loops  -- prefered if removing elements
+for -loop : loops {      // <-- reverse for each loop in loops  -- prefered if removing elements
 if loop.PendingDestroy // if some variable is true
   loops -= loop;        // <-- removes this element
 }
@@ -523,8 +564,10 @@ this works only with for loops as i have found you generaly want to do nested lo
 ## Namespaces in Duck 
 Duck has no namespace keyword as it is not needed we can simply use #{} static container as a namespace as it serves the same purpose
 ``` c++
-Name #{ // we create our namespace by creating static container
-   Space #{
+Name // we create our namespace by creating static container
+#{ 
+   Space 
+   #{
 
          foo(){}
     }
@@ -549,24 +592,28 @@ sp.foo2();
 Duck supports unrestricted container extensions
 ``` c++
 // file1.dk
-Name #{  // extending container Name with foo function
+Name // extending container Name with foo function
+#{  
   foo(){}
 }
 ```
 ``` c++
 // file2.dk
-Name #{  // extending container Name with foo2 function that calls function foo that has been declared in file 1
+Name // extending container Name with foo2 function that calls function foo that has been declared in file 1
+#{  
   foo2(){foo();}
 }
 ```
 ## Inheritance in Duck 
-Duck is using the : symbol for declering inheritance simular to C# or c++. we allow for only one container parent.
+Duck is using the : symbol for declering inheritance simular to C# or c++. we allow for unlimited container parents separeted by , symbol
 ``` c++
-Animal{
+Animal
+{
   Walk(){}
 }
 
-Cat : Animal{ // Cat inherits Animal's public and protected members
+Cat : Animal  // Cat inherits Animal's public and protected members
+{ 
 }
 
 Cat cat();
@@ -574,38 +621,110 @@ cat.Walk(); // this calls Walk() decleration in Animal
 ```
 Overriding is not declared, Any function can be overridden, for most part there is not many reason to forbid Overriding, generaly if you override something you call the base fuction anyway and just add something before or after the base functionality.
 ``` c++
-Animal{
+Animal
+{
   Walk(){}
 }
 
-Cat : Animal{ // Cat inherits Animal's public and protected members
+Cat : Animal // Cat inherits Animal's public and protected members
+{ 
   Walk(){base.Walk();} // this overrides Walk() decleration in Animal
 }
 Cat cat();
 cat.Walk(); // this calls Walk() decleration in Cat
 ```
+multyple perents
+``` c++
+Animal
+{
+  Walk(){}
+}
+Consumer
+{
+  Eat(){}
+}
+Cat : Animal, Consumer
+{
+  HaveADinner()
+  {
+     Walk();
+     Eat();
+     Walk();
+  }
+}
+```
+in some cases prent functions can become inaccessible form child container. this is middle ground between not suporting multyple inheretence and fully suporting it. multiple inheritance gives level of freedom that we want, but we don't not recommended overlapping parents.
+``` c++
+Animal
+{
+  Walk(){}
+}
+Human
+{
+   Walk(){}
+   Eat(){}
+}
+Cat : Animal, Human  // in this case priority is from left to right. if function is alerdy defined it simply can't be re-defined in a second perent.
+{
+  HaveADinner()
+  {
+     Walk(); // Walk() form Animal
+     Eat();
+     base.Walk(); // Walk() still form Animal
+     // in this case Walk() forom Human simply can't be acessed 
+  }
+}
+```
 if extending container that has inheritance it must be declared in all files to keep visible the fact that it is inheriting something. in this case it should be IDE's work to keep this fact consistant and auto fill to all files if changed.
 ``` c++
 // file1.dk
-Cat : Animal {
+Cat : Animal 
+{
 }
 ```
 ``` c++
 // file2.dk
-Cat {  // <-- invalid, this must be "Cat : Animal" also
+Cat   // <-- invalid, this must be "Cat : Animal" also, We expect IDE to solve this using auto refactor options
+{ 
 }
 ```
 ## Interfaces  in Duck 
-Duck is using Duck typing and therefore there is no need for interfaces.
+Duck is using Duck typing and therefore there is no need for interfaces. But if we want to expose set of functions to be used by user, we can make function definition container.
+``` c++
+PredefinedFunctions
+{
+   Foo(){}
+   Foo2(){}
+}
+WantToUseFunctions 
+#{
+   UseFunctions(PredefinedFunctions interface)
+   {
+    interface.Foo();
+   }
+}
+
+SomethingElse {}      // to show that inheretence still works
+Duck : SomethingElse, PredefinedFunctions
+{
+   Foo(){Print("actual implementation");} 
+   Foo2(){Print("actual implementation");}
+}
+
+Duck d;
+WantToUseFunctions.UseFunctions(d);
+```
 
 ## Enums in Duck
 Duck is using inheritance style declaration for type enum declaration with combination with the @ symbol representing enumeration block and # representing static block. This block is also expandible same as #{} or {} blocks.
 ``` c++
-Day : byte #@{
+Day : byte 
+#@{
     Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday
 }
 // more verbose way 
-Day : byte #@{
+Day : byte 
+#@{
     Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6
 }
 
@@ -615,18 +734,20 @@ Print(Day.Sunday == 0); // prints true  <-- direct cast
 ```
 in Duck you can also make enums out of non-tradicinal values sutch as floats and strings
 ``` c++
-IrationalNumbers : float #@{
-Pi: 3.141592653589,
-SqRoot2: 1.4142135623, 
+IrationalNumbers : float
+#@{
+ Pi: 3.141592653589,
+ SqRoot2: 1.4142135623, 
 }
 
 Incemets : float #@{
-I1,I2,I3,I4 // the default values for float starts at 0 and increment by 0.5
+ I1,I2,I3,I4 // the default values for float starts at 0 and increment by 0.5
 } // I1 = 0, I2 = 0.5, I3 = 1.0, I4 = 1.5
 ```
 String enum also retains the Enum name when prints
 ``` c++
-CommonNames : string #@{
+CommonNames : string 
+#@{
   Bob: "Bob",
   Tom: "Thomas",
   Dan: "Daniel"
@@ -639,7 +760,8 @@ Print(CommonNames.Bob + " and " + CommonNames.Tom); // prints Bob and Thomas <--
 ## Properties in Duck
 the @ symbol is used as representation to symalar to Get, with inclusion of any non-static varible in @ block, by default anything after : is returned
 ``` c++
-Person {
+Person 
+{
       -int age = 20; // private varibale age
 }
 @{ // Get export for age // non-static block
@@ -653,7 +775,8 @@ Print(Person.Age); // prints Person has no propery Age
 ```
 this also allows expresions
 ``` c++
-Population {
+Population 
+{
       -ages : {20,50,12,23,40}; // private array ages
 }
 @{
@@ -663,7 +786,8 @@ Population {
 ```
 Setter are similarly set inside the ={} block by
 ``` c++
-Person {
+Person 
+{
   -int age = 20; // private varibale age
 }
 ={
@@ -674,6 +798,5 @@ Person p;
 p.Age = 25;
 Print(p.Age);     // prints 25 
 ``` 
-
 
 
