@@ -18,7 +18,7 @@ Current status: design stage
 
 stages
 1. design stage - make sure the syntax is consistent, complete and simple to use
-2. c++ bootstrap - write the compiler first in c++ basic lexer/parser might use lex/Yacc + C++
+2. c++ bootstrap - write the compiler first in c++ basic lexer/parser might use lex/Yacc or LLVM
 3. write compiler in Duck - use c++ compiler to compile duck compilator so the final compilator is writen in duck and does not depend on c++
 4. refactor Duck compilator - there will be some functions that are inefficient by the c++ bootstrap and might need to be re-done in assembly.
 5. compile optimalization - make sure compiler implements all applicable optimization techniques.
