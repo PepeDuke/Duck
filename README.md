@@ -129,7 +129,13 @@ Example ex();           // <-- create variable ex that is type Example, expresio
 ## Program start in Duck
 each program start from main function that has to be declered outide of any container.
 ``` c++
-main (string [] args) {
+Main (string [] args) {
+ Print("Hello world");
+}
+``` 
+*or*
+``` c++
+Main () {
  Print("Hello world");
 }
 ``` 
@@ -137,7 +143,7 @@ main (string [] args) {
 we can execute instructions just placed outside of containers inside file but we need to call the Exec function on the file as they do not run by default.
 ``` c++
 // inside main.dk
-main (string [] args) {
+Main (string [] args) {
   Exec("hello.dk");
 }
 // inside hello.dk
@@ -171,12 +177,12 @@ TryToQuack(obj duck)
 
 Duck 
 {
-  Quack(){print("Quack");}
+  Quack(){Print("Quack");}
 }
 
 Person
 {
-  Quack(){print("oh yes young chap, i most definitely can quack /kwak/, you see");}
+  Quack(){Print("oh yes young chap, i most definitely can quack /kwak/, you see");}
 }
 
 Duck duck();
@@ -192,7 +198,7 @@ TryToQuack(obj duck)
    if duck.?Quack() // this does not call Quack(). It just returns true if duck can Quack, if can't it returns false
       duck.Quack();
    else
-      print("this "+ duck +" can't quack");
+      Print("this "+ duck +" can't quack");
 }
 ```
 ## Static calls in Duck
@@ -277,7 +283,7 @@ Example
     {
             return (2^4)*i + (i > 0)? Foo(i-1) | 0;
     }
-    int Foo2()
+    int Foo2 ()
     {
        int fooResult = #Foo(5); // <-- this gets replaced by whatever Result of this function is at compile time.
        fooResult++;
@@ -345,13 +351,13 @@ if ex
 ?ex.Foo();   // <-- shorter version of if not null above. will be only executed it ex is valid
 
 // ? operator checks all containers in call so it can be something like
-Parent
+Owner
 {
   Example ex(); 
 }
 
-Parent p();
-?p.ex.Foo(); // <-- in this case it checks not null for ex and for p containers
+Owner o();
+?o.ex.Foo(); // <-- in this case it checks not null for ex and for p containers
 ```
 ## object references in Duck
 In Duck there is only one Owner of the Value called parent and but this value can still have many more refrences.
@@ -418,8 +424,8 @@ in Duck we use non-verbose way to work with collections
 s += 5;    // adds value 5 to array
 s++;       // adds value 0 to array
 s[1] += 5; // adds 5 to a value in array with index 1
-s[0] = 5;  // changes value to be 5
-s -= [1];  // remove value at index 1, this does shifts all values after index 0 by i-1 positions in array
+s[0] = 5;  // changes value at index 0 to be 5
+s -= [1];  // remove value at index 1, this does shifts all values after index 0 by index-1 positions in array
 s--;       // removes last value in array;
 s.Len;   // number of elements in array
 ```
@@ -428,11 +434,18 @@ working with pair collection
 string, string pair s;
 s += "name" : "Bob"; // add pair Key: "name", Value: "Bob" 
 s["name"] = "Tom";   // change Value of Key "name" to "Tom" 
-s++;                 //  <-- not valid expression as there is no default Key
-s--;                 //  <-- not valid expression as there is no default Key
+s++;                 // tries to pattern mutch key (simular to ms excel for example month) if it fails add 1 to last key and sets value to none
+s--;                 // removes at last added key
 s -= ["name"];       // remove pair Key: "name", Value: "Tom"
 s.Clear();           // removes all elements in collection
 ```
+if we need to know the index of add or remove we can add your assignment into () brackets then this expression will return an appropriate return type to the expresion
+``` c++
+int [] s = {1,1};
+int index = (s += 4);
+Print(index); // prints 3
+```
+
 ## Bounds checking in Duck
 if you need to check if value is valid you can use IsValid() fucntion or use shorten if check
 ``` c++
@@ -484,27 +497,32 @@ even thou : is convention in ternary conditional operators, symbol | seams more 
 Duck uses for loop as a for and foreach, simularly to JavaScript
 ``` c++
 int [10] loops;
-for int i = 0; i < loops.Len; i++ { // <-- basic for loop
+for int i = 0; i < loops.Len; i++  // <-- basic for loop
+{ 
  // loop body that in this case would be executed 10 times
-  loops[i].foo();
+  loops[i].Foo();
 }
-for i : 0; i < loops.Len; i++ { // interpreted as loop above but we use automatic type deleration
-  loops[i].foo();
+for i : 0; i < loops.Len; i++  // interpreted as loop above but we use automatic type deleration
+{ 
+  loops[i].Foo();
 }
 
-for loop : loops {      // <-- for each loop in loops
+for loop : loops  // <-- for each loop in loops
+{     
   loop.foo();
 }
 for -loop : loops {      // <-- reverse for each loop in loops  -- prefered if removing elements
-if loop.PendingDestroy // if some variable is true
-  loops -= loop;        // <-- removes this element
+  if loop.PendingDestroy // if some variable is true
+   loops -= loop;        // <-- removes this element
 }
 ```
 Duck omits type as for each value must be the same type, Duck allows for sequence decleration with .. operator as it is the most used way to use loops
 ``` c++
-for i : 0..5 { // <-- form  0 to 5 Inclusively, it executes loop body 6 times in total
+for i : 0..5 // <-- form  0 to 5 Inclusively, it executes loop body 6 times in total
+{ 
 }
-for -i : 0..5 { // <-- form  5 to 0 inclusevly
+for -i : 0..5 // <-- form  5 to 0 inclusevly
+{
 }
 ```
 sequence decleration with .. operator can be used outside of loops
@@ -514,22 +532,27 @@ n : 0..5  // this will be interepreted as int [] n = {0,1,2,3,4,5};
 in .. operator we can also use varibales to achive the standart loop pattern "int i = 0; i < loops.Len; i++"
 
 ``` c++
-for i : 0..loops.Len-1 {
+for i : 0..loops.Len-1 
+{
 }
 ```
 do-while and while work as in other languages so does keywords sutch as break; continue;
 ``` c++
-while true { // while with body after condition
+while true // while with body after condition
+{ 
   Work();
 }
 
-do {
+do 
+{
   Work();
 } while true; // while with body before condition
 
-do {
+do 
+{
  if IsWorkDone() == true
     break;
+    
   Work();
 }
 
@@ -545,18 +568,18 @@ for n : 0..3 |
 // verbose way
 for n : 0; n <= 3; n++ { 
   for i : 0; i <= 5; i++ { 
-  print(n);
+    Print(n);
   }
 }
 ```
 we can also add body to the outer loop
 ``` c++
 for n : 0..3 |{n++;} // <-- outer loop body is executed after inner loop due to | separator being in front of the body
-    i : 0..5 {print(n);} 
+    i : 0..5 {Print(n);} 
 // Result would be 000000222222  
 
 for n : 0..3 {n++;}| // <-- outer loop body is executed before inner loop due to | separator being in behind the body
-    i : 0..5 {print(n);} 
+    i : 0..5 {Print(n);} 
 // Result would be 111111333333   
 ```
 this works only with for loops as i have found you generaly want to do nested loops for 2D or 3D arrays or objects within objects.
@@ -569,39 +592,39 @@ Name // we create our namespace by creating static container
    Space 
    #{
 
-         foo(){}
+         Foo(){}
     }
     {
-         foo2(){}
+         Foo2(){}
     }       
 }
 // we can now call Space by
-Name.Space.foo(); // it's static part
+Name.Space.Foo(); // it's static part
 name.space sp();  // it's object part
-sp.foo2();
+sp.Foo2();
 ```
 for namespace unwrap we can use the using kayword simular to C# as it is short and works well in large applications
 ``` c++
 /// in diffren file we can add
 using Name;
 
-Space.foo() // now we can use Space container as if we are inside Name container;
+Space.Foo() // now we can use Space container as if we are inside Name container;
 Space sp();
-sp.foo2();
+sp.Foo2();
 ```
 Duck supports unrestricted container extensions
 ``` c++
 // file1.dk
 Name // extending container Name with foo function
 #{  
-  foo(){}
+  Foo(){}
 }
 ```
 ``` c++
 // file2.dk
 Name // extending container Name with foo2 function that calls function foo that has been declared in file 1
 #{  
-  foo2(){foo();}
+  Foo2(){Foo();}
 }
 ```
 ## Inheritance in Duck 
@@ -762,7 +785,7 @@ the @ symbol is used as representation to symalar to Get, with inclusion of any 
 ``` c++
 Person 
 {
-      -int age = 20; // private varibale age
+  -int age = 20; // private varibale age
 }
 @{ // Get export for age // non-static block
   Age: age              
@@ -798,5 +821,18 @@ Person p;
 p.Age = 25;
 Print(p.Age);     // prints 25 
 ``` 
+
+## Bitwise and shift operators in Duck
+Simular to c++ or C# Duck is using standart ~, <<, >>, &, |, and ^ symbols for work with bits.
+``` c++
+uint x = 0x05;  // 00000101
+Print(x & 0x03) // 00000001  <-- Bitwise AND   
+Print(x | 0x03) // 00000111  <-- Bitwise OR
+Print(x ^ 0x03) // 00000110  <-- Bitwise XOR
+Print(~x)       // 11111100  <-- Bitwise NOT
+Print(x << 1)   // 00001010  <-- Left shift 
+Print(x >> 1)   // 00000010  <-- Right shift 
+``` 
+
 
 
