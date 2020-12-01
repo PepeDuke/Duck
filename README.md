@@ -826,12 +826,12 @@ Print(p.Age);     // prints 25
 Simular to c++ or C# Duck is using standart ~, <<, >>, &, |, and ^ symbols for work with bits.
 ``` c++
 uint x = 0x05;  // 00000101
-Print(x & 0x03) // 00000001  <-- Bitwise AND   
-Print(x | 0x03) // 00000111  <-- Bitwise OR
-Print(x ^ 0x03) // 00000110  <-- Bitwise XOR
-Print(~x)       // 11111100  <-- Bitwise NOT
-Print(x << 1)   // 00001010  <-- Left shift 
-Print(x >> 1)   // 00000010  <-- Right shift 
+Print(x & 0x03); // 00000001  <-- Bitwise AND   
+Print(x | 0x03); // 00000111  <-- Bitwise OR
+Print(x ^ 0x03); // 00000110  <-- Bitwise XOR
+Print(~x);       // 11111100  <-- Bitwise NOT
+Print(x << 1);   // 00001010  <-- Left shift 
+Print(x >> 1);   // 00000010  <-- Right shift 
 ``` 
 
 
