@@ -656,7 +656,7 @@ Cat : Animal // Cat inherits Animal's public and protected members
 Cat cat();
 cat.Walk(); // this calls Walk() decleration in Cat
 ```
-multyple perents
+multiple Parents
 ``` c++
 Animal
 {
@@ -676,7 +676,7 @@ Cat : Animal, Consumer
   }
 }
 ```
-in some cases prent functions can become inaccessible form child container. this is middle ground between not suporting multyple inheretence and fully suporting it. multiple inheritance gives level of freedom that we want, but we don't not recommended overlapping parents.
+multiple inheritance gives level of freedom that we want. Perent priority is from left to right, in case of overlap the left perent has priority. We don't not recommended overlapping parents. there is still way to access functions from iside of the container but to the outside functions with lower priorty are not visible to the outside.
 ``` c++
 Animal
 {
@@ -694,7 +694,7 @@ Cat : Animal, Human  // in this case priority is from left to right. if function
      Walk(); // Walk() form Animal
      Eat();
      base.Walk(); // Walk() still form Animal
-     // in this case Walk() forom Human simply can't be acessed 
+     this.Human.Walk(); // Walk() form Human - this.Human is not visible to the outisde 
   }
 }
 ```
@@ -712,7 +712,7 @@ Cat   // <-- invalid, this must be "Cat : Animal" also, We expect IDE to solve t
 }
 ```
 ## Interfaces  in Duck 
-Duck is using Duck typing and therefore there is no need for interfaces. But if we want to expose set of functions to be used by user, we can make function definition container.
+If we want to expose set of functions to be used by user, we can make function definition container.
 ``` c++
 PredefinedFunctions
 {
@@ -823,7 +823,7 @@ Print(p.Age);     // prints 25
 ``` 
 
 ## Bitwise and shift operators in Duck
-Simular to c++ or C# Duck is using standart ~, <<, >>, &, |, and ^ symbols for work with bits.
+Simular to c++ or C#, Duck is using standart ~, <<, >>, &, |, and ^ symbols for work with bits.
 ``` c++
 uint x = 0x05;  // 00000101
 Print(x & 0x03); // 00000001  <-- Bitwise AND   
@@ -833,6 +833,35 @@ Print(~x);       // 11111100  <-- Bitwise NOT
 Print(x << 1);   // 00001010  <-- Left shift 
 Print(x >> 1);   // 00000010  <-- Right shift 
 ``` 
+you can also use them in assigment
+``` c++
+uint x = 0x05;
+x &= 0x03;
+Print(x);  // 00000001 
+``` 
+## Lambda functions in Duck
+Lambda functions are inicialzed by @ symbol before, indicating start of the Lambda fucntion. We can use func type to store function refrence.
+``` c++
+lambda
+{
+   // standard declaration
+   int foo ()
+   {
+     return 5;
+   }
+
+   // Lambda function with retrun
+   func f =  @ int (){return 5;};
+   f();
+   
+   // Lambda function takes in references to resources from outside of thay are needed.
+   func f2 = @ (){ Print( f() ); };
+   f2(); // prints 5
+}
+``` 
+
+
+
 
 
 
