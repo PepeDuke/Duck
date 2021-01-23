@@ -293,7 +293,7 @@ Example
 ```
 
 ## Varibales in Duck
-all variables are lower case, no uppercase types exist, if in Duck you want to get type Max you do int.Max;
+all variable types are lower case, no uppercase types exist, if in Duck you want to get type Max you do int.Max;
 List of allowed types:
 ``` c++
 bool
@@ -322,6 +322,7 @@ big   // <--- that holds arbitrery size of int number --- should be used only fo
 ubig
 tiny  // <--- holds floating point number of 69 digits  --- should be used only for working with very small numbers to get precision
 utiny 
+markup // <--- hold tags tree for Mark Up  
 ```
 ## Constant varibales in Duck
 as cont sign we use the same as static
@@ -859,7 +860,52 @@ lambda
    f2(); // prints 5
 }
 ``` 
-
+## Threading control in Duck
+threading in Duck flows rules of eventual correctness but in some cases you need to force in order execution. we can declere scope that has $ prefix to force in order execution. the dollar symbol makes sort of sense as application that needs in order execution the most is Banking.
+``` c++
+Bank
+{
+    int cash = 5;
+   
+    AddCash(int amount)
+    {
+      cash += amount;
+    }
+    
+    int Withdraw (int amount)
+    {
+       if cash - amount >= 0
+       {
+           cash -= amount;
+           return cash;
+       }
+       else
+       {
+          int ammountLeft = cash;
+          cash = 0;
+          return ammountLeft;
+       }    
+    }
+    
+    TransferMoneyToBank(int amount, Bank bank )
+    {
+       gotAmount : Withdraw(amount);
+       bank.AddCash(gotAmount);
+    }
+    
+    Foo()
+    {
+       Bank A;
+       Bank B;
+       
+       ${ // <-- in order execution scope
+          A.TransferMoneyToBank(5,B); 
+          B.TransferMoneyToBank(10,A); //<-- in order to end up with Bank A having cash = 10 we might need in order execution
+       }
+       
+    }
+}
+``` 
 
 
 
