@@ -371,10 +371,10 @@ e = null;
 Print(e2);      // <-- e2 prints out null as the refrenced value is now null 
 ```
 
-you can pass Value Parenthood with : sign
+you can pass Value Parenthood with :: symbol
 ``` c++ 
 Example e();
-e2 : e;     // <-- now e2 is main parent of e value
+e2 :: e;     // <-- now e2 is main parent of e value
 e = null;
 Print(e2);  // <-- e2 is still valid
 ```
@@ -383,8 +383,39 @@ in context to varibales : sign is only for declering new variables
 e : 50;
 e : 5; // <-- not valid, variable e has already been declared
 ```
-this is mostly to keep consistency between = and : but also to let programers know the importance of the : sign.
-*This might be too annoying in the real world, so this restriction might be removed*
+if main parent is local variable that gets returned it passes as main parent reference giving you the ability to create factory functions
+
+``` c++ 
+Cake
+{
+   int slices;
+
+   Eat()
+   {
+     if(slices <= 0)
+        Print("cake has been eaten");
+     else
+        slices--;
+   }
+}
+
+CakeFactory
+@{
+       MakeCake()
+       {
+           Cake c();
+           c.slices = 2;
+           return c;
+       }
+}
+
+cake : CakeFactory.MakeCake();
+cake.Eat();
+cake.Eat();
+cake.Eat(); // cake has been eaten
+```
+
+
 ##  Collections in Duck
 in duck dynamic collection (in C# List, in C++ Vector) and dynamic array are one and the same and compiler decides what is the faster approach, as functionaly are almost equivalent. sumularly to JavaScript or Python.
 
@@ -906,8 +937,5 @@ Bank
     }
 }
 ``` 
-
-
-
 
 
