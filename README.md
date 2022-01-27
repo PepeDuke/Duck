@@ -1,20 +1,20 @@
 # Duck
-Duck is programming language, focusing on speed and abstraction, without care about compile time. Main feature of using duck is async and sync design is resolved by the compiler with full thread safety.
+Duck is programming language, focusing on speed and abstraction, without care about compile time. Main feature of using Duck is async and sync design is resolved by the compiler with full thread safety.
 # Philosophy
-there are many languages each great in there own way, so the only reason for making new language is to do something revolutionary. as CPUs have more and more cores over time there is not many reasons to make sigle threaded applications, async programing can be ok but from time to time you run into race conditions, thread overlaps or just additional code to stop your threds from fighting over resources. Duck is here to save the day. As many things are inherently async: some I/O operations, code that takes too long to execute, or any network oprations. Duck solves for all of this in compile time.
+There are many languages each great in there own way, the only reason nowadays for making new language is to do something revolutionary. As CPUs have more and more cores over time there is not many reasons to make single threaded applications, async programing can be ok but from time to time you run into race conditions, concurrency problems or just additional code to stop your threds from fighting over resources. Duck is here to save the day. As many things are inherently async: some I/O operations, code that takes too long to execute, or any network oprations. Duck solves for all of this in compile time.
 
 No garbage collector, there should not be generated any garbage in the first place. Duck has single parent policie. At witch the owning parent destroys it's children or the parent gets destroyed, the resource gets removed. But until then others can reference this resource allowing for having same resource with multiple references.
 
-Minor features: Some optimalization techniques should be done by the compiler it self, like bool stacking into bit flags. Support for full reflection.
+Minor features: Some optimalization techniques should be done by the compiler it self, like bool stacking into bit flags. Support for full reflection. Build in marckup tags.
 
-Duck syntax is based on my personal preferences and my imagination of the perfect syntax. i like type safety as in my opinion it makes code simpler to read especialy as you geting return from fucntion/method and you have to mouse over to see what it actualy returning, with type safety you see it right there. But on the other hand i'm not fan of verbose syntax, as it makes the whole code unnecessarily too large.
+Duck syntax is based on my personal preferences and my imagination of the perfect syntax. I like type safety as in my opinion it makes code simpler to read especialy as you geting return from functions/method and you have to mouse over to see what it actualy returning, with type safety you see it right there. But on the other hand i'm not fan of verbose syntax, as it makes the whole code unnecessarily too large.
 
-Duck, as the name implies, also supports Duck typing, but instead of resolving in runtime by the interpreter, it is resolved by the compiler and simply returns error message in runtime if it's printed out or just omitts this execution from final compiled code if function decleration does not exist.
+Duck, as the name implies, also supports Duck typing, even thou this goes agenst the strong type nature of the Language, we are using middle ground Dack typing simular to TypeScript. Instead of resolving in runtime by the interpreter, it is resolved by the compiler and simply returns error message in runtime if it's printed out or just omitts this execution from final compiled code if function decleration does not exist.
 
 Duck forces type safety for fucntions as thay are the worse offenders in automatic return type or automatic arguments. i'm looking at you JavaScript. this can be bypassed to a certen extend with duck typing.
 
 # Project status
-Current status: design stage
+Current status: **design stage**
 
 stages
 1. design stage - make sure the syntax is consistent, complete and simple to use
@@ -30,6 +30,16 @@ stages
 # Syntax
 *note that this is not final syntax and it is subject to change*
 
+Duck is **case sensitive**.                  
+Duck is using for it's files the **.dk** extension.
+
+Example of a Hello world program in Duck:
+``` c++
+Main () {
+ Print("Hello world");
+}
+``` 
+## Comments in Duck
 Comments are the same as in c# or c++ as there is no need to change time proven standards.
 ``` c++
 // inline comment
@@ -37,9 +47,6 @@ Comments are the same as in c# or c++ as there is no need to change time proven 
 * multi-line comment
 */
 ```
-Duck is case sensitive.                  
-Duck is using for it's files the .dk extension.
-
 
 ## Class definitions in Duck
 Duck has struct/class combined into one type called container.
@@ -52,7 +59,8 @@ Example // <-- this is declaration of container
 
 Functions/methods in Duck. In Duck we call them functions. The difference from container is thay must use () argument space to be declared. () can't be ommited as it is deterministic factor for functions.
 ``` c++
-Foo() { // <-- this is declaration of function
+Foo()  // <-- this is declaration of function
+{
 
 }
 ```
@@ -75,14 +83,14 @@ Example
   }
 }
 ```
-funtion argument and return have to be type safe
+function argument and return have to be type safe
 ``` c++
 int Foo(int i) <-- argument int i
 {
     return i*2;
 } 
 ```
-Duck does not support Automatic type for return or arguments as it can lead to confusion, need for TypeOf functions and additional checking in runtime but on the other hand as it suports duck typing with the obj type and it can be utilized to bypass some of the strong type nature of functions.
+Duck does not support Automatic type for return or arguments
 ## Access protection in duck
 In real world application access protection is around 50%/50% between public and private members (if we ignore protected), meaning there is no right answer to this age old question what the default protection access should be. But because container are struct/class and we believe all developers are trained professionals.
 
@@ -163,14 +171,14 @@ Example ex();
 ex.Foo();  // <-- this call should not work as Foo is private, so what will happen this line simply will be omitted from the compiled code and won't be executed
 // but it is not considered as error
 ```
-any container can be casted to base type obj
+any container can be casted to base type any
 ``` c++
-obj ex = Example();
+any ex = Example();
 ex.Foo();
 ```
 this can be used to achieve polymorphism for any container no matter what is inheritance status is
 ``` c++
-TryToQuack(obj duck)
+TryToQuack(any duck)
 {
    duck.Quack();
 }
@@ -193,7 +201,7 @@ TryToQuack(person);    // it qucked so it also duck
 ```
 There might be cases where you actually want test if function can be called successfully or not. we can check with .?  operator
 ``` c++
-TryToQuack(obj duck)
+TryToQuack(any duck)
 {
    if duck.?Quack() // this does not call Quack(). It just returns true if duck can Quack, if can't it returns false
       duck.Quack();
@@ -296,6 +304,7 @@ Example
 all variable types are lower case, no uppercase types exist, if in Duck you want to get type Max you do int.Max;
 List of allowed types:
 ``` c++
+any
 bool
 byte
 short
