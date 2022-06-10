@@ -9,9 +9,9 @@ Minor features: Some optimization techniques should be done by the compiler itse
 
 Duck syntax is based on my personal preferences and my imagination of the perfect syntax. I like type safety as in my opinion it makes code simpler to read especially as you get return from functions/method and you have to mouse over to see what it is actually returning, with type safety you see it right there. But on the other hand i'm not fan of verbose syntax, as it makes the whole code unnecessarily too large.
 
-Duck, as the name implies, also supports Duck typing, even though this goes against the strong type nature of the Language, we are using middle ground Dack typing similar to TypeScript. Instead of resolving in runtime by the interpreter, it is resolved by the compiler and simply returns an error message in runtime if it's printed out or just omites this execution from final compiled code if function declaration does not exist.
+Duck, as the name implies, also supports Duck typing, even though this goes against the strong type nature of the Language, we are using middle ground Dack typing similar to TypeScript. Instead of resolving in runtime by the interpreter, it is resolved by the compiler and simply returns an error message in runtime if it's printed out or just omits this execution from final compiled code if function declaration does not exist.
 
-Duck forces type safety for functions as they are the whorse offenders in automatic return type or automatic arguments. I'm looking at you JavaScript. this can be bypassed to a certain extend with duck typing.
+Duck forces type safety for functions as they are the worse offenders in automatic return type or automatic arguments. I'm looking at you JavaScript. this can be bypassed to a certain extend with duck typing.
 
 # Project status
 Current status: **design stage**
@@ -20,8 +20,8 @@ stages
 1. design stage - make sure the syntax is consistent, complete and simple to use
 2. c++ bootstrap - write the compiler first in c++ basic lexer/parser might use lex/Yacc or LLVM
 3. write compiler in Duck - use c++ compiler to compile duck compiler so the final compiler is written in duck and does not depend on c++
-4. refactor Duck compilator - there will be some functions that are inefficient by the c++ bootstrap and might need to be re-done in assembly.
-5. compile optimalization - make sure the compiler implements all applicable optimization techniques.
+4. refactor Duck compiler - there will be some functions that are inefficient by the c++ bootstrap and might need to be re-done in assembly.
+5. compile optimization - make sure the compiler implements all applicable optimization techniques.
 6. feature full compiler - is the syntax feature full, disk operations, memory operations, network operations and graphics.
 7. integration for debugging and IDEs - pre-compiler and pdb file emitter might be needed.
 8. implement IR translation for multiple platforms - this one's a doozy.
@@ -115,7 +115,7 @@ Setting Access protection in Duck. We use a non-verbose way to specify what the 
 
 } 
 ```
-The protected sign +- or -+ is different from the UML model's #, as it seems to me that # sign in this case makes no sense at all. Also # in Duck is used differently. The +- has been chosen as protected access is logicly something between public and private.
+The protected sign +- or -+ is different from the UML model's #, as it seems to me that # sign in this case makes no sense at all. Also # in Duck is used differently. The +- has been chosen as protected access is logically something between public and private.
 
 ## Function calling in duck
 Duck is object-oriented language and so we can use object calls.
@@ -139,7 +139,7 @@ Example ex()           // <-- create variable ex that is type Example, expressio
 ```
 
 ## Program start in Duck
-each program start from main function that has to be declered outide of any container.
+each program start from main function that has to be declared outside of any container.
 ``` c++
 Main (string [] args) 
 {
@@ -206,8 +206,8 @@ Person
 Duck duck()
 Person person()
 
-TryToQuack(duck)      // it qucked so it is duck
-TryToQuack(person)    // it qucked so it also duck
+TryToQuack(duck)      // it quacked so it is duck
+TryToQuack(person)    // it quacked so it also duck
 ```
 There might be cases where you actually want test if function can be called successfully or not. we can check with .?  operator
 ``` c++
@@ -255,21 +255,21 @@ we can chain as many as we want together
 Example #{}{}#{}#{}{} // <-- still valid code
 ```
 
-if multiple containers have the same name and parent container thay are considered the same container. 
+if multiple containers have the same name and parent container they are considered the same container. 
 ``` c++
-Example // <--  non-static  container
+Example // <--  non-static container
 {  
 
-    Foo () // <-- not accessebele by  Example.Foo() 
+    Foo () // <-- not accessible by  Example.Foo() 
     {
 
     }
 }
 
-Example  // <--  only-static container any variables or fucntions in here are static
+Example  // <--  only-static container any variables or functions in here are static
 #{ // <-- static indicator #
 
-    Foo () // <-- accessebele by  Example.Foo() 
+    Foo () // <-- accessible by Example.Foo() 
     {
 
     }
@@ -279,13 +279,13 @@ So above and below examples are equivalent
 ``` c++
 Example // <--  non-static  container
 {  
-    Foo () // <-- not accessebele by  Example.Foo() 
+    Foo () // <-- not accessible by Example.Foo() 
     {
 
     }
 }
-#{    // <--  only-static container any variables or fucntions in here are static
-    Foo () // <-- accessebele by  Example.Foo() 
+#{    // <--  only-static container any variables or functions in here are static
+    Foo () // <-- accessible by Example.Foo() 
     {
 
     }
@@ -336,21 +336,21 @@ int64
 date
 time
 datetime
-// speciall types are
-big   // <--- that holds arbitrery size of int number --- should be used only for working with very large numbers
+// special types are
+big   // <--- that holds arbitrary size of int number --- should be used only for working with very large numbers
 ubig
 tiny  // <--- holds floating point number of 69 digits  --- should be used only for working with very small numbers to get precision
 utiny 
 markup // <--- hold tags tree for Mark Up  
 ```
-## Constant varibales in Duck
+## Constant variables in Duck
 as cont sign we use the same as static
 ``` c++
-#int age  // <- this is constant value, so it can't be chagnged
+#int age  // <- this is constant value, so it can't be changed
 ```
 
 ## Automatic type declaration in Duck
-if you want to let the compiler decide what the type is. i have found that var, let, auto or whatever you call this type is only used to tell the compiler that infact is his job to decide, insted we cose non-verbose way to tell this compiler with : sign.
+if you want to let the compiler decide what the type is. i have found that var, let, auto or whatever you call this type is only used to tell the compiler that in fact is his job to decide, instead we choose non-verbose way to tell this compiler with : sign.
 ``` c++ 
 age : 54  // <- this will be compiled as int age = 54 
 ```
@@ -363,7 +363,7 @@ ex = null
 ex.Foo()      // <-- not valid call, ex container no longer exists
 ```
 
-we can check if varibale is null by
+we can check if variable is null by
 ``` c++
 if ex
   ex.Foo()
@@ -380,14 +380,14 @@ Owner o()
 ?o.ex.Foo()  // <-- in this case it checks not null for ex and for p containers
 ```
 ## object references in Duck
-In Duck there is only one Owner of the Value called parent and but this value can still have many more refrences.
+In Duck there is only one Owner of the Value called parent and but this value can still have many more references.
 ``` c++ 
-Example{} // decleration
+Example{} // declaration
 
 Example e()
 Example e2 = e  // <-- holds now reference to e value but it is not it's parent
 e = null 
-Print(e2)       // <-- e2 prints out null as the refrenced value is now null 
+Print(e2)       // <-- e2 prints out null as the referenced value is now null 
 ```
 
 you can pass Value Parenthood with :: symbol
@@ -397,7 +397,7 @@ e2 :: e      // <-- now e2 is main parent of e value
 e = null
 Print(e2)   // <-- e2 is still valid
 ```
-in context to varibales : sign is only for declering new variables
+in context to variables : sign is only for declaring new variables
 ``` c++ 
 e : 50
 e : 5  // <-- not valid, variable e has already been declared
@@ -436,39 +436,39 @@ cake.Eat()  // cake has been eaten
 
 
 ##  Collections in Duck
-in duck dynamic collection (in C# List, in C++ Vector) and dynamic array are one and the same and compiler decides what is the faster approach, as functionaly are almost equivalent. sumularly to JavaScript or Python.
+in duck dynamic collection (in C# List, in C++ Vector) and dynamic array are one and the same and compiler decides what is the faster approach, as functionally are almost equivalent. similarly to JavaScript or Python.
 
 ``` c++ 
 int [50] s1  // <-- static array that holds 50 int values
 int [] s2    // <-- dynamic array can hold any number of elements, might be same as (in C# List, in C++ Vector) or dynamic array
 ```
-Other collection are sepert as they are functionaly different.
+Other collection are separate as they are functionally different.
 ``` c++
-int queue s1
-int stack s2
+int queue s1            // queue of for int type  - FIFO
+int stack s2            // stack of for int type  - LIFO 
 string, string pair s3  // <-- in c++ map,  in C# called dictionary, and honestly the best name would be KayPair, but pair must do as it is shorter and clearly says what it does 
 ```
-we can assign values by = and use { } quotes to insertet actual values.
+we can assign values by = and use { } quotes to insert actual values.
 ``` c++
 int []  s1 = {5,1,2} 
-int queue s2 = {2,3,4}   // <- 2 is first and 4 last in queue so if we deque we will get 2
+int queue s2 = {2,3,4}   // <- 2 is first and 4 last in queue so if we dequeue we will get 2
 int stack s3 = {2,3,4}   // <- 2 is first and 4 last in stack so if we pop we will get 4
-string, string pair s4 = {"name" : "Bob", "adress" : "Codesquare 5", "city": "New York"}
+string, string pair s4 = {"name" : "Bob", "address" : "Code square 5", "city": "New York"}
 ```
 pair has also case where you add only one type 
 ``` c++
-string pair s1 = {name: "Bob", adress : "Codesquare 5"} 
+string pair s1 = {name: "Bob", address : "Code square 5"} 
 Print(s1[name])  // <-- prints Bob
 ```
 this is similar to "string, string pair" in use cases but it is marginally faster.
 
 ## Automatic type collections in Duck
-as with varibales we use.
+as with variables we use.
 ``` c++
-s1 : {5,1,2}  // will be interepreted as int []  s1 = {5,1,2} 
-s2 : {"name" : "Bob", "adress" : "Codesquare 5"} // will be interpreted as pair
+s1 : {5,1,2}  // will be interpreted as int []  s1 = {5,1,2} 
+s2 : {"name" : "Bob", "address" : "Code square 5"} // will be interpreted as pair
 ```
-queue and stack has no automatic type decleration.
+queue and stack has no automatic type declaration.
 ## Working with collections in Duck
 in Duck we use non-verbose way to work with collections
 ``` c++
@@ -485,12 +485,12 @@ working with pair collection
 string, string pair s 
 s += "name" : "Bob"  // add pair Key: "name", Value: "Bob" 
 s["name"] = "Tom"    // change Value of Key "name" to "Tom" 
-s++                  // tries to pattern mutch key (simular to ms excel for example month) if it fails add 1 to last key and sets value to none
+s++                  // tries to pattern much key (similar to ms excel for example month) if it fails add 1 to last key and sets value to none
 s--                  // removes at last added key
 s -= ["name"]        // remove pair Key: "name", Value: "Tom"
 s.Clear()            // removes all elements in collection
 ```
-if we need to know the index of add or remove we can add your assignment into () brackets then this expression will return an appropriate return type to the expresion
+if we need to know the index of add or remove we can add your assignment into () brackets then this expression will return an appropriate return type to the expression
 ``` c++
 int [] s = {1,1} 
 int index = (s += 4) 
@@ -498,7 +498,7 @@ Print(index)  // prints 3
 ```
 
 ## Bounds checking in Duck
-if you need to check if value is valid you can use IsValid() fucntion or use shorten if check
+if you need to check if value is valid you can use IsValid() function or use shorten if check
 ``` c++
 int [5] s 
 if IsValid(s[6]) // this checks bound of the array s
@@ -562,7 +562,7 @@ for loop : loops  // <-- for each loop in loops
 {     
   loop.foo()
 }
-for -loop : loops {      // <-- reverse for each loop in loops  -- prefered if removing elements
+for -loop : loops {      // <-- reverse for each loop in loops  -- preferred if removing elements
   if loop.PendingDestroy // if some variable is true
    loops -= loop        // <-- removes this element
 }
@@ -841,7 +841,7 @@ IrrationalNumbers : float
  SqRoot2: 1.4142135623, 
 }
 
-Incemets : float #@{
+Increments : float #@{
  I1,I2,I3,I4 // the default values for float starts at 0 and increment by 0.5
 } // I1 = 0, I2 = 0.5, I3 = 1.0, I4 = 1.5
 ```
@@ -892,7 +892,7 @@ Person
   -int age = 20 // private variable age
 }
 ={
-  Age: age = value // Set age variable with value on the right handside of =
+  Age: age = value // Set age variable with value on the right hand side of =
 }
 
 Person p
@@ -901,7 +901,7 @@ Print(p.Age)     // prints 25
 ``` 
 
 ## Bitwise and shift operators in Duck
-Similar to c++ or C#, Duck is using standart ~, <<, >>, &, |, and ^ symbols for work with bits.
+Similar to c++ or C#, Duck is using standard ~, <<, >>, &, |, and ^ symbols for work with bits.
 ``` c++
 uint x = 0x05		// 00000101
 Print(x & 0x03) 	// 00000001  <-- Bitwise AND   
@@ -932,14 +932,15 @@ lambda
    func f =  @ int (){
     return 5
    }
-   f()
    
-   // Lambda function takes in references to resources from outside of thay are needed.
+   // Lambda function takes in references to resources from outside if they are needed.
    func f2 = @ (){
      Print(f()) 
    }
-   f2() // prints 5
 }
+
+lambda l
+l.f2()  // prints 5
 ``` 
 ## Threading control in Duck
 threading in Duck flows rules of eventual correctness but in some cases you need to force in order execution. we can declare scope that has a $ prefix to force in order execution. The dollar symbol makes sort of sense as the application that needs in order execution the most is Banking.
