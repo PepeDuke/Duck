@@ -280,6 +280,7 @@ Example // <--  non-static  container
 all variable types are lower case, no uppercase types exist, if in Duck you want to get type Max you do int.Max 
 List of allowed types:
 ``` c++
+void
 bool
 byte
 short
@@ -287,7 +288,8 @@ int
 long
 float
 double
-string
+name     // string 1 byte UTF-8
+string   // string 2 byte TChar
 char
 uint
 uint8
@@ -298,15 +300,18 @@ int8
 int16
 int32
 int64
+u1-64   // example u2, 2 byte unsigned integer
+i1-64   // example i8, 8 byte signed integer
 date
 time
 datetime
 // special types are
-big   // <--- that holds arbitrary size of int number --- should be used only for working with very large numbers
+big   // <-- that holds arbitrary size of int number --- should be used only for working with very large numbers
 ubig
-tiny  // <--- holds floating point number of 69 digits  --- should be used only for working with very small numbers to get precision
+tiny  // <-- holds floating point number of 69 digits  --- should be used only for working with very small numbers to get precision
 utiny 
-markup // <--- hold tags tree for Mark Up  
+element // <-- single element of a tags tree
+markup // <-- hold tags tree for Mark Up  
 func // <-- holds function
 ```
 ## Constant variables in Duck
@@ -315,22 +320,35 @@ as cont sign we use the same as static
 #int age  // <- this is constant value, so it can't be changed
 ```
 
-## Compile time execution in Duck
-any function call that have # before it, will get compiled into it's return at compile time (this is also known as baking). It can be very useful for optimalizations.
+## Functions in duck
+void type can be omitted or specified
 ``` c++
-Example 
-{
-    int Foo (int i) 
+Example
+{ 
+    Foo()
     {
-            return (2^4)*i + (i > 0)? Foo(i-1) | 0
+
     }
-    int Foo2 ()
+
+    void Foo2() // same as Foo
     {
-       int fooResult = #Foo(5) // <-- this gets replaced by whatever Result of this function is at compile time.
-       fooResult++
-       return fooResult
+
     }
 }
+
+```
+
+Argument refrence is declared with & symbol symular to C++
+``` c++
+Example
+{ 
+    int AddCount(int& Count)
+    {
+        Count++
+        return Count;
+    }
+}
+
 ```
 
 ## Automatic type declaration in Duck
@@ -396,6 +414,7 @@ Example e3 = e2
 Example e4 = {val : 5}
 
 // Heap allocation
+Example e3 : e2
 Example e4 : {val : 5}
 
 // Depends on the allocation of e2
@@ -416,18 +435,18 @@ In Duck there is only one owner of the value called parent, but this value can s
 Example
 {} // declaration
 
-Example e()
-Example e2 = e  // <-- holds now reference to e value but it is not it's parent
+Example e : Example()
+e2 : e  // <-- holds now reference to e value but it is not it's parent
 e = null 
-Print(e2)       // <-- e2 prints out null as the referenced value is now null 
+Print(e2 == null)       // <-- e2 prints out true as the referenced value is now null 
 ```
 
 you can pass value parenthood with :: symbol
 ``` c++ 
-Example e()
+Example e : Example()
 e2 :: e      // <-- now e2 is main parent of e value
 e = null
-Print(e2)   // <-- e2 is still valid
+Print(e2 == null)   // <-- e2 prints out false as it is still valid
 ```
 
 if main parent is local variable that gets returned it passes as main parent reference giving you the ability to create factory functions
@@ -450,7 +469,7 @@ CakeFactory
 @{
        Cake MakeCake()
        {
-           Cake c()
+           Cake c() // Stack allocation
            c.slices = 2
            return c
        }
@@ -461,6 +480,97 @@ cake.Eat()
 cake.Eat()
 cake.Eat()  // cake has been eaten
 ```
+
+when heap allocated
+``` c++ 
+Cake
+{
+   int slices
+
+   Eat()
+   {
+     if(slices <= 0)
+        Print("cake has been eaten")
+     else
+        slices--
+   }
+}
+
+CakeFactory
+@{
+       Cake: MakeCake(bool retMain)
+       {
+           Cake c : Cake() // Heap allocation
+           c.slices = 2
+           if retMain
+             return ::c // returns ownership
+           else
+             return c  // return reference
+       }
+}
+
+cake : CakeFactory.MakeCake(true)
+cake.Eat()
+cake.Eat()
+cake.Eat()  // cake has been eaten
+
+//
+cake2 : CakeFactory.MakeCake(false) // returns null as the reference to c in the MakeCake function gets freed
+cake2.Eat() // <-- Error null reference
+
+```
+##  Pointers in Duck
+Heap allocations are inherently pointer and do have size or 8 bytes
+
+``` c++ 
+Example
+{}
+
+Example e : Example() // pointer to allocated Example
+```
+
+empty ponter can be done with out calling the construtor
+``` c++ 
+Example
+{}
+
+Example e : Example // pointer to Example type with the value of null
+Print(e == null) // prints true
+```
+
+Any move operation done to the pointers is interpreted as unsafe and the pointer will no longer be tracked by the main owner policy.
+``` c++ 
+Kid
+{
+    Foo()
+    {
+
+    }
+}
+
+Family
+{
+    Kid bob : Kid
+    Kid rob : Kid
+
+    Family()
+    {
+        bob() // calling constructor on null pointer will allocate it
+        rob()
+    }
+}
+
+Family e : Family()
+
+(e.bob + 1).Foo() // "safe" <-- Foo from rob
+e.bob += 1 // unsafe <-- will actually create memory leek 
+e.rob = null
+
+Print(e.bob == null) // prints false, as it is no longer tracted it will not get set to null
+
+```
+
+
 ##  Constructors/Destructors in Duck
 In Game environment you usually have functions like Start/Spawn, Tick/Update, Destroy or variants on this, that are actually separated from Constructors and Destructors. this relates to the life cycle of this object, where destructor is final and you want to destroy it only at the end of the frame, for start/Spawn you might want to do something before the consturctor is called
 
@@ -484,7 +594,7 @@ Duck offers option to deal with Constructor issue, using partial inicialization:
 ``` c++ 
 Example
 {
-    -Example() // <-- partial constructor that gets called before the regular one, but it can be set after, this constructor gets called regardles of what is called in other constructors and in childrens, to complite 
+    -Example() // <-- partial constructor that gets called before the regular one, but it can be set after, this constructor gets called regardless of what is called in other constructors and in childrens
     {
         Print("Hello")
     }
@@ -1263,7 +1373,7 @@ Guy
     {
         return {
             <Guy Name=name Age=age>
-            "name age" // we do things differently here from XML values have to be declared as literals or any supported type like string, int and so on, the resoulting value variable will have that type. escaping is done using the \ 
+            "name age" // we do things differently here from XML values have to be declared as literals or any supported type like string, int and so on, the resoulting value variable will have that type. escaping is done using the \ character
             <Guy/>
         }
     }
@@ -1287,3 +1397,81 @@ Example
 }
 
 ``` 
+## Compile time execution in Duck
+any function call that have # before it, will get compiled into it's return at compile time (this is also known as baking). It can be very useful for optimalizations.
+``` c++
+Example 
+{
+    int Foo (int i) 
+    {
+            return (2^4)*i + (i > 0)? Foo(i-1) | 0
+    }
+    int Foo2 ()
+    {
+       int fooResult = #Foo(5) // <-- this gets replaced by whatever Result of this function is at compile time.
+       fooResult++
+       return fooResult
+    }
+}
+```
+
+## Macros in Duck
+macros in C++ are extremely powerful tool but also completely impossible to debug and read, Duck solves this by functions that gets unwraped at compile time, functions has to be marked with ~ symbol representing aproximation. in this case IDE should show ghost of the unwraped code.
+
+``` c++
+Example 
+#{  // Must be in static block
+
+    ~Foo() // anything is allowed. syntax correction gets checked only when used
+    {
+      case 0:  
+        Print("Hello world")
+        break
+    }
+
+
+    Foo2()
+    {
+        int index = 0
+        Switch (index)
+        {
+            Foo()
+        }
+    }
+
+}
+```
+
+## Definitions in Duck
+defined constants can be used only and only by the #if, this is to prevent C++ style defines without type
+
+``` c++
+
+#define WIN_64 true
+
+#if WIN_64
+{
+    Example 
+    #{
+        Foo()
+        {
+            Print("x64")
+        }
+    }
+}
+#else
+{
+    Example 
+    #{
+        Foo()
+        {
+            Print("x32")
+        }
+    }
+}
+
+
+```
+
+## Life cycle in Duck
+
