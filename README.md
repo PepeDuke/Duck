@@ -1151,7 +1151,7 @@ Print(x)  	// 00000001
 ## Lambda functions in Duck
 Lambda functions are initialized by @ symbol before, indicating the start of the Lambda function. We can use func type to store function reference.
 ``` c++
-lambda
+Lambda
 {
    // standard declaration
    int foo ()
@@ -1170,7 +1170,7 @@ lambda
    }
 }
 
-lambda l
+Lambda l()
 l.f2()  // prints 5
 ``` 
 ## Threading control in Duck
@@ -1227,7 +1227,7 @@ Example
 {
     Foo()
     {
-        Print(this.Example.GetName()+ "->" + this.Example.Foo.GetName()+"()"); 
+        Print(this.Example.GetName()+ "->" + this.Example.Foo.GetName()+"()")
     }
 }
 
@@ -1263,7 +1263,7 @@ Example
 
         if tags.Len > 0 && tags[0] == Visibility.VisibleNonEdditible
         {
-            Print("We can see the money");
+            Print("We can see the money")
         }
     }
 }
@@ -1279,13 +1279,13 @@ Example
 {
     int Foo()
     {
-        return 3;
+        return 3
     }
 }
 #{
     int Foo2()
     {
-        return 5;
+        return 5
     }
 }
 T{ // <- Testing block
@@ -1474,4 +1474,4 @@ defined constants can be used only and only by the #if, this is to prevent C++ s
 ```
 
 ## Life cycle in Duck
-
+Common program structure in C++ is to have some kind of Start function that allocates stuff on heep that run for the duration of the program life time
