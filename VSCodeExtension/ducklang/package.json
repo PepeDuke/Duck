@@ -1,0 +1,33 @@
+{
+    "name": "ducklang",
+    "displayName": "DuckLang",
+    "description": "Extension for the Duck language, for files with the .dk extension.",
+    "version": "0.0.1",
+    "engines": {
+        "vscode": "^1.69.0"
+    },
+    "categories": [
+        "Snippets"
+    ],
+    "contributes": {
+        "snippets": [
+            {
+                "language": "duck",
+                "path": "./snippets/snippets.code-snippets"
+            }
+        ],
+        "languages": [
+            {
+              "id": "dk",
+              "extensions": [".dk"]
+            }
+          ],
+        "grammars": [
+            {
+                "language": "duck",
+                "scopeName": "source.dk",
+                "path": "./syntaxes/dk.tmGrammar.json"
+            }
+        ]
+    }
+}

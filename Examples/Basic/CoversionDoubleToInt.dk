@@ -1,0 +1,34 @@
+/*
+    Showcase of basic type conversion in Duck 
+*/
+
+
+// c++  Conversion From int to double
+/*
+    int main() {
+        int num_int;
+        double num_double = 9.99;
+
+        // implicit conversion
+        // assigning a double value to an int variable
+        num_int = num_double;
+
+        cout << "num_int = " << num_int << endl;
+        cout << "num_double = " << num_double << endl;
+
+        return 0;
+    }
+*/
+
+
+Main ()
+{ 
+    // numDouble : 9.99 would assume it is float, so we specify the type 
+    double numDouble = 9.99
+    int numInt
+    // implicit conversion is floor
+    numInt = numDouble
+    
+    Print("num_int =" + numInt)
+    Print("num_double =" + numDouble)
+}

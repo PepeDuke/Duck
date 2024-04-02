@@ -1,31 +1,35 @@
 # Duck
-Duck is a programming language, focusing on speed and abstraction, without care about compile time. Main feature of using Duck is async and sync design is resolved by the compiler with full thread safety.
+Duck is a programming language, focusing on speed and abstraction, designed mainly for game development. Duck is statically typed and compiled language. Main feature of using Duck is async and sync design is resolved by the compiler with full thread safety.
 # Philosophy
 There are many languages, each great in their own way, the only reason nowadays for making a new language is to do something revolutionary. As CPUs have more and more cores over time there are not many reasons to make single threaded applications, async programming can be ok but from time to time you run into race conditions, concurrency problems or just additional code to stop your threads from fighting over resources. Duck is here to save the day. As many things are inherently async: some I/O operations, code that takes too long to execute, or any network operations. Duck solves for all of this in compile time.
 
 No garbage collector, there should not be generated any garbage in the first place. Duck has a single parent policy. At which the owning parent destroys its children or the parent gets destroyed, the resource gets removed. But until then others can reference this resource allowing for having the same resource with multiple references.
 
-Minor features: Some optimization techniques should be done by the compiler itself, like bool stacking into bit flags. Support for full reflection. Build in markup tags.
+Support for reflection that can be then used while building game engine
 
+Build in markup tags for building UI/UX
+
+Testing included as core part of the language
+
+Basic data collection types like strings/arrays/maps and so on, are core part of the language. This is firstly that we don't have to create our own or use something like std:: in C++. Secondly this helps duck create a multithreading specific for collections.
+
+Duck forces type safety for functions as they are the worse offenders in automatic return type or automatic arguments. I'm looking at you JavaScript.
+
+# Why this syntax?
 Duck syntax is based on my personal preferences and my imagination of the perfect syntax. I like type safety as in my opinion it makes code simpler to read especially as you get return from functions/method and you have to mouse over to see what it is actually returning, with type safety you see it right there. But on the other hand i'm not fan of verbose syntax, as it makes the whole code unnecessarily too large.
-
-Duck, as the name implies, also supports Duck typing, even though this goes against the strong type nature of the Language, we are using middle ground Dack typing similar to TypeScript. Instead of resolving in runtime by the interpreter, it is resolved by the compiler and simply returns an error message in runtime if it's printed out or just omits this execution from final compiled code if function declaration does not exist.
-
-Duck forces type safety for functions as they are the worse offenders in automatic return type or automatic arguments. I'm looking at you JavaScript. this can be bypassed to a certain extend with duck typing.
 
 # Project status
 Current status: **design stage**
 
 stages
 1. design stage - make sure the syntax is consistent, complete and simple to use
-2. c++ bootstrap - write the compiler first in c++ basic lexer/parser might use lex/Yacc or LLVM
-3. write compiler in Duck - use c++ compiler to compile duck compiler so the final compiler is written in duck and does not depend on c++
-4. refactor Duck compiler - there will be some functions that are inefficient by the c++ bootstrap and might need to be re-done in assembly.
+2. c++ bootstrap - write the compiler first in C++ basic lexer/parser, use LLVM
+3. write compiler in Duck - use C++ compiler to compile duck compiler so the final compiler is written in duck and does not depend on C++
+4. refactor Duck compiler - there will be some functions that are inefficient by the C++ bootstrap and might need to be re-done in assembly.
 5. compile optimization - make sure the compiler implements all applicable optimization techniques.
 6. feature full compiler - is the syntax feature full, disk operations, memory operations, network operations and graphics.
 7. integration for debugging and IDEs - pre-compiler and pdb file emitter might be needed.
-8. implement IR translation for multiple platforms - this one's a doozy.
-9. Something, something advertise Duck - Quack.
+8. Something, something advertise Duck - Quack.
 
 # Syntax
 *note that this is not final syntax and it is subject to change*
@@ -89,7 +93,7 @@ Example
 ```
 function argument and return have to be type safe
 ``` c++
-int Foo(int i) <-- argument int i
+int Foo(int i) // <-- argument int i
 {
     return i * 2
 } 
@@ -102,20 +106,39 @@ The default protection access is **public**.
 
 Setting Access protection in Duck. We use a non-verbose way to specify what the protection is, as it is not most of the time the focus of programers but more used for the IDE that shows what this object can access. so we use + - operators inspired by UML models as it seems to be the most straightforward way to say what protection is in use.
 ``` c++
--InternalFoo() // <--  private function
+-InternalFoo() // <--  protected function
 { 
 
-} 
-+-ChildFoo() // <-- protected function // or -+
-{   
-
-} 
+}
 +Foo() // <-- public function
 {
 
 } 
 ```
-The protected sign +- or -+ is different from the UML model's #, as it seems to me that # sign in this case makes no sense at all. Also # in Duck is used differently. The +- has been chosen as protected access is logically something between public and private.
+Duck does not have private members instead we use just protected, although C++ discourages the use of protected as it implies the use of inheritance might be true for C++ but not for Duck. while inheriting the common practice is to read the functionality, so there is not much of a reason to prevent the modification of the "internal state"
+
+If function has no protection access specified it will be taken as public
+``` c++
+-InternalFoo() // <--  protected function
+{ 
+
+}
+Foo() // <-- public function
+{
+
+} 
+```
+the protection access symbol can't have spaces
+``` c++
+-InternalFoo() // <--  protected function
+{ 
+
+}
+- InternalFoo2() // <-- Error not valid
+{
+
+} 
+```
 
 ## Function calling in duck
 Duck is object-oriented language and so we can use object calls.
@@ -139,7 +162,7 @@ Example ex()           // <-- create variable ex that is type Example, expressio
 ```
 
 ## Program start in Duck
-each program start from main function that has to be declared outside of any container.
+each program start from main function that has to be declared **outside of any container**.
 ``` c++
 Main (string [] args) 
 {
@@ -158,67 +181,12 @@ we can execute instructions just placed outside of containers inside file but we
 ``` c++
 // inside main.dk
 Main (string [] args) {
-  Exec("hello.dk")
+  Exec("hello.dk")  // <- Path to file
 }
 // inside hello.dk
  Print("Hello world")
 ``` 
 
-## Duck typing in Duck
-Duck supports Duck typing so it let's you call functions that are not accessible or do not exist inside the container
-``` c++
-Example 
-{  
-   -Foo() // same as before but now Foo is private
-   {  
-   }
-}
-Example ex() 
-ex.Foo()   // <-- this call should not work as Foo is private, so what will happen this line simply will be omitted from the compiled code and won't be executed
-// but it is not considered as error
-```
-any container can be casted to base type any
-``` c++
-any ex = Example()
-ex.Foo()
-```
-this can be used to achieve polymorphism for any container no matter what is inheritance status is
-``` c++
-TryToQuack(any duck)
-{
-   duck.Quack()
-}
-
-Duck 
-{
-  Quack(){
-   Print("Quack")
-  }
-}
-
-Person
-{
-  Quack(){
-   Print("oh yes young chap, i most definitely can quack /kwak/, you see")
-  }
-}
-
-Duck duck()
-Person person()
-
-TryToQuack(duck)      // it quacked so it is duck
-TryToQuack(person)    // it quacked so it also duck
-```
-There might be cases where you actually want test if function can be called successfully or not. we can check with .?  operator
-``` c++
-TryToQuack(any duck)
-{
-   if duck.?Quack() // this does not call Quack(). It just returns true if duck can Quack, if can't it returns false
-      duck.Quack()
-   else
-      Print("this "+ duck +" can't quack")
-}
-```
 ## Static calls in Duck
 We have chosen # to represent static meanings depending on context. we can define static Container by # before its body
 ``` c++
@@ -239,6 +207,8 @@ Example
 Example.Foo() // <-- static function call
 ```
 
+## Container blocks in Duck
+
 we can also chain static and non-static bodies of container to get object definition and static functions with the same name. This separation will hopefully make logical blocks, that programers can document and collaps as needed.
 ``` c++
 Example 
@@ -252,7 +222,21 @@ Example
 
 we can chain as many as we want together
 ``` c++
-Example #{}{}#{}#{}{} // <-- still valid code
+Example 
+#{}
+{}
+#{}
+#{}
+{} 
+// still valid code
+```
+
+container blocks can't be separated by space
+``` c++
+Example 
+#{}
+
+{}// error invalid container definition
 ```
 
 if multiple containers have the same name and parent container they are considered the same container. 
@@ -292,29 +276,10 @@ Example // <--  non-static  container
 }
 ```
 
-## Compile time execution in Duck
-any function call that have # before it, will get compiled into it's return at compile time (this is also known as baking). It can be very useful for optimalizations.
-``` c++
-Example 
-{
-    int Foo (int i) 
-    {
-            return (2^4)*i + (i > 0)? Foo(i-1) | 0
-    }
-    int Foo2 ()
-    {
-       int fooResult = #Foo(5) // <-- this gets replaced by whatever Result of this function is at compile time.
-       fooResult++
-       return fooResult
-    }
-}
-```
-
 ## Varibales in Duck
 all variable types are lower case, no uppercase types exist, if in Duck you want to get type Max you do int.Max 
 List of allowed types:
 ``` c++
-any
 bool
 byte
 short
@@ -342,11 +307,30 @@ ubig
 tiny  // <--- holds floating point number of 69 digits  --- should be used only for working with very small numbers to get precision
 utiny 
 markup // <--- hold tags tree for Mark Up  
+func // <-- holds function
 ```
 ## Constant variables in Duck
 as cont sign we use the same as static
 ``` c++
 #int age  // <- this is constant value, so it can't be changed
+```
+
+## Compile time execution in Duck
+any function call that have # before it, will get compiled into it's return at compile time (this is also known as baking). It can be very useful for optimalizations.
+``` c++
+Example 
+{
+    int Foo (int i) 
+    {
+            return (2^4)*i + (i > 0)? Foo(i-1) | 0
+    }
+    int Foo2 ()
+    {
+       int fooResult = #Foo(5) // <-- this gets replaced by whatever Result of this function is at compile time.
+       fooResult++
+       return fooResult
+    }
+}
 ```
 
 ## Automatic type declaration in Duck
@@ -377,12 +361,60 @@ Owner
 }
 
 Owner o()
-?o.ex.Foo()  // <-- in this case it checks not null for ex and for p containers
+?o.ex.Foo()  // <-- in this case it checks not null for ex and for o containers
 ```
-## object references in Duck
-In Duck there is only one Owner of the Value called parent and but this value can still have many more references.
+## Heap allocation in Duck
+
 ``` c++ 
-Example{} // declaration
+Example
+{
+    int val
+
+    Foo()
+    {
+    }
+} 
+
+// Stack allocation
+Example e = Example()
+Example e2()
+
+// Heap allocation
+Example e : Example()
+e2: Example()
+
+// Stack allocation
+int num = 5
+num2 : 5
+
+// Heap allocation
+int num : int
+num2 : int
+
+// Stack allocation
+Example e3 = e2
+Example e4 = {val : 5}
+
+// Heap allocation
+Example e4 : {val : 5}
+
+// Depends on the allocation of e2
+e3 : e2
+
+```
+For non-container values the Heap allocation is somewhat more difficult to use, we assume that these types are usually Stack allocated.
+
+as to have a Heap allocated int you have to do
+``` c++ 
+num2 : int 
+num2 = 5  // <- can't be done in single line
+```
+
+## Object references in Duck
+In Duck there is only one owner of the value called parent, but this value can still have more references.
+``` c++ 
+Example
+{} // declaration
 
 Example e()
 Example e2 = e  // <-- holds now reference to e value but it is not it's parent
@@ -390,18 +422,14 @@ e = null
 Print(e2)       // <-- e2 prints out null as the referenced value is now null 
 ```
 
-you can pass Value Parenthood with :: symbol
+you can pass value parenthood with :: symbol
 ``` c++ 
 Example e()
 e2 :: e      // <-- now e2 is main parent of e value
 e = null
 Print(e2)   // <-- e2 is still valid
 ```
-in context to variables : sign is only for declaring new variables
-``` c++ 
-e : 50
-e : 5  // <-- not valid, variable e has already been declared
-```
+
 if main parent is local variable that gets returned it passes as main parent reference giving you the ability to create factory functions
 
 ``` c++ 
@@ -420,7 +448,7 @@ Cake
 
 CakeFactory
 @{
-       MakeCake()
+       Cake MakeCake()
        {
            Cake c()
            c.slices = 2
@@ -433,14 +461,107 @@ cake.Eat()
 cake.Eat()
 cake.Eat()  // cake has been eaten
 ```
+##  Constructors/Destructors in Duck
+In Game environment you usually have functions like Start/Spawn, Tick/Update, Destroy or variants on this, that are actually separated from Constructors and Destructors. this relates to the life cycle of this object, where destructor is final and you want to destroy it only at the end of the frame, for start/Spawn you might want to do something before the consturctor is called
 
+``` c++ 
+Example
+{
+    Example() // <-- basic constructor
+    {
+
+    }
+
+    ~Example() // <-- basic destructor
+    {
+
+    }
+}
+
+```
+
+Duck offers option to deal with Constructor issue, using partial inicialization:
+``` c++ 
+Example
+{
+    -Example() // <-- partial constructor that gets called before the regular one, but it can be set after, this constructor gets called regardles of what is called in other constructors and in childrens, to complite 
+    {
+        Print("Hello")
+    }
+
+    Example() // <-- basic constructor
+    {
+        Print("World")
+    }
+}
+Example e() // <-- Prints 
+// Hello
+// World
+
+```
+
+Common issue is where we want to assign world to object that lives there
+``` c++ 
+Gun
+{
+    -Gun(World world) // <-- partial constructor -- possibly in parent game object/entity
+    {
+        Print("Hello")
+    }
+
+    Gun(int ammo) // <-- basic constructor
+    {
+        Print("World")
+    }
+
+    foo()
+    {
+
+    }
+}
+World w()
+Gun g(5)
+g.foo() // <-- error incomplete initialization
+g(w)// <-- Prints 
+// Hello
+// World
+
+// or
+Gun g(w,5) // <-- arguments create new composite constructor
+// <-- Prints 
+// Hello
+// World
+
+```
+
+Duck also let's you call the constructor again to reinicilaze if needed
+``` c++ 
+Example
+{
+    Example() // <-- basic constructor
+    {
+        Print("Hello World")
+    }
+
+    foo()
+    {
+        Print("Foo")
+    }
+}
+
+Example e() // <-- Prints Hello World
+g.foo() // <-- Prints Foo
+e() // <-- Prints Hello World
+
+
+```
 
 ##  Collections in Duck
-in duck dynamic collection (in C# List, in C++ Vector) and dynamic array are one and the same and compiler decides what is the faster approach, as functionally are almost equivalent. similarly to JavaScript or Python.
+collections may be static allocated on stack or dynamic allocated on heap.
 
 ``` c++ 
 int [50] s1  // <-- static array that holds 50 int values
-int [] s2    // <-- dynamic array can hold any number of elements, might be same as (in C# List, in C++ Vector) or dynamic array
+int [] s2    // <-- dynamic array can hold any number of elements, might be same as (in C# List, in C++ std::vector) or dynamic array
 ```
 Other collection are separate as they are functionally different.
 ``` c++
@@ -572,7 +693,7 @@ Duck omits type as for each value must be the same type, Duck allows for sequenc
 for i : 0..5 // <-- form  0 to 5 Inclusively, it executes loop body 6 times in total
 { 
 }
-for -i : 0..5 // <-- form  5 to 0 inclusively
+for i : 5..0 // <-- form  5 to 0 inclusively
 {
 }
 ```
@@ -691,9 +812,9 @@ Name // extending container Name with foo function
 Name // extending container Name with foo2 function that calls function foo that has been declared in file 1
 #{  
   	Foo2()
-{
-Foo()
-}
+    {
+        Foo()
+    }
 }
 ```
 ## Inheritance in Duck 
@@ -711,19 +832,19 @@ Cat : Animal  // Cat inherits Animal's public and protected members
 Cat cat()
 cat.Walk() // this calls Walk() declaration in Animal
 ```
-Overriding is not declared, Any protected or public function can be overridden, for most reasons there are not many reasons to forbid Overriding, generally if you override something you call the base function anyway and just add something before or after the base functionality. If you explicitly want to forbid something from being overriding it can be set to private.
+Overriding is not declared, Any protected or public function can be overridden. Vitual pointer gets generated depending if someone has overridden any function.
 ``` c++
 Animal
 {
-  Walk(){}
+    Walk(){}
 }
 
 Cat : Animal // Cat inherits Animal's public and protected members
 { 
-  Walk()
-{
-base.Walk() // this overrides Walk() declaration in Animal
-} 
+    Walk()
+    {
+        base.Walk() // this overrides Walk() declaration in Animal
+    } 
 }
 Cat cat()
 cat.Walk() // this calls Walk() declaration in Cat
@@ -748,16 +869,16 @@ Cat : Animal, Consumer
   }
 }
 ```
-Multiple inheritance gives the level of freedom that we want. Parent priority is from left to right, in case of overlap the left parent has priority. We don't not recommended overlapping parents. There is still a way to access functions from inside of the container but to the outside functions with lower priority are only accessible through reflection.
+Multiple inheritance gives the level of freedom that we want. Parent priority is from left to right, in case of overlap the left parent has priority. We do not recommend overlapping parents. There is still a way to access functions from inside of the container but to the outside functions with lower priority are only accessible through reflection.
 ``` c++
 Animal
 {
-  Walk(){}
+    Walk(){}
 }
 Human
 {
-   Walk(){}
-   Eat(){}
+    Walk(){}
+    Eat(){}
 }
 Cat : Animal, Human  // in this case priority is from left to right. if a function is already defined it simply can't be re-defined in a second parent.
 {
@@ -943,7 +1064,7 @@ lambda l
 l.f2()  // prints 5
 ``` 
 ## Threading control in Duck
-threading in Duck flows rules of eventual correctness but in some cases you need to force in order execution. we can declare scope that has a $ prefix to force in order execution. The dollar symbol makes sort of sense as the application that needs in order execution the most is Banking.
+threading in Duck flows rules of eventual correctness but in some cases you need to force in order execution. we can declare scope that has a $ prefix to force in order execution. The dollar symbol makes sort of sense as the application that needs in order execution the most is banking.
 ``` c++
 Bank
 {
@@ -987,4 +1108,182 @@ Bank
        
     }
 }
+``` 
+## Reflection system in Duck
+The main reason for reflection system in duck is to allow for the creation of Game Engine visualizations based on the code. the reflection system can be accessed using this keyword and the name of the container.
+
+``` c++
+Example
+{
+    Foo()
+    {
+        Print(this.Example.GetName()+ "->" + this.Example.Foo.GetName()+"()"); 
+    }
+}
+
+Example e()
+e.Foo() // Prints Example->Foo()
+
+``` 
+We can add custom data into the reflection system with [] Simular to C# 
+
+``` c++
+
+[args]   // fist we mark enum that we want to be used as part of the custom data
+Visibility : byte 
+#@{
+    Hidden, VisibleNonEdditible, VisibleEdditible
+}
+
+
+Example
+{
+    [VisibleNonEdditible]
+    int Money = 0
+
+    [Hidden]
+    AddCash(int money)
+    {
+        Money += money
+    }
+
+    CanWeSeeMoney()
+    {
+        byte [] tags = this.Example.Money.GetTags()
+
+        if tags.Len > 0 && tags[0] == Visibility.VisibleNonEdditible
+        {
+            Print("We can see the money");
+        }
+    }
+}
+
+``` 
+
+## Unit tests in Duck
+Unit test are part of the core code as Duck will use them it gage correctness and speed while optimizing the compiled code for multithreading, this is sort of to force users of Duck to make test as part of their workflow,
+Test block starts with the T Block, then testing functions are accessed using the T Container
+
+``` c++
+Example
+{
+    int Foo()
+    {
+        return 3;
+    }
+}
+#{
+    int Foo2()
+    {
+        return 5;
+    }
+}
+T{ // <- Testing block
+    Test1() // 
+    {
+        T.AreEqual(Example.Foo2(), 5)
+    }
+
+    Test2()
+    {
+        Example e()
+        T.IsTrue(e.Foo() == 3)
+    }
+}
+
+
+``` 
+
+## Markup in Duck
+Markup is based on XML style markup where we have single root node and elements of that node. Duck allows to use normal code along with markup to achieve similar capabilities to JSX in React or WPF, inside object block in container we define block using this keyword. root node can be set or omitted and is always the name of the container
+
+``` c++
+
+Example2
+{
+    string Name
+    int Age
+}
+
+
+Example
+{
+    this{
+    // <Example>
+        <Example2 Name="example" Age=5/>
+    // </Example>
+    }
+
+    Foo()
+    {
+        Print(this.Example2.Name + " " + this.Example2.Age) // we get access to the component using this and it has the same name as the container
+    }
+}
+
+
+``` 
+
+If we have multiple or uknowen number of childen elemnts we can check them using the GetChildren() function
+``` c++
+
+Guy
+{
+    string Name
+    int Age
+}
+
+Example
+{
+    this{
+    // <Example>
+        <Guy Name="bob" Age=18/>
+        <Guy Name="rob" Age=21/>
+    // </Example>
+    }
+
+    Foo()
+    {
+         Print(this.GetChildren().Len) // Prints 2
+         Print(this.Guy.Name) // <-- Error Component has duplicates
+         Print(this.Guy[0].Name) // Prints bob
+    }
+}
+``` 
+
+We might want to also generate the Components using functions
+``` c++
+Guy
+{
+    string Name
+    int Age
+}
+#
+{
+    markup GetGuyComponent(string name, int age)
+    {
+        return {
+            <Guy Name=name Age=age>
+            "name age" // we do things differently here from XML values have to be declared as literals or any supported type like string, int and so on, the resoulting value variable will have that type. escaping is done using the \ 
+            <Guy/>
+        }
+    }
+}
+
+
+Example
+{
+    this{
+    // <Example>
+        Guy.GetGuyComponent("bob",18)
+        Guy.GetGuyComponent("rob",21)
+    // </Example>
+    }
+
+    Foo()
+    {
+         Print(this.Guy[0].value) // Prints name age
+    }
+
+}
+
 ``` 
