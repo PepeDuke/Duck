@@ -41,9 +41,9 @@ Duck is using for it's files the **.dk** extension.
 
 Example of a Hello world program in Duck:
 ``` c++
-Main ()
+Main()
 {
- Print("Hello world")
+    Print("Hello world")
 }
 ``` 
 ## Comments in Duck
@@ -55,8 +55,11 @@ Comments are the same as in c# or c++ as there is no need to change proven stand
 */
 ```
 
-## termination in Duck
+## Termination in Duck
 Duck is using newline terminated expressions but in some cases ; are allowed.
+
+## Formatting in Duck
+Formatting is up to the user and the formatting in samples should not be taken as the law, if you prefer different formatting you can use it as long each expression is ended with new line or the } symbol
 
 ## Class definitions in Duck
 Duck has a struct/class combined into one type called container.
@@ -71,10 +74,20 @@ Example {
 }
 ```
 
+
 Functions/methods in Duck. In Duck we call them functions. The difference from containers is they must use () argument space to be declared. () can't be omitted as it is a deterministic factor for functions.
 ``` c++
 Foo()  // <-- this is declaration of function
 {
+
+}
+// or
+Foo () 
+{
+
+}
+// or
+Foo() {
 
 }
 ```
@@ -170,27 +183,27 @@ Example ex()           // <-- create variable ex that is type Example, expressio
 ## Program start in Duck
 each program start from main function that has to be declared **outside of any container**.
 ``` c++
-Main (string [] args) 
+Main(string [] args) 
 {
- Print("Hello world")
+    Print("Hello world")
 }
 ``` 
 *or*
 ``` c++
-Main () 
+Main() 
 {
- Print("Hello world")
+    Print("Hello world")
 }
 ``` 
 
 we can execute instructions just placed outside of containers inside file but we need to call the Exec function on the file as they do not run by default.
 ``` c++
 // inside main.dk
-Main (string [] args) {
-  Exec("hello.dk")  // <- Path to file
+Main(string [] args) {
+    Exec("hello.dk")  // <- Path to file
 }
 // inside hello.dk
- Print("Hello world")
+    Print("Hello world")
 ``` 
 
 ## Static calls in Duck
@@ -250,7 +263,7 @@ if multiple containers have the same name and parent container they are consider
 Example // <--  non-static container
 {  
 
-    Foo () // <-- not accessible by  Example.Foo() 
+    Foo() // <-- not accessible by  Example.Foo() 
     {
 
     }
@@ -259,7 +272,7 @@ Example // <--  non-static container
 Example  // <--  only-static container any variables or functions in here are static
 #{ // <-- static indicator #
 
-    Foo () // <-- accessible by Example.Foo() 
+    Foo() // <-- accessible by Example.Foo() 
     {
 
     }
@@ -269,13 +282,13 @@ So above and below examples are equivalent
 ``` c++
 Example // <--  non-static  container
 {  
-    Foo () // <-- not accessible by Example.Foo() 
+    Foo() // <-- not accessible by Example.Foo() 
     {
 
     }
 }
 #{    // <--  only-static container any variables or functions in here are static
-    Foo () // <-- accessible by Example.Foo() 
+    Foo() // <-- accessible by Example.Foo() 
     {
 
     }
@@ -473,7 +486,7 @@ Cake
 
    Eat()
    {
-     if(slices <= 0)
+     if slices <= 0
         Print("cake has been eaten")
      else
         slices--
@@ -504,7 +517,7 @@ Cake
 
    Eat()
    {
-     if(slices <= 0)
+     if slices <= 0
         Print("cake has been eaten")
      else
         slices--
@@ -988,11 +1001,11 @@ multiple Parents
 ``` c++
 Animal
 {
-  Walk(){}
+    Walk(){}
 }
 Consumer
 {
-  Eat(){}
+    Eat(){}
 }
 Cat : Animal, Consumer
 {
@@ -1051,24 +1064,25 @@ WantToUseFunctions
 #{
    UseFunctions(PredefinedFunctions interface)
    {
-    interface.Foo()
+        interface.Foo()
    }
 }
 
 SomethingElse {}      // to show that inheritance still works
 Duck : SomethingElse, PredefinedFunctions
 {
-   Foo()
-{
-Print("actual implementation")
-} 
-   Foo2()
-{
-Print("actual implementation")
-}
+    Foo()
+    {
+        Print("actual implementation")
+    } 
+
+    Foo2()
+    {
+        Print("actual implementation")
+    }
 }
 
-Duck d
+Duck d()
 WantToUseFunctions.UseFunctions(d)
 ```
 ## Duck typing in Duck
@@ -1160,12 +1174,13 @@ in Duck you can also make enums out of non-traditional values such as floats and
 ``` c++
 IrrationalNumbers : float
 #@{
- Pi: 3.141592653589,
- SqRoot2: 1.4142135623, 
+    Pi: 3.141592653589,
+    SqRoot2: 1.4142135623, 
 }
 
-Increments : float #@{
- I1,I2,I3,I4 // the default values for float starts at 0 and increment by 0.5
+Increments : float 
+#@{
+    I1,I2,I3,I4 // the default values for float starts at 0 and increment by 0.5
 } // I1 = 0, I2 = 0.5, I3 = 1.0, I4 = 1.5
 ```
 String enum also retains the Enum name when prints
@@ -1192,7 +1207,7 @@ Person
   Age: age              
 }
 
-Person p
+Person p()
 Print(p.Age)      // prints 20 
 Print(Person.age) // prints Person has no property Age
 // static block for age has not been defined
@@ -1218,7 +1233,7 @@ Person
   Age: age = value // Set age variable with value on the right hand side of =
 }
 
-Person p
+Person p()
 p.Age = 25
 Print(p.Age)     // prints 25 
 ``` 
@@ -1246,19 +1261,19 @@ Lambda functions are initialized by @ symbol before, indicating the start of the
 Lambda
 {
    // standard declaration
-   int foo ()
+   int foo()
    {
-     return 5
+        return 5
    }
 
    // Lambda function with return
-   func f =  @ int (){
-    return 5
+   func f =  @ int(){
+        return 5
    }
    
    // Lambda function takes in references to resources from outside if they are needed.
    func f2 = @ (){
-     Print(f()) 
+        Print(f()) 
    }
 }
 
@@ -1270,24 +1285,24 @@ threading in Duck flows rules of eventual correctness but in some cases you need
 ``` c++
 Bank
 {
-    int cash = 5
+    int Cash = 5
    
     AddCash(int amount)
     {
-      cash += amount
+      Cash += amount
     }
     
     int Withdraw (int amount)
     {
-       if cash - amount >= 0
+       if Cash - amount >= 0
        {
-           cash -= amount
-           return cash
+           Cash -= amount
+           return Cash
        }
        else
        {
-          int amountLeft = cash
-          cash = 0
+          int amountLeft = Cash
+          Cash = 0
           return amountLeft
        }    
     }
@@ -1494,11 +1509,11 @@ any function call that have # before it, will get compiled into it's return at c
 ``` c++
 Example 
 {
-    int Foo (int i) 
+    int Foo(int i) 
     {
         return (2^4)*i + (i > 0)? Foo(i-1) | 0
     }
-    int Foo2 ()
+    int Foo2()
     {
        int fooResult = #Foo(5) // <-- this gets replaced by whatever Result of this function is at compile time.
        fooResult++
@@ -1524,6 +1539,7 @@ Example
     Foo2()
     {
         int index = 0
+
         Switch (index)
         {
             Foo()
@@ -1635,7 +1651,7 @@ Example
     }
 }
 
-Main () 
+Main() 
 {
     [@Tick]
     while true
@@ -1659,7 +1675,7 @@ Example
     }
 }
 
-Main () 
+Main() 
 {
     [@Tick]
     while true
