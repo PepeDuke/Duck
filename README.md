@@ -13,6 +13,8 @@ Testing included as core part of the language
 
 Basic data collection types like strings/arrays/maps and so on, are core part of the language. This is firstly that we don't have to create our own or use something like std:: in C++. Secondly this helps duck create a multithreading specific for collections.
 
+Duck as the name suggest supports duck typing. Why have duck typing in statically typed language? To offer alternative to polymorphism where sometimes we have function that applies to large number of classes/structs but they have nothing else in common, we would be forced to use interfaces or events to append that functionality into our inheratence structure.
+
 Duck forces type safety for functions as they are the worse offenders in automatic return type or automatic arguments. I'm looking at you JavaScript.
 
 # Why this syntax?
@@ -61,6 +63,10 @@ Duck has a struct/class combined into one type called container.
 ``` c++
 Example // <-- this is declaration of container
 { 
+
+}
+// or
+Example { 
 
 }
 ```
@@ -313,6 +319,7 @@ utiny
 element // <-- single element of a tags tree
 markup // <-- hold tags tree for Mark Up  
 func // <-- holds function
+macro // <-- return type of macros
 ```
 ## Constant variables in Duck
 as cont sign we use the same as static
@@ -359,10 +366,10 @@ age : 54  // <- this will be compiled as int age = 54
 ## Null references in Duck
 Containers main parent can be forced to destroy resource by setting it to null.
 ``` c++
-Example ex() 
+Example* ex() 
 ex.Foo()      // <--valid call
 ex = null
-ex.Foo()      // <-- not valid call, ex container no longer exists
+ex.Foo()      // <-- Error, ex container no longer exists
 ```
 
 we can check if variable is null by
@@ -375,14 +382,14 @@ if ex
 // ? operator checks all containers in call so it can be something like
 Owner
 {
-  Example ex() 
+  Example* ex() 
 }
 
-Owner o()
+Owner* o()
 ?o.ex.Foo()  // <-- in this case it checks not null for ex and for o containers
 ```
 ## Heap allocation in Duck
-
+when variable gets inicilized we also allocate the variable. we use C++ style pointer symbol * to specify if it's stack allocation or heap allocated
 ``` c++ 
 Example
 {
@@ -396,37 +403,43 @@ Example
 // Stack allocation
 Example e = Example()
 Example e2()
+e3: Example()
 
 // Heap allocation
-Example e : Example()
-e2: Example()
+Example* e = Example()
+Example* e2()
+e3:* Example()
 
 // Stack allocation
 int num = 5
 num2 : 5
 
 // Heap allocation
-int num : int
-num2 : int
+int* num = 5
+num2 :* 5
 
 // Stack allocation
 Example e3 = e2
 Example e4 = {val : 5}
 
 // Heap allocation
-Example e3 : e2
-Example e4 : {val : 5}
+Example* e3 = e2
+Example* e4 = {val : 5}
 
-// Depends on the allocation of e2
+// Depends on the allocation of e2, if it can't be determined it will prefer stack
 e3 : e2
 
-```
-For non-container values the Heap allocation is somewhat more difficult to use, we assume that these types are usually Stack allocated.
+// Heap allocation, force heap allocation
+e3 :* e2 
 
-as to have a Heap allocated int you have to do
-``` c++ 
-num2 : int 
-num2 = 5  // <- can't be done in single line
+// not allocated, technically pointer is on stack but there is no heap allocation
+Example* e = null
+```
+
+If we want to do inplace heap allocation we can use the :: symbols
+``` c++
+Example* [] examples
+examples += ::Example()
 ```
 
 ## Object references in Duck
@@ -435,7 +448,7 @@ In Duck there is only one owner of the value called parent, but this value can s
 Example
 {} // declaration
 
-Example e : Example()
+Example* e = Example()
 e2 : e  // <-- holds now reference to e value but it is not it's parent
 e = null 
 Print(e2 == null)       // <-- e2 prints out true as the referenced value is now null 
@@ -443,14 +456,15 @@ Print(e2 == null)       // <-- e2 prints out true as the referenced value is now
 
 you can pass value parenthood with :: symbol
 ``` c++ 
-Example e : Example()
+Example* e = Example()
 e2 :: e      // <-- now e2 is main parent of e value
 e = null
 Print(e2 == null)   // <-- e2 prints out false as it is still valid
 ```
+this can be only used for heap allocated references
+
 
 if main parent is local variable that gets returned it passes as main parent reference giving you the ability to create factory functions
-
 ``` c++ 
 Cake
 {
@@ -500,7 +514,7 @@ CakeFactory
 @{
        Cake: MakeCake(bool retMain)
        {
-           Cake c : Cake() // Heap allocation
+           Cake* c = Cake() // Heap allocation
            c.slices = 2
            if retMain
              return ::c // returns ownership
@@ -520,13 +534,13 @@ cake2.Eat() // <-- Error null reference
 
 ```
 ##  Pointers in Duck
-Heap allocations are inherently pointer and do have size or 8 bytes
+Heap allocations are inherently pointer and do have size of 8 bytes
 
 ``` c++ 
 Example
 {}
 
-Example e : Example() // pointer to allocated Example
+Example* e = Example() // pointer to allocated Example
 ```
 
 empty ponter can be done with out calling the construtor
@@ -534,7 +548,7 @@ empty ponter can be done with out calling the construtor
 Example
 {}
 
-Example e : Example // pointer to Example type with the value of null
+Example* e = null // pointer to Example type with the value of null
 Print(e == null) // prints true
 ```
 
@@ -560,7 +574,7 @@ Family
     }
 }
 
-Family e : Family()
+Family* e = Family()
 
 (e.bob + 1).Foo() // "safe" <-- Foo from rob
 e.bob += 1 // unsafe <-- will actually create memory leek 
@@ -612,13 +626,16 @@ Example e() // <-- Prints
 
 Common issue is where we want to assign world to object that lives there
 ``` c++ 
-Gun
+Entity
 {
-    -Gun(World world) // <-- partial constructor -- possibly in parent game object/entity
+    -Entity(World world) // <-- partial constructor
     {
         Print("Hello")
     }
+}
 
+Gun : Entity
+{
     Gun(int ammo) // <-- basic constructor
     {
         Print("World")
@@ -667,11 +684,11 @@ e() // <-- Prints Hello World
 ```
 
 ##  Collections in Duck
-collections may be static allocated on stack or dynamic allocated on heap.
+collections may be statically allocated on stack or dynamic allocated on heap.
 
 ``` c++ 
 int [50] s1  // <-- static array that holds 50 int values
-int [] s2    // <-- dynamic array can hold any number of elements, might be same as (in C# List, in C++ std::vector) or dynamic array
+int [] s2    // <-- dynamic array can hold any number of elements, might be same as (in C# List, in C++ std::vector)
 ```
 Other collection are separate as they are functionally different.
 ``` c++
@@ -694,7 +711,7 @@ Print(s1[name])  // <-- prints Bob
 this is similar to "string, string pair" in use cases but it is marginally faster.
 
 ## Automatic type collections in Duck
-as with variables we use.
+as with variables we use the : symbol
 ``` c++
 s1 : {5,1,2}  // will be interpreted as int []  s1 = {5,1,2} 
 s2 : {"name" : "Bob", "address" : "Code square 5"} // will be interpreted as pair
@@ -749,9 +766,14 @@ int s3[-][-]   // <-- 2D dynamic array that has index from int.Min to int.Max.
 ## Collection size prediction in Duck
 for Duck compiler to accurately calculate time execution time for async separation, as programmers we can help with that by adding our guesstimate into array declaration
 ``` c++
-int [] s   <-- dynamic array can hold any number of elements, compiler makes the guess how many elements might contain depending on it's uses in code
-int [*] s  <-- still dynamic array, but this tells the compiler to expect a huge amount of values in this array.
-int [50*] s  <--still dynamic array, but this says to the compiler, expect around 50 values +- some values in this array.
+int [] s       // <-- dynamic array can hold any number of elements, compiler makes the guess how many elements might contain depending on it's uses in code
+int [*] s      // <-- still dynamic array, but this tells the compiler to expect a huge amount of values in this array.
+int [50*] s    // <--still dynamic array, but this says to the compiler, expect around 50 values +- some values in this array.
+```
+
+we might want to have heap allocated array, aka array of pointers
+``` c++
+int* [] s
 ```
 
 ## If statement in Duck
@@ -800,21 +822,21 @@ for -loop : loops {      // <-- reverse for each loop in loops  -- preferred if 
 ```
 Duck omits type as for each value must be the same type, Duck allows for sequence declaration with .. operator as it is the most used way to use loops
 ``` c++
-for i : 0..5 // <-- form  0 to 5 Inclusively, it executes loop body 6 times in total
+for i : 0...5 // <-- form  0 to 5 Inclusively, it executes loop body 6 times in total
 { 
 }
-for i : 5..0 // <-- form  5 to 0 inclusively
+for i : 5...0 // <-- form  5 to 0 inclusively
 {
 }
 ```
 sequence declaration with .. operator can be used outside of loops
 ``` c++
-n : 0..5  // this will be interpreted as int [] n = {0,1,2,3,4,5}
+n : 0...5  // this will be interpreted as int [] n = {0,1,2,3,4,5}
 ```
 in .. operator we can also use variables to achieve the standard loop pattern "int i = 0; i < loops.Len;  i++"
 
 ``` c++
-for i : 0..loops.Len-1 
+for i : 0...loops.Len-1 
 {
 }
 ```
@@ -843,39 +865,41 @@ do
 ## Loop chaining in Duck 
 Duck introducing non-verbose way to have nested loops, with the | symbol used as loop separator 
 ``` c++
-for n : 0..3 |
-    i : 0..5 
+for n : 0...3 |
+    i : 0...5 
 {
-Print(n)
+    Print(n)
 } // <-- this are two nested for loops, the inner for loop has body of {print(n)} 
 // Result would be 000000111111222222333333 
 
 // verbose way
-for n : 0; n <= 3; n++ { 
-  for i : 0; i <= 5; i++ { 
+for n : 0; n <= 3; n++ 
+{ 
+  for i : 0; i <= 5; i++ 
+  { 
     Print(n)
   }
 }
 ```
 we can also add body to the outer loop
 ``` c++
-for n : 0..3 |
+for n : 0...3 |
 { // <-- outer loop body is executed after inner loop due to | separator being in front of the body
-n++
+    n++
 } 
-    i : 0..5 
+    i : 0...5 
 {
-Print(n)
+    Print(n)
 } 
 // Result would be 000000222222  
 
-for n : 0..3 
+for n : 0...3 
 {
-n++
+    n++
 }| // <-- outer loop body is executed before inner loop due to | separator being in behind the body
-    i : 0..5 
+    i : 0...5 
 {
-Print(n)
+    Print(n)
 } 
 // Result would be 111111333333   
 ```
@@ -1014,7 +1038,7 @@ Cat   // <-- invalid, this must be "Cat : Animal"
 { 
 }
 ```
-## Interfaces  in Duck 
+## Interfaces in Duck 
 If we want to expose a set of functions to be used by the user, we can make a function definition container.
 ``` c++
 PredefinedFunctions
@@ -1045,6 +1069,73 @@ Print("actual implementation")
 
 Duck d
 WantToUseFunctions.UseFunctions(d)
+```
+## Duck typing in Duck
+Duck is using it's reflection system to call functions in runtime, We can call any function on any container by using the .. symbols
+
+``` c++
+Example
+{
+}
+
+Example e()
+e..Foo() // Duck call
+
+```
+if the function is not pressent in will resoult in runtime error
+
+
+``` c++
+Example
+{
+}
+
+Example e()
+if e..?Foo() // check if Foo is valid
+    Print("Foo is valid") // will not print as Foo is not present in Example
+
+?e..Foo() // if function is not present it will not execute
+
+```
+
+The common use case is where we have Tick function that we want to call on anything in the world that has it implemented, to keep the Entity as light as possible we might not want to add the Tick function there.
+``` c++
+Entity
+{}
+
+World
+{
+    Entity [] entities
+
+    Tick(float deltaTime)
+    {
+        for en : entities
+        {
+            ?en..Tick(deltaTime)
+        }
+    }
+}
+
+Duck : Entity
+{
+    Tick(float deltaTime)
+    {
+        Print("Duck tick")
+    }
+}
+
+Human : Entity
+{
+    // no tick
+}
+
+World w()
+Duck d()
+Human h()
+w.entities += d
+w.entities += h
+w.Tick(0.1) // Prints Duck tick
+
 ```
 
 ## Enums in Duck
@@ -1138,7 +1229,7 @@ uint x = 0x05		// 00000101
 Print(x & 0x03) 	// 00000001  <-- Bitwise AND   
 Print(x | 0x03)		// 00000111  <-- Bitwise OR
 Print(x ^ 0x03) 	// 00000110  <-- Bitwise XOR
-Print(~x)		// 11111100   <-- Bitwise NOT
+Print(~x)		    // 11111100   <-- Bitwise NOT
 Print(x << 1)		// 00001010  <-- Left shift 
 Print(x >> 1)		// 00000010  <-- Right shift 
 ``` 
@@ -1404,7 +1495,7 @@ Example
 {
     int Foo (int i) 
     {
-            return (2^4)*i + (i > 0)? Foo(i-1) | 0
+        return (2^4)*i + (i > 0)? Foo(i-1) | 0
     }
     int Foo2 ()
     {
@@ -1416,19 +1507,18 @@ Example
 ```
 
 ## Macros in Duck
-macros in C++ are extremely powerful tool but also completely impossible to debug and read, Duck solves this by functions that gets unwraped at compile time, functions has to be marked with ~ symbol representing aproximation. in this case IDE should show ghost of the unwraped code.
+macros in C++ are extremely powerful tool but also completely impossible to debug and read, Duck solves this by functions that gets unwraped at compile time, functions has to return macro type. We force at least some sort of structure by having arguments of the function statically typed.
 
 ``` c++
 Example 
 #{  // Must be in static block
 
-    ~Foo() // anything is allowed. syntax correction gets checked only when used
+    macro Foo() // anything is allowed. syntax correction gets checked only when used
     {
       case 0:  
         Print("Hello world")
         break
     }
-
 
     Foo2()
     {
@@ -1474,4 +1564,111 @@ defined constants can be used only and only by the #if, this is to prevent C++ s
 ```
 
 ## Life cycle in Duck
-Common program structure in C++ is to have some kind of Start function that allocates stuff on heep that run for the duration of the program life time
+Common program structure in C++ is to have some kind of Start function that allocates stuff on heep, Like loads world that run for the duration of the programs life, or if switched destroyed and re-initialized with new world. The issue is that most objects in the world need to get initialized under the world, this may be true for some that want a reference back to the world but not for all. Or if we have start and stop functionality where we add new objects to the world and want to remove them at the end of play.
+
+Duck solves this with custom scopes where we create large scope and we allocate marked variables on arena allocator. then we can start and end the scope at specific points of the program.
+
+``` c++
+PlayManager
+{
+    [@Play]
+    float PlayTime
+
+    Tick(float deltaTime) // called from main loop
+    {
+        //playTime += 0.01 // <-- runtime error if not allocated
+        ?PlayTime += deltaTime  // will not execute if not allocated
+    }
+
+    StartPlay() // used by Button on UI Or Command
+    {
+        @start Play
+    }
+
+    StopPlay() // used by Button on UI Or Command
+    {
+        Print(PlayTime)
+        @end Play
+    }
+}
+```
+if end will never get called, it will be called at the end of the program.
+
+We can also use this in the static block making the variables not get allocated at the start of the program but at the point of custom scope
+``` c++
+PlayerManager
+#{
+    [@Play]
+    Player [] Players
+}
+
+Player
+{
+    Foo()
+    {
+        Print(PlayerManager.Players.Len)
+    }
+}
+
+World
+{
+    AddPlayer(Player player)
+    {
+        PlayerManager.Players += player
+    }
+}
+
+
+```
+if we use dynamic collections it will get allocated using the arena allocator
+
+After Start function we usually have some kind of loop that runs forever. Each cycle of the loop represents a game frame, we might again allocate stuff and the start of the frame and dump them at the end of the frame. if we mark loop using custom scope it will automaticly call the @start and the @end even if we use for example break to escape it, if we call the @end anywhere in the loop it will also escape the loop
+
+``` c++
+Example
+#{
+    Foo()
+    {
+        @end Tick
+        Print("Hello") // <-- this will not run
+    }
+}
+
+Main () 
+{
+    [@Tick]
+    while true
+    {
+        Example.Foo()
+        Sleep(0.01)
+    }
+}
+```
+
+you can check if the custom scope is active or not with if statement where you use the @ followed by the name of the scope
+``` c++
+Example
+#{
+    Foo()
+    {
+        if @Tick
+            Print("Tick active")
+        else
+            Print("Tick inactive")
+    }
+}
+
+Main () 
+{
+    [@Tick]
+    while true
+    {
+        Example.Foo() // Tick active
+        Sleep(0.01)
+    }
+
+    Example.Foo() // Tick inactive
+}
+```
+
+if we call @start again after @start has already been called for custom scope it will re-initialize the scoped variables, if we call @end again after it has been called it will be runtime error.
