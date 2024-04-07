@@ -1534,7 +1534,7 @@ Example
 ```
 
 ## Definitions in Duck
-defined constants can be used only and only by the #if, this is to prevent C++ style defines without type
+defined constants can be used only and only by the #if, this is to prevent C style defines without type
 
 ``` c++
 
