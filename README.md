@@ -416,7 +416,7 @@ Example
 // Stack allocation
 Example e = Example()
 Example e2()
-e3: Example()
+e3 : Example()
 
 // Heap allocation
 Example* e = Example()
