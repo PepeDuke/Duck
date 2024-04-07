@@ -433,10 +433,11 @@ e3 : e2
 e3 :* e2 
 
 // not allocated, technically pointer is on stack but there is no heap allocation
-Example* e = null
+Example* e
+Example* e2 = null
 ```
 
-If we want to do inplace heap allocation we can use the :: symbols
+If we want to do inplace heap allocation we can use the :: symbol
 ``` c++
 Example* [] examples
 examples += ::Example()
@@ -564,8 +565,8 @@ Kid
 
 Family
 {
-    Kid bob : Kid
-    Kid rob : Kid
+    Kid* bob
+    Kid* rob
 
     Family()
     {
@@ -1071,7 +1072,7 @@ Duck d
 WantToUseFunctions.UseFunctions(d)
 ```
 ## Duck typing in Duck
-Duck is using it's reflection system to call functions in runtime, We can call any function on any container by using the .. symbols
+Duck is using it's reflection system to call functions in runtime, We can call any function on any container by using the .. symbol
 
 ``` c++
 Example
