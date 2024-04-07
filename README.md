@@ -408,7 +408,7 @@ e3: Example()
 // Heap allocation
 Example* e = Example()
 Example* e2()
-e3:* Example()
+e3 :: Example()
 
 // Stack allocation
 int num = 5
@@ -416,7 +416,7 @@ num2 : 5
 
 // Heap allocation
 int* num = 5
-num2 :* 5
+num2 :: 5
 
 // Stack allocation
 Example e3 = e2
@@ -430,7 +430,7 @@ Example* e4 = {val : 5}
 e3 : e2
 
 // Heap allocation, force heap allocation
-e3 :* e2 
+e3 :: e2 
 
 // not allocated, technically pointer is on stack but there is no heap allocation
 Example* e
