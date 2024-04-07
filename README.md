@@ -104,10 +104,10 @@ So in combination with container we might have something like
 ``` c++
 Example 
 { 
-  int Foo() 
-  { 
-    return 5
-  }
+    int Foo() 
+    { 
+        return 5
+    }
 }
 ```
 function argument and return have to be type safe
@@ -218,7 +218,8 @@ and we can call static function by
 ``` c++
 Example 
 #{
-   Foo(){ // <-- static function
+   Foo() // <-- static function
+   {
    
    }
 }
@@ -262,7 +263,6 @@ if multiple containers have the same name and parent container they are consider
 ``` c++
 Example // <--  non-static container
 {  
-
     Foo() // <-- not accessible by  Example.Foo() 
     {
 
@@ -271,7 +271,6 @@ Example // <--  non-static container
 
 Example  // <--  only-static container any variables or functions in here are static
 #{ // <-- static indicator #
-
     Foo() // <-- accessible by Example.Foo() 
     {
 
@@ -406,7 +405,7 @@ when variable gets inicilized we also allocate the variable. we use C++ style po
 ``` c++ 
 Example
 {
-    int val
+    int Val
 
     Foo()
     {
@@ -433,11 +432,11 @@ num2 :: 5
 
 // Stack allocation
 Example e3 = e2
-Example e4 = {val : 5}
+Example e4 = {Val : 5}
 
 // Heap allocation
 Example* e3 = e2
-Example* e4 = {val : 5}
+Example* e4 = {Val : 5}
 
 // Depends on the allocation of e2, if it can't be determined it will prefer stack
 e3 : e2
@@ -482,14 +481,14 @@ if main parent is local variable that gets returned it passes as main parent ref
 ``` c++ 
 Cake
 {
-   int slices
+   int Slices
 
    Eat()
    {
-     if slices <= 0
+     if Slices <= 0
         Print("cake has been eaten")
      else
-        slices--
+        Slices--
    }
 }
 
@@ -498,7 +497,7 @@ CakeFactory
        Cake MakeCake()
        {
            Cake c() // Stack allocation
-           c.slices = 2
+           c.Slices = 2
            return c
        }
 }
@@ -513,14 +512,14 @@ when heap allocated
 ``` c++ 
 Cake
 {
-   int slices
+   int Slices
 
    Eat()
    {
-     if slices <= 0
+     if Slices <= 0
         Print("cake has been eaten")
      else
-        slices--
+        Slices--
    }
 }
 
@@ -529,7 +528,7 @@ CakeFactory
        Cake: MakeCake(bool retMain)
        {
            Cake* c = Cake() // Heap allocation
-           c.slices = 2
+           c.Slices = 2
            if retMain
              return ::c // returns ownership
            else
@@ -578,23 +577,23 @@ Kid
 
 Family
 {
-    Kid* bob
-    Kid* rob
+    Kid* Bob
+    Kid* Rob
 
     Family()
     {
-        bob() // calling constructor on null pointer will allocate it
-        rob()
+        Bob() // calling constructor on null pointer will allocate it
+        Rob()
     }
 }
 
 Family* e = Family()
 
-(e.bob + 1).Foo() // "safe" <-- Foo from rob
-e.bob += 1 // unsafe <-- will actually create memory leek 
-e.rob = null
+(e.Bob + 1).Foo() // "safe" <-- Foo from rob
+e.Bob += 1 // unsafe <-- will actually create memory leek 
+e.Rob = null
 
-Print(e.bob == null) // prints false, as it is no longer tracted it will not get set to null
+Print(e.Bob == null) // prints false, as it is no longer tracted it will not get set to null
 
 ```
 
@@ -1201,36 +1200,36 @@ the @ symbol is used as representation to similar to Get, with inclusion of any 
 ``` c++
 Person 
 {
-  -int age = 20 // private variable age
+  -int Age = 20 // private variable age
 }
 @{ // Get export for age // non-static block
-  Age: age              
+  Age: Age              
 }
 
 Person p()
 Print(p.Age)      // prints 20 
-Print(Person.age) // prints Person has no property Age
+Print(Person.Age) // prints Person has no property Age
 // static block for age has not been defined
 ```
 this also allows expressions
 ``` c++
 Population 
 {
-      -ages : {20,50,12,23,40}  // private array ages
+      -Ages : {20,50,12,23,40}  // private array ages
 }
 @{
-  MaxAge: ages.Max, // returns 50
-  FirstAge: ?ages[0] 	// checks if index 0 is valid and returns that value now it is 20, if index 0 is not valid it returns null
+  MaxAge: Ages.Max, // returns 50
+  FirstAge: ?Ages[0] 	// checks if index 0 is valid and returns that value now it is 20, if index 0 is not valid it returns null
 }
 ```
 Setter are similarly set inside the ={} block by
 ``` c++
 Person 
 {
-  -int age = 20 // private variable age
+  -int Age = 20 // private variable age
 }
 ={
-  Age: age = value // Set age variable with value on the right hand side of =
+  Age: Age = value // Set age variable with value on the right hand side of =
 }
 
 Person p()
@@ -1261,24 +1260,24 @@ Lambda functions are initialized by @ symbol before, indicating the start of the
 Lambda
 {
    // standard declaration
-   int foo()
+   int Foo()
    {
         return 5
    }
 
    // Lambda function with return
-   func f =  @ int(){
+   func F =  @ int(){
         return 5
    }
    
    // Lambda function takes in references to resources from outside if they are needed.
-   func f2 = @ (){
-        Print(f()) 
+   func F2 = @ (){
+        Print(F()) 
    }
 }
 
 Lambda l()
-l.f2()  // prints 5
+l.F2()  // prints 5
 ``` 
 ## Threading control in Duck
 threading in Duck flows rules of eventual correctness but in some cases you need to force in order execution. we can declare scope that has a $ prefix to force in order execution. The dollar symbol makes sort of sense as the application that needs in order execution the most is banking.
@@ -1315,12 +1314,12 @@ Bank
     
     Foo()
     {
-       Bank A
-       Bank B
+       Bank a
+       Bank b
        
        ${ // <-- in order execution scope
-          A.TransferMoneyToBank(5,B) 
-          B.TransferMoneyToBank(10,A)  //<-- in order to end up with Bank A having cash = 10 we might need in order execution
+          a.TransferMoneyToBank(5,b) 
+          b.TransferMoneyToBank(10,a)  //<-- in order to end up with Bank A having cash = 10 we might need in order execution
        }
        
     }
