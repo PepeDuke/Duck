@@ -1,0 +1,40 @@
+// EXPECT: 10 and 0.
+// PITFALL: transfers have dependent checks and writes across two accounts.
+// This example's helpers rely on the caller's $ block.
+Account
+{
+    int Cash = 5
+
+    int Withdraw(int amount)
+    {
+        if Cash >= amount
+        {
+            Cash -= amount
+            return amount
+        }
+        int remaining = Cash
+        Cash = 0
+        return remaining
+    }
+
+    Add(int amount)
+    {
+        Cash += amount
+    }
+}
+
+Main()
+{
+    Account a()
+    Account b()
+    ${
+        first : a.Withdraw(5)
+        b.Add(first)
+        second : b.Withdraw(10)
+        a.Add(second)
+        Print(a.Cash)
+        Print(b.Cash)
+    }
+    // FIX for independently callable Withdraw: put its check and update
+    // inside $ as shown in 02_AtomicWithdrawal.dk.
+}

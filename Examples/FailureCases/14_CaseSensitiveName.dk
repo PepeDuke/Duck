@@ -1,0 +1,13 @@
+// INTENTIONALLY INVALID: spelling differs by case.
+// EXPECT: unresolved name.
+// FIX: call actor.Tick(), matching the declaration.
+Actor
+{
+    Tick() {}
+}
+
+Main()
+{
+    Actor actor()
+    actor.tick()
+}

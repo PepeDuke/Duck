@@ -1,0 +1,25 @@
+// INTENTIONALLY UNSAFE LOGIC: no $ protects the full withdrawal.
+// EXPECT: no guaranteed atomic check-and-subtract behavior.
+// A permitted interleaving is:
+//   call A checks Cash == 10; call B checks Cash == 10;
+//   call A subtracts 10; call B subtracts 10; final Cash is -10.
+// This is NOT a deterministic reproduction: the compiler may run small
+// operations sequentially. Seeing 0 repeatedly does not prove safety.
+// FIX: wrap the check and subtraction in $, as in Concurrency/02.
+Account
+{
+    int Cash = 10
+    Withdraw(int amount)
+    {
+        if Cash >= amount
+            Cash -= amount
+    }
+}
+
+Main()
+{
+    Account account()
+    account.Withdraw(10)
+    account.Withdraw(10)
+    Print(account.Cash)
+}

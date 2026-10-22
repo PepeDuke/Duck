@@ -1,0 +1,15 @@
+// EXPECT: 42, true.
+// PITFALL: an alias does not keep an object alive after its owner destroys it.
+Item
+{
+    int Value = 42
+}
+
+Main()
+{
+    Item* owner()
+    alias : owner
+    Print(alias.Value)
+    owner = null
+    Print(alias == null)
+}

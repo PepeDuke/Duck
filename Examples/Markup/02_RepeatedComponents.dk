@@ -1,0 +1,27 @@
+// EXPECT: 2, then Bob.
+// PITFALL: this.Label.Name is ambiguous with repeated Label children.
+Label
+{
+    string Name
+}
+
+Panel
+{
+    this{
+        <Label Name="Bob"/>
+        <Label Name="Rob"/>
+    }
+
+    Show()
+    {
+        Print(this.GetChildren().Len)
+        Print(this.Label[0].Name)
+        // Print(this.Label.Name) // Error: duplicate components.
+    }
+}
+
+Main()
+{
+    Panel panel()
+    panel.Show()
+}

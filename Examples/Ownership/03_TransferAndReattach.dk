@@ -1,0 +1,19 @@
+// EXPECT: true, false, false, true, true.
+// PITFALL: the previous owner is null after ::, not automatically an alias.
+Item {}
+
+Main()
+{
+    Item* first()
+    alias : first
+    second :: first
+
+    Print(first == null)
+    Print(second == null)
+    Print(alias == null)
+
+    first = second // Explicitly reattach first as a non-owning alias.
+    second = null
+    Print(first == null)
+    Print(alias == null)
+}

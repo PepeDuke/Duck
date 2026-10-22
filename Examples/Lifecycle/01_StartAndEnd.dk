@@ -1,0 +1,36 @@
+// EXPECT: active, then inactive.
+// PITFALL: a scoped resource is unavailable outside its active scope.
+Session
+{
+    [@Play]
+    float PlayTime
+
+    Advance(float deltaTime)
+    {
+        ?PlayTime += deltaTime
+    }
+
+    Start() { @start Play }
+    Stop() { @end Play }
+
+    Describe()
+    {
+        if @Play
+            Print("active")
+        else
+            Print("inactive")
+    }
+}
+
+Main()
+{
+    Session session()
+    ${
+        session.Start()
+        session.Describe()
+        session.Advance(0.1)
+        session.Stop()
+        session.Describe()
+        session.Advance(0.1) // Guarded write is skipped.
+    }
+}

@@ -1,0 +1,13 @@
+// EXPECT: 3, 9, 2.
+// PITFALL: s[1] += 5 changes an element; s += 5 adds an element.
+Main()
+{
+    int [] values = {2,4}
+    values += 7
+    Print(values.Len)
+    values[1] += 5
+    Print(values[1])
+    values -= [0]
+    Print(values.Len)
+    // values is now {9,7}; removal shifts later elements down one position.
+}

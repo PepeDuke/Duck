@@ -1,0 +1,13 @@
+// INTENTIONALLY INVALID: instance function called through a type.
+// EXPECT: instance-required error.
+// FIX: Actor actor(); actor.Tick() on separate lines, or deliberately
+// define Tick in a #{} block if it should be static.
+Actor
+{
+    Tick() {}
+}
+
+Main()
+{
+    Actor.Tick()
+}

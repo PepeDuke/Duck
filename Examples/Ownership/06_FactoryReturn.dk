@@ -1,0 +1,22 @@
+// EXPECT: 3.
+// PITFALL: return local returns a reference, not heap ownership.
+// FIX: explicitly return ::local and receive the owner with ::.
+Item
+{
+    int Value = 3
+}
+
+Factory
+#{
+    Item* Make()
+    {
+        Item* local()
+        return ::local
+    }
+}
+
+Main()
+{
+    item :: Factory.Make()
+    Print(item.Value)
+}

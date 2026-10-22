@@ -1,0 +1,27 @@
+// EXPECT: Hello world.
+// PITFALL: macro bodies are checked in their expansion context.
+// Here a case clause is meaningful only inside Switch, as in the README.
+Messages
+#{
+    macro GreetingCase()
+    {
+        case 0:
+            Print("Hello world")
+            break
+    }
+
+    Show()
+    {
+        int index = 0
+        Switch (index)
+        {
+            GreetingCase()
+        }
+        // GreetingCase() // Wrong expansion context for case/break.
+    }
+}
+
+Main()
+{
+    Messages.Show()
+}

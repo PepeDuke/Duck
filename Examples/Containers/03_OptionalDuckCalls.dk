@@ -1,0 +1,20 @@
+// EXPECT: duck tick. The Human call is skipped.
+// PITFALL: an unchecked .. call to an absent function fails at runtime.
+Duck
+{
+    Tick(float deltaTime)
+    {
+        Print("duck tick")
+    }
+}
+
+Human {}
+
+Main()
+{
+    Duck duck()
+    Human human()
+    ?duck..Tick(0.1)
+    ?human..Tick(0.1)
+    // human..Tick(0.1) // Runtime error: Human has no Tick.
+}

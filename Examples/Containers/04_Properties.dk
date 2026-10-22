@@ -1,0 +1,22 @@
+// EXPECT: 20, then 25.
+// PITFALL: Age is exposed through accessor blocks; the backing field
+// is protected. Keep chained blocks adjacent.
+Person
+{
+    -int Years = 20
+}
+@{
+    Age: Years
+}
+={
+    Age: Years = value
+}
+
+Main()
+{
+    Person person()
+    Print(person.Age)
+    person.Age = 25
+    Print(person.Age)
+    // Print(person.Years) // Invalid protected access.
+}

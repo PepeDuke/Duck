@@ -1,0 +1,14 @@
+// EXPECT: 54, 55, 8.
+// PITFALL: inference is for local values, not untyped function parameters.
+Main()
+{
+    age : 54
+    Print(age)
+    age++
+    Print(age)
+
+    int count = 8
+    Print(count)
+    // FIX: keep a type when it communicates a deliberate choice.
+    double precise = 9.99
+}

@@ -1,0 +1,13 @@
+// EXPECT: 0, 1, 2, 10, 11, 12.
+// PITFALL: inclusive endpoints make this 2 * 3 iterations, not 1 * 2.
+// $ fixes observable output order for this demonstration.
+Main()
+{
+    ${
+        for row : 0...1 |
+            column : 0...2
+        {
+            Print(row * 10 + column)
+        }
+    }
+}

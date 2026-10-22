@@ -1,0 +1,12 @@
+// EXPECT: Bob, then Tom.
+// PITFALL: map keys are values; a string key must be quoted.
+Main()
+{
+    string, string pair names
+    names += "player" : "Bob"
+    Print(names["player"])
+    names["player"] = "Tom"
+    Print(names["player"])
+    names -= ["player"]
+    // Print(names["player"]) // Key was removed; no fallback is specified.
+}

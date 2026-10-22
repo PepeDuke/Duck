@@ -1,0 +1,19 @@
+// EXPECT: Sunday, true, Tom, Bob and Thomas.
+// PITFALL: printing an enum name and converting its value are different.
+Day : byte
+#@{
+    Sunday, Monday, Tuesday
+}
+
+Names : string
+#@{
+    Bob: "Bob", Tom: "Thomas"
+}
+
+Main()
+{
+    Print(Day.Sunday)
+    Print(Day.Sunday == 0)
+    Print(Names.Tom)
+    Print(Names.Bob + " and " + Names.Tom)
+}

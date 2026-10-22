@@ -1,0 +1,14 @@
+// EXPECT: true, false.
+// PITFALL: possession of an alias is not authority to take ownership.
+Item {}
+
+Main()
+{
+    Item* owner()
+    alias : owner
+    // stolen :: alias // Invalid: alias is not the main reference.
+
+    next :: owner // FIX: transfer from the actual owner.
+    Print(owner == null)
+    Print(alias == null)
+}

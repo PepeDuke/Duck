@@ -1,0 +1,17 @@
+// EXPECT: true, false, 42.
+// PITFALL: clearing an alias and clearing an owner are different operations.
+Item
+{
+    int Value = 42
+}
+
+Main()
+{
+    Item* owner()
+    alias : owner
+    alias = null
+    Print(alias == null)
+    Print(owner == null)
+    Print(owner.Value)
+    // The owner still controls the resource's lifetime.
+}

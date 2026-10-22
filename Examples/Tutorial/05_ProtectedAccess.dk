@@ -1,0 +1,28 @@
+// EXPECT: 20.
+// PITFALL: public is the default; use - directly next to a declaration
+// to protect a member. A derived container can access protected members.
+Person
+{
+    -int Age = 20
+
+    int ReadAge()
+    {
+        return Age
+    }
+}
+
+Player : Person
+{
+    int ReadInheritedAge()
+    {
+        return Age
+    }
+}
+
+Main()
+{
+    Player player()
+    Print(player.ReadInheritedAge())
+    // Print(player.Age) // Invalid external access to a protected member.
+    // FIX: use an exposed function such as ReadAge().
+}

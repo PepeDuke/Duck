@@ -1,0 +1,12 @@
+// INTENTIONALLY BROKEN: the final index equals the array length.
+// EXPECT: index 2 is outside this two-element array.
+// The design does not yet specify the exact unguarded bounds diagnostic.
+// FIX: for int i = 0; i < values.Len; i++
+Main()
+{
+    int [] values = {10,20}
+    for i : 0...values.Len
+    {
+        Print(values[i])
+    }
+}

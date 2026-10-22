@@ -1,0 +1,17 @@
+// EXPECT: active, then inactive.
+// PITFALL: break does not leave the marked iteration's scope active.
+Main()
+{
+    [@Tick]
+    while true
+    {
+        if @Tick
+            Print("active")
+        break
+    }
+
+    if @Tick
+        Print("unexpected")
+    else
+        Print("inactive")
+}

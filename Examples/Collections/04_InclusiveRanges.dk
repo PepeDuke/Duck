@@ -1,0 +1,22 @@
+// EXPECT: six values from 0 through 5, then three values 2, 1, 0.
+// PITFALL: ... includes BOTH endpoints and supports descending ranges.
+Main()
+{
+    for i : 0...5
+    {
+        Print(i)
+    }
+
+    for i : 2...0
+    {
+        Print(i)
+    }
+
+    int [] empty
+    // FIX: a counted loop performs zero iterations for an empty collection.
+    for int i = 0; i < empty.Len; i++
+    {
+        Print(empty[i])
+    }
+    // Do not use 0...empty.Len-1: 0...-1 is a descending range.
+}

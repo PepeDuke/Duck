@@ -1,0 +1,26 @@
+// INTENTIONALLY BROKEN: ambiguous child lookup.
+// EXPECT: duplicate-component error; detection phase is not specified.
+// FIX: this.Label[0].Name for the first child.
+Label
+{
+    string Name
+}
+
+Panel
+{
+    this{
+        <Label Name="Bob"/>
+        <Label Name="Rob"/>
+    }
+
+    Show()
+    {
+        Print(this.Label.Name)
+    }
+}
+
+Main()
+{
+    Panel panel()
+    panel.Show()
+}

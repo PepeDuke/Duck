@@ -1,0 +1,28 @@
+// EXPECT: animal, human.
+// PITFALL: overlapping parent members resolve left to right.
+Animal
+{
+    Walk() { Print("animal") }
+}
+
+Human
+{
+    Walk() { Print("human") }
+}
+
+Cat : Animal, Human
+{
+    Demonstrate()
+    {
+        ${
+            Walk()
+            this.Human.Walk()
+        }
+    }
+}
+
+Main()
+{
+    Cat cat()
+    cat.Demonstrate()
+}

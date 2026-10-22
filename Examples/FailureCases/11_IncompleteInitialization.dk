@@ -1,0 +1,21 @@
+// INTENTIONALLY INVALID: calling an incompletely initialized object.
+// EXPECT: incomplete-initialization error.
+// FIX: call gun(world) before Use, or construct Gun gun(world, 5).
+World {}
+
+Entity
+{
+    -Entity(World world) {}
+}
+
+Gun : Entity
+{
+    Gun(int ammo) {}
+    Use() {}
+}
+
+Main()
+{
+    Gun gun(5)
+    gun.Use()
+}

@@ -1,0 +1,24 @@
+// EXPECT: enabled.
+// PITFALL: #define values are for #if, not ordinary untyped expressions.
+#define DEMO_ENABLED true
+
+#if DEMO_ENABLED
+{
+    Configuration
+    #{
+        Show() { Print("enabled") }
+    }
+}
+#else
+{
+    Configuration
+    #{
+        Show() { Print("disabled") }
+    }
+}
+
+Main()
+{
+    Configuration.Show()
+    // Print(DEMO_ENABLED) // Not a normal runtime constant.
+}

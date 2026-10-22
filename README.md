@@ -36,6 +36,8 @@ stages
 # Syntax
 *note that this is not final syntax and it is subject to change*
 
+For a guided tutorial with correct patterns and deliberately broken cases, start with [Examples/00_StartHere.dk](Examples/00_StartHere.dk). Each lesson is an independent `.dk` file with explanations in comments. These are design examples; they have not been validated by a Duck compiler. Remaining unspecified edge cases are recorded in [Examples/DesignQuestions.dk](Examples/DesignQuestions.dk).
+
 Duck is **case sensitive**.                  
 Duck is using for it's files the **.dk** extension.
 
@@ -119,7 +121,7 @@ int Foo(int i) // <-- argument int i
 ```
 Duck does not support Automatic type for return or arguments to preserve information for the programmer.
 ## Access protection in duck
-In real world application access protection is around 50%/50% between public and private members (if we ignore protected), meaning there is no right answer to this age old question of what the default protection access should be. But because containers are struct/class and we believe all developers are trained professionals.
+Duck supports public and protected access for container members.
 
 The default protection access is **public**.
 
@@ -134,7 +136,7 @@ Setting Access protection in Duck. We use a non-verbose way to specify what the 
 
 } 
 ```
-Duck does not have private members instead we use just protected, although C++ discourages the use of protected as it implies the use of inheritance might be true for C++ but not for Duck. while inheriting the common practice is to read the functionality, so there is not much of a reason to prevent the modification of the "internal state"
+Protected members remain accessible to derived containers, allowing them to work with the inherited internal state.
 
 If function has no protection access specified it will be taken as public
 ``` c++
@@ -376,7 +378,7 @@ if you want to let the compiler decide what the type is. i have found that var, 
 age : 54  // <- this will be compiled as int age = 54 
 ```
 ## Null references in Duck
-Containers main parent can be forced to destroy resource by setting it to null.
+Setting the owning reference to null requests destruction of the resource and invalidates all its aliases. Destruction is deferred: if a function is still using the resource, Duck waits for that use to finish before completing cleanup.
 ``` c++
 Example* ex() 
 ex.Foo()      // <--valid call
@@ -400,6 +402,8 @@ Owner
 Owner* o()
 ?o.ex.Foo()  // <-- in this case it checks not null for ex and for o containers
 ```
+
+Both `if ex` followed by `ex.Foo()` and `?ex.Foo()` protect the checked use against null invalidation during the call. The `?ex.Foo()` form executes only if the reference and the function are valid; otherwise it skips the call.
 ## Heap allocation in Duck
 when variable gets inicilized we also allocate the variable. we use C++ style pointer symbol * to specify if it's stack allocation or heap allocated
 ``` c++ 
@@ -467,17 +471,49 @@ e = null
 Print(e2 == null)       // <-- e2 prints out true as the referenced value is now null 
 ```
 
-you can pass value parenthood with :: symbol
+Ownership can be transferred with `::`. The previous owning reference becomes null. Existing aliases continue to reference the same resource under its new owner.
 ``` c++ 
 Example* e = Example()
-e2 :: e      // <-- now e2 is main parent of e value
-e = null
+alias : e   // non-owning reference
+e2 :: e     // e2 now owns the resource; e becomes null
+Print(e == null)    // true
+Print(alias == null) // false; alias follows the resource owned by e2
+e = e2      // explicitly make e a non-owning alias again
+e = null    // clearing an alias does not destroy the resource
 Print(e2 == null)   // <-- e2 prints out false as it is still valid
 ```
-this can be only used for heap allocated references
+Ownership transfer applies only to heap-allocated resources and must use the current owning reference as its source. Taking ownership through a non-owning alias is invalid.
+
+``` c++
+Example* owner()
+alias : owner
+newOwner :: alias // Error: alias is not the owning reference
+```
+
+When a resource is destroyed, every alias becomes null, regardless of whether it is stored in a local variable, a container field, a collection, or a captured lambda. Collection entries are retained with null values; they are not removed.
+
+``` c++
+Example* owner()
+aliases : {owner}
+owner = null
+Print(aliases[0] == null) // true; the collection still has one entry
+```
+
+The new owner's scope determines the resource's lifetime, even when that scope is shorter than the original owner's scope.
+
+``` c++
+Example* owner()
+alias : owner
+if true
+{
+    temporary :: owner // owner becomes null
+} // temporary's scope ends: destruction is requested and alias becomes null
+?owner.Foo() // skipped: owner is null
+?alias.Foo() // skipped: alias is null
+```
 
 
-if main parent is local variable that gets returned it passes as main parent reference giving you the ability to create factory functions
+Factory functions can return stack-allocated values normally. Returning ownership of a heap-allocated resource requires explicit `return ::resource`; a plain return of a heap reference does not transfer ownership.
 ``` c++ 
 Cake
 {
@@ -493,7 +529,7 @@ Cake
 }
 
 CakeFactory
-@{
+#{
        Cake MakeCake()
        {
            Cake c() // Stack allocation
@@ -524,8 +560,8 @@ Cake
 }
 
 CakeFactory
-@{
-       Cake: MakeCake(bool retMain)
+#{
+       Cake* MakeCake(bool retMain)
        {
            Cake* c = Cake() // Heap allocation
            c.Slices = 2
@@ -1200,7 +1236,7 @@ the @ symbol is used as representation to similar to Get, with inclusion of any 
 ``` c++
 Person 
 {
-  -int Age = 20 // private variable age
+  -int Age = 20 // protected variable age
 }
 @{ // Get export for age // non-static block
   Age: Age              
@@ -1215,7 +1251,7 @@ this also allows expressions
 ``` c++
 Population 
 {
-      -Ages : {20,50,12,23,40}  // private array ages
+      -Ages : {20,50,12,23,40}  // protected array ages
 }
 @{
   MaxAge: Ages.Max, // returns 50
@@ -1226,7 +1262,7 @@ Setter are similarly set inside the ={} block by
 ``` c++
 Person 
 {
-  -int Age = 20 // private variable age
+  -int Age = 20 // protected variable age
 }
 ={
   Age: Age = value // Set age variable with value on the right hand side of =
@@ -1280,7 +1316,37 @@ Lambda l()
 l.F2()  // prints 5
 ``` 
 ## Threading control in Duck
-threading in Duck flows rules of eventual correctness but in some cases you need to force in order execution. we can declare scope that has a $ prefix to force in order execution. The dollar symbol makes sort of sense as the application that needs in order execution the most is banking.
+Duck synchronizes resource use with preceding work affecting that resource. For example, reading `c.Value` below waits for both earlier increments to finish, so the printed value is guaranteed to be 2.
+
+``` c++
+Counter
+{
+    int Value = 0
+
+    Increment()
+    {
+        Value++
+    }
+}
+
+Counter c()
+c.Increment()
+c.Increment()
+Print(c.Value) // always prints 2; resource use is a synchronization point
+```
+
+This does not make every sequence of accesses atomic. Without an explicit guarantee, two withdrawals could both pass a balance check before either subtracts money. The compiler may execute small calculations sequentially, but programs must not rely on that optimization for correctness.
+
+A scope prefixed with `$` guarantees ordered execution and locks the resources used by the block, including resources accessed through called functions. Earlier work touching those resources must finish before the block starts. Other threads cannot modify those resources while the block runs. Each statement's work on those resources finishes before the next statement executes, and the locks are released when the block finishes.
+
+``` c++
+${
+    c.Increment()
+    Print(c.Value) // no other thread can modify c.Value between these statements
+}
+```
+
+Use `$` around a check and its dependent modification to guarantee that they execute together without interference. The bank example also locks both accounts for the ordered transfers.
 ``` c++
 Bank
 {
@@ -1293,10 +1359,11 @@ Bank
     
     int Withdraw (int amount)
     {
+      ${ // protect the balance check and subtraction together
        if Cash - amount >= 0
        {
            Cash -= amount
-           return Cash
+           return amount
        }
        else
        {
@@ -1304,6 +1371,7 @@ Bank
           Cash = 0
           return amountLeft
        }    
+      }
     }
     
     TransferMoneyToBank(int amount, Bank bank )
@@ -1317,9 +1385,9 @@ Bank
        Bank a
        Bank b
        
-       ${ // <-- in order execution scope
+       ${ // ordered execution with locks for resources accessed in both accounts
           a.TransferMoneyToBank(5,b) 
-          b.TransferMoneyToBank(10,a)  //<-- in order to end up with Bank A having cash = 10 we might need in order execution
+          b.TransferMoneyToBank(10,a)  // guaranteed final balances: a.Cash = 10, b.Cash = 0
        }
        
     }

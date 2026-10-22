@@ -1,0 +1,27 @@
+// EXPECT: a started Work call can finish safely even when destruction
+// is requested. Do not infer that Work and destruction MUST overlap.
+// PITFALL: nulling an owner is not cancellation of already-running work.
+Worker
+{
+    int Progress = 0
+
+    Work()
+    {
+        for int i = 0; i < 100; i++
+        {
+            Progress++
+        }
+        Print(Progress)
+    }
+}
+
+Main()
+{
+    Worker* owner()
+    alias : owner
+    alias.Work()
+    owner = null
+    ?alias.Work() // Skipped after invalidation.
+    // Cleanup waits for existing use to finish.
+    // This is a lifetime illustration, not a scheduler timing test.
+}

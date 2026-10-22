@@ -1,0 +1,9 @@
+// INTENTIONALLY BROKEN: ending an inactive custom scope.
+// EXPECT: runtime error at the second @end.
+// FIX: if @Play before @end Play.
+Main()
+{
+    @start Play
+    @end Play
+    @end Play
+}

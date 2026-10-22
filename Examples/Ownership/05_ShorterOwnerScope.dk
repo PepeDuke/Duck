@@ -1,0 +1,22 @@
+// EXPECT: true, true. No "used" message.
+// PITFALL: moving ownership into a shorter scope shortens the lifetime.
+Item
+{
+    Use()
+    {
+        Print("used")
+    }
+}
+
+Main()
+{
+    Item* owner()
+    alias : owner
+    if true
+    {
+        temporary :: owner
+    }
+    Print(owner == null)
+    Print(alias == null)
+    ?alias.Use()
+}

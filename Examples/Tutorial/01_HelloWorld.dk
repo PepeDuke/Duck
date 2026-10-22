@@ -1,0 +1,7 @@
+// EXPECT: Hello world.
+// PITFALL: Main belongs outside containers, and names are case sensitive.
+Main()
+{
+    Print("Hello world")
+    // print("Hello world") // Wrong spelling: Print and print are different.
+}

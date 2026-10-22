@@ -1,0 +1,24 @@
+// EXPECT: Bob.
+// PITFALL: component lookup uses the container name under this.
+Label
+{
+    string Name
+}
+
+Panel
+{
+    this{
+        <Label Name="Bob"/>
+    }
+
+    Show()
+    {
+        Print(this.Label.Name)
+    }
+}
+
+Main()
+{
+    Panel panel()
+    panel.Show()
+}

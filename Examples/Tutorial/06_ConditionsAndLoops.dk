@@ -1,0 +1,15 @@
+// EXPECT: small, then 0, 1, 2.
+// PITFALL: Duck's ternary separator is |.
+Main()
+{
+    int count = 3
+    label : (count < 5)? "small" | "large"
+    Print(label)
+
+    for int i = 0; i < count; i++
+    {
+        Print(i)
+    }
+    // FIX: use this counted form when count may be zero.
+    // A descending inclusive range is not an empty range.
+}

@@ -1,0 +1,14 @@
+// INTENTIONALLY BROKEN: dereferencing the previous owner after transfer.
+// EXPECT: null-reference error (a compiler may detect it earlier).
+// FIX: call next.Use(), or explicitly reattach owner = next as an alias.
+Item
+{
+    Use() {}
+}
+
+Main()
+{
+    Item* owner()
+    next :: owner
+    owner.Use()
+}

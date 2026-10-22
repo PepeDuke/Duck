@@ -1,0 +1,13 @@
+// INTENTIONALLY INVALID: protected member accessed from outside.
+// EXPECT: access rejection.
+// FIX: expose a public function or property for the intended operation.
+Account
+{
+    -int Cash = 10
+}
+
+Main()
+{
+    Account account()
+    Print(account.Cash)
+}

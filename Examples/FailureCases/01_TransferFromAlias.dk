@@ -1,0 +1,11 @@
+// INTENTIONALLY INVALID: ownership transfer from a non-owning alias.
+// EXPECT: rejection; exact diagnostic and detection phase are unspecified.
+// FIX: use next :: owner.
+Item {}
+
+Main()
+{
+    Item* owner()
+    alias : owner
+    next :: alias
+}

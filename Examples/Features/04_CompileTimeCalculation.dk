@@ -1,0 +1,21 @@
+// EXPECT: 25.
+// PITFALL: # before a call requests compile-time execution.
+// Keep this first example pure and independent of runtime input.
+Calculation
+#{
+    int Square(int value)
+    {
+        return value * value
+    }
+
+    int Baked()
+    {
+        int result = #Square(5)
+        return result
+    }
+}
+
+Main()
+{
+    Print(Calculation.Baked())
+}

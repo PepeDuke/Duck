@@ -1,0 +1,25 @@
+// EXPECT: 7 and 14.
+// PITFALL: an instance function needs an object; #{} holds static functions.
+// Keep chained container blocks adjacent, with no blank line between blocks.
+Meter
+{
+    int Value = 7
+    int Read()
+    {
+        return Value
+    }
+}
+#{
+    int Twice(int value)
+    {
+        return value * 2
+    }
+}
+
+Main()
+{
+    Meter meter()
+    Print(meter.Read())
+    Print(Meter.Twice(7))
+    // Meter.Read() // Invalid: Read belongs to an instance.
+}

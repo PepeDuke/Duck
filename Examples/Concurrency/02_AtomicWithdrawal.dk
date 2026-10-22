@@ -1,0 +1,28 @@
+// EXPECT: 0 after both withdrawals; only one can withdraw the initial 10.
+// PITFALL: safe individual accesses do not make check-then-subtract atomic.
+Account
+{
+    int Cash = 10
+
+    int Withdraw(int amount)
+    {
+        ${
+            if Cash >= amount
+            {
+                Cash -= amount
+                return amount
+            }
+            return 0
+        }
+    }
+}
+
+Main()
+{
+    Account account()
+    account.Withdraw(10)
+    account.Withdraw(10)
+    Print(account.Cash)
+    // Removing $ removes the multi-step guarantee, even if a particular
+    // compiler happens to run these small operations sequentially.
+}

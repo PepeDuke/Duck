@@ -1,0 +1,19 @@
+// EXPECT: 2.
+// PITFALL: automatic concurrency does not mean a later resource read
+// is allowed to observe unfinished preceding work on that resource.
+Counter
+{
+    int Value = 0
+    Increment()
+    {
+        Value++
+    }
+}
+
+Main()
+{
+    Counter counter()
+    counter.Increment()
+    counter.Increment()
+    Print(counter.Value)
+}

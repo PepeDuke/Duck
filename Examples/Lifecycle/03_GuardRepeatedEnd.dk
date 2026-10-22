@@ -1,0 +1,18 @@
+// EXPECT: inactive.
+// PITFALL: a second @end on an inactive scope is a runtime error.
+// FIX: check scope activity before ending it.
+Main()
+{
+    @start Play
+    if @Play
+        @end Play
+    if @Play
+        @end Play
+
+    if @Play
+        Print("unexpected")
+    else
+        Print("inactive")
+    // Starting an already active scope reinitializes scoped variables;
+    // do not use repeated @start as a harmless "ensure started" operation.
+}

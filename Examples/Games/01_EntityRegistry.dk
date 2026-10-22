@@ -1,0 +1,34 @@
+// EXPECT: enemy tick, 1, true.
+// An entity registry can retain aliases after an owning system destroys
+// an entity. Null slots remain and guarded calls skip them.
+// PITFALL: registry membership does not extend the entity's lifetime.
+Enemy
+{
+    Tick(float deltaTime)
+    {
+        Print("enemy tick")
+    }
+}
+
+Main()
+{
+    Enemy* owner()
+    Enemy* [] registry
+    registry += owner
+
+    ${
+        for entity : registry
+        {
+            ?entity.Tick(0.1)
+        }
+
+        owner = null
+
+        for entity : registry
+        {
+            ?entity.Tick(0.1) // Skips the null slot.
+        }
+        Print(registry.Len)
+        Print(registry[0] == null)
+    }
+}

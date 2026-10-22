@@ -1,0 +1,27 @@
+// EXPECT: walk, then cat.
+// PITFALL: calling Walk() inside its own override recurses.
+// FIX: base.Walk() calls the inherited implementation.
+Animal
+{
+    Walk()
+    {
+        Print("walk")
+    }
+}
+
+Cat : Animal
+{
+    Walk()
+    {
+        ${
+            base.Walk()
+            Print("cat")
+        }
+    }
+}
+
+Main()
+{
+    Cat cat()
+    cat.Walk()
+}

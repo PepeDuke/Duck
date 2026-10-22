@@ -1,0 +1,21 @@
+// EXPECT: one "used" message; the second callback skips the dead resource.
+// PITFALL: capturing an alias does not give the callback ownership.
+Item
+{
+    Use() { Print("used") }
+}
+
+Main()
+{
+    Item* owner()
+    alias : owner
+    func callback = @ (){
+        ?alias.Use()
+    }
+
+    ${
+        callback()
+        owner = null
+        callback()
+    }
+}

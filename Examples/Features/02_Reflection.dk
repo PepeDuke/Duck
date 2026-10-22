@@ -1,0 +1,16 @@
+// EXPECT: Actor->Describe().
+// PITFALL: reflection describes a member; it is not a substitute for
+// invoking that member on an object.
+Actor
+{
+    Describe()
+    {
+        Print(this.Actor.GetName() + "->" + this.Actor.Describe.GetName() + "()")
+    }
+}
+
+Main()
+{
+    Actor actor()
+    actor.Describe()
+}

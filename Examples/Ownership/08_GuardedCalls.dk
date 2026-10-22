@@ -1,0 +1,24 @@
+// EXPECT: two "used" messages before destruction, none afterward.
+// PITFALL: a retained variable name does not imply a live resource.
+// if and ? protect the checked call from null invalidation during use.
+Item
+{
+    Use()
+    {
+        Print("used")
+    }
+}
+
+Main()
+{
+    Item* owner()
+    alias : owner
+    if alias
+        alias.Use()
+    ?alias.Use()
+
+    owner = null
+    if alias
+        alias.Use()
+    ?alias.Use()
+}

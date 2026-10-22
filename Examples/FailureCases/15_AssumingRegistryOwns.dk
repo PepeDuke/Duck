@@ -1,0 +1,17 @@
+// INTENTIONAL LOGIC BUG: a registry of aliases outlives the entity owner.
+// EXPECT: registry.Len is 1 but registry[0] is null.
+// FIX: keep an explicit owner alive for as long as the registry needs the
+// entity. Ownership must be designed, not inferred from membership.
+Enemy {}
+
+Main()
+{
+    Enemy* [] registry
+    if true
+    {
+        Enemy* owner()
+        registry += owner
+    }
+    Print(registry.Len)
+    Print(registry[0] == null)
+}

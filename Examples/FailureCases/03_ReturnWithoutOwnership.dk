@@ -1,0 +1,19 @@
+// INTENTIONALLY BROKEN: a factory returns an alias to a local owner.
+// EXPECT: result is null after the local owner leaves its scope.
+// FIX: return ::local to return ownership.
+Item {}
+
+Factory
+#{
+    Item* Make()
+    {
+        Item* local()
+        return local
+    }
+}
+
+Main()
+{
+    result : Factory.Make()
+    Print(result == null) // true: the factory did not return ownership.
+}

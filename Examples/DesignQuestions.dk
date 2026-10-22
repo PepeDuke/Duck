@@ -1,0 +1,85 @@
+/*
+OPEN DESIGN QUESTIONS -- NOT EXECUTABLE TESTS
+
+These cases are intentionally not assigned invented outcomes. The examples
+elsewhere use the clarified rules; this file records remaining boundaries.
+
+1. Receiving returned ownership
+   The factory tutorial uses item :: Factory.Make() to make ownership intent
+   explicit. Does item : Factory.Make() also become an owner when Make
+   returns ::local? The README's older factory call uses :.
+   Specify how a returned owning temporary is consumed by each form.
+
+2. Assigning into an existing owner
+   Item* a()
+   Item* b()
+   a = b
+   Does this destroy a's original resource and turn a into an alias?
+   Is it rejected without an explicit destruction step?
+
+3. Self-transfer and repeated transfer
+   owner :: owner
+   next :: owner followed by another :: owner
+   Define rejection, null propagation, and whether :: can target an
+   existing variable or only declare a new one.
+
+4. Owning collections
+   items += ::Item() is documented for in-place allocation.
+   Define which slot owns the item, how ownership leaves a slot, and what
+   removal, Clear(), replacement, and collection moves do to that owner.
+
+5. References into relocatable storage
+   What happens to an alias to an array element after growth or removal?
+   Heap-object aliases and references to the element slot are different.
+   Do not assume a container's relocation policy from its surface syntax.
+
+6. Pointer arithmetic
+   The README says pointer arithmetic can leave owner tracking.
+   Define the unsafe boundary, permitted address operations, and diagnostics.
+   Do not assume two separately allocated objects occupy adjacent addresses.
+
+7. Lock granularity and nested $
+   Is a resource a field, an object, an array element, or an entire array?
+   How are aliases recognized as the same protected resource?
+   How do nested blocks and calls into other $ functions avoid deadlock?
+   The tutorials demonstrate required exclusion, not a lock algorithm.
+
+8. Dynamic resource discovery
+   A guarded duck call, virtual override, callback, or loop may touch
+   resources unknown until runtime. How are those resources protected
+   before entering $? What restrictions or runtime support are required?
+
+9. Reads during a $ block
+   Other threads cannot modify protected resources. Can they read them,
+   and if so, can they observe an intermediate state?
+
+10. Destruction during execution
+    Cleanup is deferred until existing use finishes. Specify destructor
+    ordering, destructor thread, recursive destruction, and new calls
+    racing with invalidation. No timing or cancellation API is assumed.
+
+11. Scalar nulls and collection results
+    What is the type of ?values[index] when the access is invalid?
+    The README's (s += 4) example returns 3 for a three-element collection,
+    despite zero-based indexing elsewhere. Is this a count or an index?
+    Tutorials avoid assigning an outcome to that insertion expression.
+
+12. Custom scope boundaries
+    Specify behavior across threads, nested scopes with the same name,
+    and a repeated @start while old scoped resources are still in use.
+
+13. Errors and test discovery
+    Specify which invalid patterns are compile-time errors versus runtime
+    errors, how runtime errors are handled, and how T blocks are executed.
+    Failure fixtures describe intended failures without inventing messages.
+
+14. Compile-time and macro boundaries
+    Define allowed compile-time effects, expansion hygiene, and recursion
+    limits. The examples use the README's Switch spelling; a complete
+    grammar should settle spelling and all macro expansion contexts.
+
+15. Numeric and encoding details
+    Specify overflow, narrowing, negative float-to-integer conversion,
+    integer widths, Unicode indexing, and platform pointer width.
+    The existing conversion examples alone do not define all edge cases.
+*/

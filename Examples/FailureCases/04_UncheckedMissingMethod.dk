@@ -1,0 +1,10 @@
+// INTENTIONALLY BROKEN: runtime duck call to an absent function.
+// EXPECT: runtime error.
+// FIX: ?actor..Tick(0.1) skips the missing function.
+Actor {}
+
+Main()
+{
+    Actor actor()
+    actor..Tick(0.1)
+}

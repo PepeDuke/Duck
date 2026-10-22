@@ -1,0 +1,21 @@
+// EXPECT: both tests pass when supported by a Duck test runner.
+// PITFALL: testing a few executions does not prove a concurrency guarantee.
+// Tests complement the language's synchronization rules.
+Arithmetic
+#{
+    int Double(int value)
+    {
+        return value * 2
+    }
+}
+T{
+    DoublesPositive()
+    {
+        T.AreEqual(Arithmetic.Double(3), 6)
+    }
+
+    DoublesZero()
+    {
+        T.IsTrue(Arithmetic.Double(0) == 0)
+    }
+}

@@ -1,0 +1,50 @@
+/*
+DUCK EXAMPLES: READING GUIDE
+
+Duck is in the design stage. These are specification examples, not
+compiler-validated programs. Each numbered .dk lesson is independent:
+do not compile the whole Examples directory as one program. Many lessons
+declare their own Main and reuse container names.
+
+Read in this order:
+  Tutorial/01..06       Values, functions, containers, and access.
+  Collections/01..05    Arrays, bounds, maps, ranges, and loop chaining.
+  Ownership/01..09      Owners, aliases, transfers, factories, destruction.
+  Concurrency/01..04    Resource synchronization and explicit $ protection.
+  Containers/01..05     Inheritance, duck calls, properties, initialization.
+  Features/01..05       Enums, reflection, lambdas, baking, built-in tests.
+  Lifecycle/01..03      Custom scopes and frame lifetimes.
+  Markup/01..02         Components and repeated children.
+  CompileTime/01..02    Definitions and macros.
+  Games/01             Combining ownership, collections, and safe calls.
+
+FailureCases contains deliberately broken .dk examples. Read each header
+before using one. Some are invalid code, some fail at runtime, and others
+demonstrate logic bugs or scheduling-dependent results. Expected diagnostic
+wording is descriptive, not a promise of exact compiler output.
+
+DesignQuestions.dk records cases the current design does not settle.
+Do not treat these as established rules or runnable tests.
+
+Existing Basic and Arrays examples predate this tutorial and are preserved.
+The project README is the language design reference.
+
+Conventions:
+  EXPECT: the intended observable result under the documented design.
+  PITFALL: a tempting mistake and why it matters.
+  FIX: the safe or correct alternative.
+  Output comments describe values, not exact formatting of Print.
+  Invalid alternatives in successful lessons remain commented out.
+
+Key rules:
+  : infers a local type; :: allocates on the heap or transfers ownership.
+  Transferring ownership makes the previous owning variable null.
+  Existing aliases follow the resource under its new owner.
+  Only the current owner can transfer ownership.
+  Destruction nulls aliases everywhere; collection entries remain.
+  Cleanup waits for existing protected uses to finish.
+  Returning heap ownership requires return ::resource.
+  Resource reads wait for preceding work affecting that resource.
+  $ orders work and locks the resources the block uses, including callees.
+  A check and a modification need $ for an atomic multi-step guarantee.
+*/

@@ -1,0 +1,23 @@
+// EXPECT: 1, true, true.
+// PITFALL: an alias collection is not an owner collection.
+// Destruction leaves a null slot rather than removing the slot.
+Item {}
+
+Holder
+{
+    Item* Reference
+}
+
+Main()
+{
+    Item* owner()
+    Item* [] aliases
+    aliases += owner
+    Holder holder()
+    holder.Reference = owner
+
+    owner = null
+    Print(aliases.Len)
+    Print(aliases[0] == null)
+    Print(holder.Reference == null)
+}

@@ -1,0 +1,12 @@
+// INTENTIONAL LOGIC BUG: zero-length traversal written as a range.
+// EXPECT: 0 and -1; the loop is not empty.
+// FIX: for int i = 0; i < values.Len; i++
+// Using values[i] in this loop would also access invalid indices.
+Main()
+{
+    int [] values
+    for i : 0...values.Len-1
+    {
+        Print(i)
+    }
+}

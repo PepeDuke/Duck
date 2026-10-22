@@ -1,0 +1,11 @@
+// INTENTIONALLY INVALID: a blank line separates chained container blocks.
+// EXPECT: invalid container definition under the README's adjacency rule.
+// FIX: remove the blank line between the closing } and opening #{.
+Example
+{
+    Foo() {}
+}
+
+#{
+    Bar() {}
+}

@@ -1,0 +1,25 @@
+// EXPECT: 2, then 3.
+// PITFALL: the protected resources include accesses inside Increment;
+// they are not limited to names directly written in the $ block.
+Counter
+{
+    int Value = 0
+    Increment()
+    {
+        Value++
+    }
+}
+
+Main()
+{
+    Counter counter()
+    counter.Increment()
+    ${
+        // Earlier work touching Value finishes before block entry.
+        counter.Increment()
+        Print(counter.Value)
+        counter.Increment()
+        Print(counter.Value)
+        // Other threads cannot modify Value between these statements.
+    }
+}

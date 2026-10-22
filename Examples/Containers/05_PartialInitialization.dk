@@ -1,0 +1,33 @@
+// EXPECT: spawned, then ready.
+// PITFALL: a normal constructor alone may leave inherited initialization
+// incomplete. Supply the required partial-constructor arguments too.
+World {}
+
+Entity
+{
+    -Entity(World world)
+    {
+        Print("spawned")
+    }
+}
+
+Gun : Entity
+{
+    Gun(int ammo) {}
+
+    Use()
+    {
+        Print("ready")
+    }
+}
+
+Main()
+{
+    World world()
+    Gun gun(5)
+    // gun.Use() // Invalid here: partial initialization is incomplete.
+    ${
+        gun(world)
+        gun.Use()
+    }
+}

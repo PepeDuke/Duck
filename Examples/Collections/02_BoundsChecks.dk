@@ -1,0 +1,13 @@
+// EXPECT: 10. The out-of-range guarded write is skipped.
+// PITFALL: guarding one index does not validate other indices.
+Main()
+{
+    int [] values = {10,20}
+    ?values[5] = 99
+
+    if IsValid(values[0])
+        Print(values[0])
+
+    // Print(values[5]) // Invalid index; do not rely on an unchecked read.
+    // FIX: use IsValid(values[index]) or ? on the actual access.
+}
