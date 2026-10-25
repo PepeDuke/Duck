@@ -1,0 +1,29 @@
+// EXPECT: 10, 2.5, 1.
+int Choose(bool first)
+{
+    int result
+    if first
+    {
+        result = 10
+    }
+    else
+    {
+        result = 20
+    }
+    return result
+}
+
+Main()
+{
+    int count
+    count = Choose(true)
+    Print(count)
+    double amount
+    amount = 2.5
+    Print(amount)
+    bool ready
+    ready = count > 0
+    Print(ready)
+    // int missing
+    // Print(missing) // Error: missing may be read before assignment.
+}

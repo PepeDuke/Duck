@@ -1,0 +1,22 @@
+// EXPECT: 2.5, 5, 3, 1.
+double Scale(double value, double factor)
+{
+    return value * factor
+}
+
+Advance(float& value)
+{
+    value += 0.5
+}
+
+Main()
+{
+    float position = 2.0
+    Advance(position)
+    Print(position)
+    #double factor = 2.0
+    Print(Scale(position, factor))
+    double promoted = 3
+    Print(promoted)
+    Print(promoted > position)
+}

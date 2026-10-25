@@ -1,0 +1,26 @@
+// EXPECT: 14, 28, 1.
+Math
+#{
+    int Twice(int value)
+    {
+        return value * 2
+    }
+
+    int FourTimes(int value)
+    {
+        return Twice(Twice(value))
+    }
+}
+#{
+    bool Positive(int value)
+    {
+        return value > 0
+    }
+}
+
+Main()
+{
+    Print(Math.Twice(7))
+    Print(Math.FourTimes(7))
+    Print(Math.Positive(7))
+}

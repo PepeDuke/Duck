@@ -1,0 +1,8 @@
+// Compile this file together with Even.dk and Odd.dk. EXPECT: 42, 1.
+Main()
+{
+    int value = 40
+    AddTwo(value)
+    Print(value)
+    Print(IsEven(value))
+}

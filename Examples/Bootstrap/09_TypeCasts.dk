@@ -1,0 +1,11 @@
+// EXPECT: 9, -10, 0, 1, 3.5.
+Main()
+{
+    double value = 9.99
+    Print((int)value)
+    Print((int)-value)
+    long wide = 4294967296
+    Print((int)wide)
+    Print((int)(bool)value)
+    Print((double)7 / 2)
+}

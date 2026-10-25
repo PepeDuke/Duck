@@ -21,7 +21,11 @@ Duck forces type safety for functions as they are the worse offenders in automat
 Duck syntax is based on my personal preferences and my imagination of the perfect syntax. I like type safety as in my opinion it makes code simpler to read especially as you get return from functions/method and you have to mouse over to see what it is actually returning, with type safety you see it right there. But on the other hand i'm not fan of verbose syntax, as it makes the whole code unnecessarily too large.
 
 # Project status
-Current status: **design stage**
+Current status: **early C++ bootstrap compiler**. The language design below is
+broader than the implemented subset. See [Compiler/README.md](Compiler/README.md)
+for build instructions, executable examples, and current limitations.
+The separate [build tool](BuildTool/README.md) builds modular programs from
+`.dkp` projects, with explicit dependencies, optional modules, and native linking.
 
 stages
 1. design stage - make sure the syntax is consistent, complete and simple to use
@@ -335,6 +339,44 @@ markup // <-- hold tags tree for Mark Up
 func // <-- holds function
 macro // <-- return type of macros
 ```
+## Explicit type casts in Duck
+
+Duck uses C-style cast syntax: put the target type in parentheses before the
+expression to convert.
+
+``` c++
+int count = 7
+long wide = (long)count
+double precise = (double)count
+int64 sameWidth = (int64)wide
+```
+
+A cast binds like a unary operator. `(long)a + b` casts only `a`, while
+`(long)(a + b)` casts the result of the addition. Casts can be nested, such as
+`(double)(long)count`. Parentheses without a type still group expressions.
+
+Explicit casts do not change the declared type of the source variable and do
+not produce a mutable reference. A function expecting `long&` requires a real
+`long` variable; `(long)value` is a converted value, not a reference argument.
+
+The current numeric cast rules are:
+
+- Floating-point to integer floors toward negative infinity: `(int)9.99` is `9`
+  and `(int)-9.99` is `-10`. NaN, infinity, or a floored result outside the target
+  integer range causes a runtime trap. This differs from C/C++ despite using
+  the same cast syntax.
+- Narrowing `long` to `int` retains the low 32 bits, interpreted as a signed
+  integer. Widening `int` to `long` preserves the signed value.
+- Floating-point narrowing may round or overflow to infinity. A cast of an
+  already-rounded value does not recover precision.
+- Numeric-to-`bool` is false for zero and true otherwise (including NaN).
+  `bool` converts to numeric `0` or `1`.
+
+The bootstrap supports casts among `int`, `long`, `float`, `double`, and `bool`,
+including `int32`/`int64` aliases. Casts involving objects, pointers, text, and
+`void` are not implemented. Implicit narrowing remains rejected; write an
+explicit cast when conversion is intended.
+
 ## Constant variables in Duck
 as cont sign we use the same as static
 ``` c++

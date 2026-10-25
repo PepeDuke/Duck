@@ -1,0 +1,23 @@
+// EXPECT: 5000000001, 10000000002, -9223372036854775808.
+Counters
+#{
+    Advance(long& value)
+    {
+        value++
+    }
+
+    long Twice(long value)
+    {
+        return value * 2
+    }
+}
+
+Main()
+{
+    int64 count = 5000000000
+    Counters.Advance(count)
+    Print(count)
+    Print(Counters.Twice(count))
+    #long minimum = -9223372036854775808
+    Print(minimum)
+}

@@ -1,0 +1,5 @@
+// Optional module. No automatic runtime registration is implemented yet.
+int MetricTotal(int first, int second)
+{
+    return Add(first, second)
+}

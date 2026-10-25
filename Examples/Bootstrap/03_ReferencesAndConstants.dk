@@ -1,0 +1,29 @@
+// EXPECT: 12, 1, 10.
+Add(int& target, int amount)
+{
+    target += amount
+}
+
+Forward(int& target)
+{
+    Add(target, 2) // The original variable is forwarded, not a copy.
+}
+
+Enable(bool& flag)
+{
+    flag = true
+}
+
+Main()
+{
+    #int initial = 10
+    int count = initial
+    Forward(count)
+    Print(count)
+
+    bool enabled = false
+    Enable(enabled)
+    Print(enabled)
+    Print(initial)
+    // initial++ and Add(initial, 2) are compile errors: initial is constant.
+}

@@ -1,0 +1,6 @@
+bool IsOdd(int value)
+{
+    if value == 0
+        return false
+    return IsEven(value - 1)
+}

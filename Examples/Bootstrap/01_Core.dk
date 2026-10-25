@@ -1,0 +1,40 @@
+// Executable with the initial C++/LLVM bootstrap compiler.
+int Add(int a, int b)
+{
+    return a + b
+}
+
+Main()
+{
+    answer : Add(20, 22)
+    Print(answer)
+    int count = 0
+    while count < 3
+    {
+        Print(count)
+        count++
+    }
+    Print(Factorial(5)) // Forward references are supported.
+    bool ready = answer == 42
+    if ready
+    {
+        Print(ready)
+    }
+    else
+    {
+        Print(false)
+    }
+    Print("100% Duck")
+}
+
+int Factorial(int value)
+{
+    if value <= 1
+    {
+        return 1
+    }
+    else
+    {
+        return value * Factorial(value - 1)
+    }
+}

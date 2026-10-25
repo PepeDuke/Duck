@@ -26,8 +26,8 @@ Main ()
     // numDouble : 9.99 would assume it is float, so we specify the type 
     double numDouble = 9.99
     int numInt
-    // implicit conversion is floor
-    numInt = numDouble
+    // Explicit conversion floors toward negative infinity: 9.99 -> 9, -9.99 -> -10.
+    numInt = (int)numDouble
     
     Print("num_int =" + numInt)
     Print("num_double =" + numDouble)

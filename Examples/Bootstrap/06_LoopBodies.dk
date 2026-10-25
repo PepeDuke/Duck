@@ -1,0 +1,20 @@
+// EXPECT: 2, 3, 9, 4.
+Main()
+{
+    int count = 0
+    do
+    {
+        count++
+        if count == 1
+            continue
+        Print(count)
+    } while count < 3
+
+    {
+        int count = 9
+        Print(count)
+    }
+    while count < 4
+        count++
+    Print(count)
+}

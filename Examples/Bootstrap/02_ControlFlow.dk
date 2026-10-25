@@ -1,0 +1,22 @@
+// EXPECT: 9, selected, 1.
+Main()
+{
+    int sum = 0
+    for int i = 0; i < 6; i++
+    {
+        if i == 1
+        {
+            continue // Runs the for-loop increment before checking again.
+        }
+        else if i == 5
+        {
+            break
+        }
+        sum += i
+    }
+    Print(sum)
+
+    label : sum == 9 ? "selected" | "unexpected"
+    Print(label)
+    Print(sum > 0 && (sum == 8 || sum == 9))
+}

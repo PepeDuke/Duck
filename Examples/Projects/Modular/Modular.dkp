@@ -1,0 +1,22 @@
+version = 1
+
+[project]
+name = "ModularDemo"
+entry = "app"
+
+[modules.core]
+sources = ["core/*.dk"]
+
+[modules.app]
+sources = ["app/*.dk"]
+depends = ["core"]
+
+[modules.metrics]
+sources = ["metrics/*.dk"]
+depends = ["core"]
+enabled = false
+
+# Native libraries can be configured globally or in an individual module:
+# [link]
+# library_paths = ["native/lib"]
+# libraries = ["example"]

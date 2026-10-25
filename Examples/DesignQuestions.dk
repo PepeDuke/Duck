@@ -79,7 +79,8 @@ elsewhere use the clarified rules; this file records remaining boundaries.
     grammar should settle spelling and all macro expansion contexts.
 
 15. Numeric and encoding details
-    Specify overflow, narrowing, negative float-to-integer conversion,
+    Explicit float-to-integer casts now floor toward negative infinity.
+    Specify remaining overflow and implicit narrowing policies,
     integer widths, Unicode indexing, and platform pointer width.
     The existing conversion examples alone do not define all edge cases.
 */

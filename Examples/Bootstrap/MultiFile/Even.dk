@@ -1,0 +1,11 @@
+AddTwo(int& value)
+{
+    value += 2
+}
+
+bool IsEven(int value)
+{
+    if value == 0
+        return true
+    return IsOdd(value - 1)
+}
