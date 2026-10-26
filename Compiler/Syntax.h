@@ -16,15 +16,37 @@ struct Token {
                            std::to_string(t.line) + ":" +
                            std::to_string(t.column) + ": error: " + message);
 }
-enum class Type { Void, Int, Long, Float, Double, Bool, Text };
+enum class Type {
+  Void, Int8, Short, Int, Long, UInt8, UInt16, UInt32, UInt64,
+  Float, Double, Bool, Text
+};
 inline bool floating(Type t) { return t == Type::Float || t == Type::Double; }
-inline bool integral(Type t) { return t == Type::Int || t == Type::Long; }
+inline bool unsignedInteger(Type t) {
+  return t == Type::UInt8 || t == Type::UInt16 ||
+         t == Type::UInt32 || t == Type::UInt64;
+}
+inline int integerWidth(Type t) {
+  return t == Type::Int8 || t == Type::UInt8 ? 8
+       : t == Type::Short || t == Type::UInt16 ? 16
+       : t == Type::Int || t == Type::UInt32 ? 32
+       : t == Type::Long || t == Type::UInt64 ? 64 : 0;
+}
+inline bool integral(Type t) { return integerWidth(t) != 0; }
 inline bool numeric(Type t) { return integral(t) || floating(t); }
 inline Type commonNumeric(Type a, Type b) {
-  return a == Type::Double || b == Type::Double ? Type::Double
-         : a == Type::Float || b == Type::Float ? Type::Float
-         : a == Type::Long || b == Type::Long   ? Type::Long
-                                                : Type::Int;
+  if (a == Type::Double || b == Type::Double)
+    return Type::Double;
+  if (a == Type::Float || b == Type::Float)
+    return Type::Float;
+  if (unsignedInteger(a) == unsignedInteger(b))
+    return integerWidth(a) >= integerWidth(b) ? a : b;
+  const auto signedType = unsignedInteger(a) ? b : a;
+  const auto unsignedType = unsignedInteger(a) ? a : b;
+  for (auto candidate : {Type::Int8, Type::Short, Type::Int, Type::Long})
+    if (integerWidth(candidate) >= integerWidth(signedType) &&
+        integerWidth(candidate) > integerWidth(unsignedType))
+      return candidate;
+  return Type::Void; // No lossless common integer type in this bootstrap.
 }
 struct Expr {
   Token token;

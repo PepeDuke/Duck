@@ -11,10 +11,22 @@ namespace duck {
 namespace {
 std::string typeName(Type type) {
   switch (type) {
+  case Type::Int8:
+    return "int8";
+  case Type::Short:
+    return "short";
   case Type::Int:
     return "int";
   case Type::Long:
     return "long";
+  case Type::UInt8:
+    return "uint8";
+  case Type::UInt16:
+    return "uint16";
+  case Type::UInt32:
+    return "uint32";
+  case Type::UInt64:
+    return "uint64";
   case Type::Float:
     return "float";
   case Type::Double:
@@ -88,6 +100,13 @@ class Analyzer {
     }
     require(from, to, e.token);
   }
+  Type common(Type a, Type b, const Token &token) {
+    const auto type = commonNumeric(a, b);
+    if (type == Type::Void)
+      fail(token, "mixed signed and unsigned values require an explicit cast: "
+                  "no common integer type can represent both ranges");
+    return type;
+  }
   Type expression(const Expr &e, Type expected = Type::Void) {
     auto type = checkExpression(e, expected);
     analysis.expressionTypes.emplace(&e, type);
@@ -129,20 +148,47 @@ class Analyzer {
       analysis.floatingConstants[&e] = encoded.str();
       return type;
     }
-    if (e.kind == "int") {
+    // Parse magnitudes without passing through a signed host integer. A
+    // negated literal is checked as a whole, including the signed minima.
+    const bool negativeLiteral = e.kind == "unary" && op == "-" &&
+                                 e.args[0]->kind == "int";
+    if (e.kind == "int" || negativeLiteral) {
+      const auto &digits = negativeLiteral ? e.args[0]->token.text : op;
       size_t consumed = 0;
-      long long value = 0;
+      uint64_t value = 0;
       try {
-        value = std::stoll(op, &consumed);
+        value = std::stoull(digits, &consumed);
       } catch (...) {
         fail(e.token, "integer literal out of range");
       }
-      if (consumed != op.size())
+      if (consumed != digits.size())
         fail(e.token, "invalid integer literal");
-      return expected == Type::Long ||
-                     value > std::numeric_limits<int32_t>::max()
-                 ? Type::Long
-                 : Type::Int;
+      Type type;
+      if (negativeLiteral) {
+        if (value > (uint64_t{1} << 63))
+          fail(e.token, "integer literal out of range");
+        type = value <= (uint64_t{1} << 31) ? Type::Int : Type::Long;
+      } else
+        type = value <= uint64_t(std::numeric_limits<int32_t>::max()) ? Type::Int
+             : value <= uint64_t(std::numeric_limits<int64_t>::max()) ? Type::Long
+                                                            : Type::UInt64;
+      if (integral(expected) && expected != Type::Int) {
+        const auto width = integerWidth(expected);
+        const auto limit = unsignedInteger(expected)
+            ? (width == 64 ? std::numeric_limits<uint64_t>::max()
+                           : (uint64_t{1} << width) - 1)
+            : (uint64_t{1} << (width - 1)) - (negativeLiteral ? 0 : 1);
+        if (value > limit || (unsignedInteger(expected) && negativeLiteral && value != 0))
+          fail(e.token, "integer literal out of range for " + typeName(expected));
+        type = expected;
+      }
+      analysis.integerConstants[&e] =
+          (negativeLiteral && value != 0 ? "-" : "") + std::to_string(value);
+      if (negativeLiteral) {
+        analysis.expressionTypes.emplace(e.args[0].get(), type);
+        analysis.integerConstants[e.args[0].get()] = std::to_string(value);
+      }
+      return type;
     }
     if (e.kind == "bool")
       return Type::Bool;
@@ -194,16 +240,6 @@ class Analyzer {
       }
       return signature.result;
     }
-    if (e.kind == "unary" && op == "-" && e.args[0]->kind == "int" &&
-        e.args[0]->token.text == "9223372036854775808") {
-      analysis.expressionTypes.emplace(e.args[0].get(), Type::Long);
-      return Type::Long;
-    }
-    if (e.kind == "unary" && op == "-" && e.args[0]->kind == "int" &&
-        e.args[0]->token.text == "2147483648") {
-      analysis.expressionTypes.emplace(e.args[0].get(), Type::Int);
-      return Type::Int;
-    }
     auto first = expression(*e.args[0],
                             e.kind == "unary" && op == "-" && numeric(expected)
                                 ? expected
@@ -215,10 +251,10 @@ class Analyzer {
         fail(e.token, "conditional branches must produce values");
       auto no = expression(*e.args[2], expected);
       if (numeric(yes) && numeric(no)) {
-        auto common = commonNumeric(yes, no);
-        convert(*e.args[1], yes, common);
-        convert(*e.args[2], no, common);
-        return common;
+        auto type = common(yes, no, e.token);
+        convert(*e.args[1], yes, type);
+        convert(*e.args[2], no, type);
+        return type;
       }
       require(no, yes, e.token);
       return yes;
@@ -237,10 +273,10 @@ class Analyzer {
     }
     auto second = expression(*e.args[1]);
     if (numeric(first) && numeric(second)) {
-      auto common = commonNumeric(first, second);
-      convert(*e.args[0], first, common);
-      convert(*e.args[1], second, common);
-      first = common;
+      auto type = common(first, second, e.token);
+      convert(*e.args[0], first, type);
+      convert(*e.args[1], second, type);
+      first = type;
     } else
       require(second, first, e.token);
     if (op == "==" || op == "!=") {

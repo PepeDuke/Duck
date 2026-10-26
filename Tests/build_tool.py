@@ -151,6 +151,25 @@ class Projects(unittest.TestCase):
         exe = output / ("Demo.exe" if os.name == "nt" else "Demo")
         self.assertEqual(subprocess.check_output([str(exe)], text=True).strip(), "10000000002")
 
+    def test_unsigned_interface(self):
+        (self.root / "core.dk").write_text(
+            "Bump(byte& b, uint& n) { b++; n++ }\n"
+            "uint64 Divide(uint64 n) { return n / (uint64)3 }\n"
+            "uint16 Small(uint16 n) { return n }\n"
+            "int8 Signed(int8 n) { return n }", encoding="utf-8")
+        (self.root / "app.dk").write_text(
+            "Main() { uint8 b = 255; uint32 n = 4294967295; Bump(b, n); "
+            "Print(b); Print(n); Print(Divide(18446744073709551615)); "
+            "Print(Small(65535)); Print(Signed(-128)) }", encoding="utf-8")
+        for profile in ("debug", "release"):
+            with self.subTest(profile=profile):
+                self.invoke("--profile", profile)
+                output = self.root / ".duck/build" / profile
+                self.assertIn("declare i64 @duck.Divide(i64)", (output / "app.ll").read_text())
+                exe = output / ("Demo.exe" if os.name == "nt" else "Demo")
+                self.assertEqual(subprocess.check_output([str(exe)], text=True).splitlines(),
+                                 ["0", "0", "6148914691236517205", "65535", "-128"])
+
     def test_transitive_dependency_is_not_implicitly_imported(self):
         self.write(BASE.replace('depends = ["core"]', 'depends = ["extra"]', 1).replace('enabled = false', 'enabled = true'))
         result = self.invoke(success=False)

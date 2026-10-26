@@ -5,6 +5,28 @@ function(run_program name source expected)
   run_files("${name}" "${expected}" "${WORK}/${name}.dk")
 endfunction()
 
+function(trap_program name source)
+  file(WRITE "${WORK}/${name}.dk" "${source}")
+  execute_process(COMMAND "${COMPILER}" "${WORK}/${name}.dk" -o "${WORK}/${name}.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+  if(NOT status EQUAL 0)
+    message(FATAL_ERROR "${name}: compilation failed: ${errors}")
+  endif()
+  file(READ "${WORK}/${name}.ll" ir)
+  if(NOT ir MATCHES "call void @llvm.trap")
+    message(FATAL_ERROR "${name}: missing runtime trap")
+  endif()
+  foreach(optimization IN ITEMS -O0 -O2)
+    execute_process(COMMAND "${CLANG}" ${optimization} "${WORK}/${name}.ll" -o "${WORK}/${name}.exe" RESULT_VARIABLE status ERROR_VARIABLE errors)
+    if(NOT status EQUAL 0)
+      message(FATAL_ERROR "${name} ${optimization}: LLVM/link failure: ${errors}")
+    endif()
+    execute_process(COMMAND "${WORK}/${name}.exe" RESULT_VARIABLE status OUTPUT_VARIABLE actual ERROR_VARIABLE errors TIMEOUT 10)
+    if("${status}" STREQUAL "0" OR "${status}" MATCHES "[Tt]imeout|[Nn]o such|[Pp]ermission")
+      message(FATAL_ERROR "${name} ${optimization}: expected runtime trap, got ${status}: ${errors}")
+    endif()
+  endforeach()
+endfunction()
+
 function(run_files name expected)
   execute_process(COMMAND "${COMPILER}" ${ARGN} -o "${WORK}/${name}.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
   if(NOT status EQUAL 0)
@@ -198,7 +220,7 @@ reject(brace "Main() {" "expected '}'")
 reject(separator "Main() { Print(1) Print(2) }" "expected newline")
 reject(entry "main() {}" "program requires Main")
 reject(entry_signature "int Main() { return 0 }" "bootstrap entry point")
-reject(unsupported "Main() { uint n = 1 }" "syntax may not be supported")
+reject(unsupported "Main() { big n = 1 }" "syntax may not be supported")
 reject(void_value "F() {}\nMain() { n : F() }" "locals currently support")
 reject(break_outside "Main() { break }" "requires an enclosing loop")
 reject(continue_outside "Main() { continue }" "requires an enclosing loop")
@@ -702,4 +724,240 @@ reject(cast_text "Main() { Print((int)\"12\") }" "casts currently require")
 reject(cast_void_result "F() {}\nMain() { Print((int)F()) }" "casts currently require")
 reject(cast_reference "F(long& n) {}\nMain() { n : 1; F((long)n) }" "must be a mutable variable")
 reject(cast_no_operand "Main() { Print((int)) }" "expected identifier")
+foreach(type IN ITEMS int8 short int long)
+  if(type STREQUAL "int8")
+    set(minimum "-128")
+  elseif(type STREQUAL "short")
+    set(minimum "-32768")
+  elseif(type STREQUAL "int")
+    set(minimum "-2147483648")
+  else()
+    set(minimum "-9223372036854775808")
+  endif()
+  foreach(op IN ITEMS / %)
+    if(op STREQUAL "/")
+      set(operation divide)
+    else()
+      set(operation remainder)
+    endif()
+    trap_program(${type}_${operation}_zero
+      "${type} F(${type} a, ${type} b) { return a ${op} b }\nMain() { Print(F(7, 0)) }")
+    trap_program(${type}_${operation}_overflow
+      "${type} F(${type} a, ${type} b) { return a ${op} b }\nMain() { Print(F(${minimum}, -1)) }")
+    trap_program(${type}_${operation}_assign_zero
+      "F(${type}& a, ${type} b) { a ${op}= b }\nMain() { ${type} n = 7; F(n, 0) }")
+    trap_program(${type}_${operation}_assign_overflow
+      "F(${type}& a, ${type} b) { a ${op}= b }\nMain() { ${type} n = ${minimum}; F(n, -1) }")
+  endforeach()
+  run_program(${type}_division_boundaries
+    "Main() { ${type} n = ${minimum}; Print(n / 1); Print(n % 1); Print(n / n); Print(n % n); ${type} a = -7; Print(a / 3); Print(a % 3); Print(a / -3); Print(a % -3); a /= -1; Print(a); a %= 3; Print(a) }"
+    "${minimum}\n0\n1\n0\n-2\n-1\n2\n-1\n7\n1\n")
+endforeach()
+run_program(division_control_flow [=[
+int Next(int& n) { n++; return n }
+int Divide(int a, int b) { return a / b }
+Main() {
+ n : 7
+ Print(Next(n) / Next(n))
+ Print(n)
+ Print(false && Divide(1, 0) == 0)
+ Print(true || Divide(-2147483648, -1) == 0)
+ Print(true ? 42 | Divide(1, 0))
+ Print(false ? Divide(1, 0) | 12 / 3)
+ Print((12 / 3 == 4) && (10 % 3 == 1))
+ Print(true ? 12 / 3 | 10 % 3)
+ for int i = 6; i / 2 > 0; i /= 2 { Print(i % 4) }
+ long wide = -2147483648
+ Print(wide / -1)
+ Print(-2147483648 / (long)-1)
+ Print(1.0 / 0.0 > 0.0)
+}
+]=] "0\n9\n0\n1\n42\n4\n1\n4\n2\n3\n2147483648\n2147483648\n1\n")
+file(READ "${SOURCE}/Examples/Bootstrap/10_SmallIntegers.dk" small_integers)
+run_program(small_integers "${small_integers}" "-128\n302\n-32768\n127\n-1\n-10\n")
+run_program(small_integer_operations [=[
+int8 Identity(int8 n) { return n }
+Change(int8& a, int8& b) { a = 12; b += a }
+Forward(int8& n) { Change(n, n) }
+Main() {
+ int8 a = -128
+ int8 b = 127
+ Print(-a)
+ Print(b + (int8)1)
+ Print(a - (int8)1)
+ Print((int8)64 * (int8)4)
+ Print(a < b)
+ Print(a == (short)-128)
+ a--; Print(a); a++; Print(a)
+ a = 10; a *= 12; a += 10; Print(a); a -= 1; Print(a)
+ Forward(a); Print(a)
+ short s = -32768
+ Print(-s)
+ s--; Print(s); s++; Print(s)
+ Print((short)16384 * (short)4)
+ Print(b + s)
+ Print(b + 1)
+ Print(Identity(-128))
+ int8 n
+ if true { n = 3 } else { n = -4 }
+ inferred : n
+ inferred++; Print(inferred)
+ Print(true ? n | s)
+ Print(false ? n | 128)
+ int32 i = n; int64 l = s; float f = n; double d = s
+ Print(i); Print(l); Print(f); Print(d)
+}
+]=] "-128\n-128\n127\n0\n1\n1\n127\n-128\n-126\n-127\n24\n-32768\n32767\n-32768\n0\n-32641\n128\n-128\n4\n3\n128\n3\n-32768\n3\n-32768\n")
+run_program(small_integer_casts [=[
+Main() {
+ Print((int8)128); Print((short)65535); Print((int8)(long)511)
+ Print((int8)(short)-129); Print((short)(int8)-128)
+ Print((bool)(int8)-128); Print((bool)(short)0)
+ Print((int8)true); Print((short)false)
+ Print((float)(int8)-128); Print((double)(short)-32768)
+ double hi8 = 127.99; double lo8 = -128.0
+ double hi16 = 32767.99; double lo16 = -32768.0
+ Print((int8)hi8); Print((int8)lo8)
+ Print((short)hi16); Print((short)lo16)
+}
+]=] "-128\n-1\n-1\n127\n-128\n1\n0\n1\n0\n-128\n-32768\n127\n-128\n32767\n-32768\n")
+foreach(type IN ITEMS int8 short)
+  if(type STREQUAL "int8")
+    set(above 128)
+    set(below -129)
+    set(fraction_below -128.01)
+  else()
+    set(above 32768)
+    set(below -32769)
+    set(fraction_below -32768.01)
+  endif()
+  reject(${type}_literal_high "Main() { ${type} n = ${above} }" "literal out of range")
+  reject(${type}_literal_low "Main() { ${type} n = ${below} }" "literal out of range")
+  reject(${type}_argument_range "F(${type} n) {}\nMain() { F(${above}) }" "literal out of range")
+  reject(${type}_return_range "${type} F() { return ${below} }\nMain() {}" "literal out of range")
+  reject(${type}_narrow "Main() { int n = 1; ${type} s = n }" "type mismatch")
+  reject(${type}_arithmetic_narrow "Main() { ${type} s = 1; s = s + 1 }" "type mismatch")
+  reject(${type}_reference_mismatch "F(${type}& n) {}\nMain() { int n = 1; F(n) }" "type mismatch")
+  reject(${type}_constant_reference "F(${type}& n) {}\nMain() { #${type} n = 1; F(n) }" "cannot pass a constant")
+  reject(${type}_uninitialized "Main() { ${type} n; Print(n) }" "read before assignment")
+  trap_program(${type}_cast_high "Main() { Print((${type})${above}.0) }")
+  trap_program(${type}_cast_low "Main() { double d = ${fraction_below}; Print((${type})d) }")
+  trap_program(${type}_cast_nan "Main() { Print((${type})(0.0 / 0.0)) }")
+  trap_program(${type}_cast_inf "Main() { Print((${type})(1.0 / 0.0)) }")
+endforeach()
+reject(short_to_int8 "Main() { short s = 1; int8 n = s }" "type mismatch")
+file(READ "${SOURCE}/Examples/Bootstrap/11_UnsignedIntegers.dk" unsigned_integers)
+run_program(unsigned_integers "${unsigned_integers}"
+  "0\n4294967295\n6148914691236517205\n1\n4294967294\n-1\n1\n")
+foreach(width IN ITEMS 8 16 32 64)
+  set(type "uint${width}")
+  if(width EQUAL 8)
+    set(maximum 255)
+    set(above 256)
+    set(half 128)
+    set(quotient 127)
+  elseif(width EQUAL 16)
+    set(maximum 65535)
+    set(above 65536)
+    set(half 32768)
+    set(quotient 32767)
+  elseif(width EQUAL 32)
+    set(maximum 4294967295)
+    set(above 4294967296)
+    set(half 2147483648)
+    set(quotient 2147483647)
+  else()
+    set(maximum 18446744073709551615)
+    set(above 18446744073709551616)
+    set(half 9223372036854775808)
+    set(quotient 9223372036854775807)
+  endif()
+  run_program(${type}_operations
+    "${type} Maximum() { return ${maximum} }\nChange(${type}& n) { n++; n -= 1 }\nMain() { #${type} top = Maximum(); ${type} n = top; Print(n); n++; Print(n); n--; Print(n); n *= 2; Print(n / (${type})2); Print(n % (${type})2); n = top; Print(n / (${type})2); Print(n % (${type})2); Print(n > (${type})${half}); Print(n >= top); Print(n < (${type})1); Print(n <= top); Print(n == top); Print(n != (${type})0); Change(n); Print(n); n = ${half}; Print(-n); Print(n / top); Print(n % top); n /= ${half}; Print(n); n %= 1; Print(n); Print((bool)n); Print((${type})true); Print((${type})false); Print((${type})-1); Print((${type})-0.0) }"
+    "${maximum}\n0\n${maximum}\n${quotient}\n0\n${quotient}\n1\n1\n1\n0\n1\n1\n1\n${maximum}\n${half}\n0\n${half}\n1\n0\n0\n1\n0\n${maximum}\n0\n")
+  reject(${type}_literal_overflow "Main() { ${type} n = ${above} }" "integer literal out of range")
+  reject(${type}_negative_literal "Main() { ${type} n = -1 }" "integer literal out of range")
+  reject(${type}_signed_assignment "Main() { int n = 1; ${type} u = n }" "type mismatch")
+  reject(${type}_signed_reference "F(${type}& n) {}\nMain() { int${width} n = 1; F(n) }" "type mismatch")
+  reject(${type}_constant_reference "F(${type}& n) {}\nMain() { #${type} n = 1; F(n) }" "cannot pass a constant")
+  reject(${type}_uninitialized "Main() { ${type} n; Print(n) }" "read before assignment")
+  reject(${type}_negative_return "${type} F() { return -1 }\nMain() {}" "integer literal out of range")
+  reject(${type}_overflow_argument "F(${type} n) {}\nMain() { F(${above}) }" "integer literal out of range")
+  foreach(op IN ITEMS / %)
+    if(op STREQUAL "/")
+      set(operation divide)
+    else()
+      set(operation remainder)
+    endif()
+    trap_program(${type}_${operation}_zero
+      "${type} F(${type} a, ${type} b) { return a ${op} b }\nMain() { Print(F(7, 0)) }")
+    trap_program(${type}_${operation}_assign_zero
+      "F(${type}& a, ${type} b) { a ${op}= b }\nMain() { ${type} n = 7; F(n, 0) }")
+  endforeach()
+  trap_program(${type}_cast_upper "Main() { double d = ${above}.0; Print((${type})d) }")
+  trap_program(${type}_cast_negative "Main() { Print((${type})-0.01) }")
+  trap_program(${type}_cast_nan "Main() { Print((${type})(0.0 / 0.0)) }")
+  trap_program(${type}_cast_infinity "Main() { Print((${type})(1.0 / 0.0)) }")
+endforeach()
+run_program(unsigned_conversions [=[
+Alias(byte& b, uint& u) { b++; u++ }
+Forward(uint8& b, uint32& u) { Alias(b, u) }
+uint64 Recurse(uint64 n) { if n == (uint64)0 { return 1 }; return Recurse(n - (uint64)1) * (uint64)2 }
+Main() {
+ byte b = 255; uint u = 4294967295
+ Forward(b, u); Print(b); Print(u)
+ b = 255; uint16 s = b; uint32 i = s; uint64 l = i
+ Print(s); Print(i); Print(l)
+ short ss = b; int si = s; long sl = i
+ Print(ss); Print(si); Print(sl)
+ Print((long)(uint32)4294967295)
+ Print((uint64)(int8)-1)
+ Print((int8)(uint8)255)
+ Print((short)(uint16)65535)
+ Print((int)(uint32)4294967295)
+ Print((long)(uint64)18446744073709551615)
+ Print((uint8)(uint64)18446744073709551615)
+ Print((uint16)(long)-1)
+ Print((int8)(uint16)256)
+ Print(18446744073709551615)
+ Print(-0009223372036854775808)
+ Print(-0002147483648)
+ Print(Recurse(4))
+ Print((float)(uint32)4294967295 > 0.0)
+ Print((double)(uint64)18446744073709551615 > 0.0)
+ Print((uint8)255.99)
+ Print((uint16)65535.99)
+ double limit32 = 4294967295.99
+ double limit64 = 18446744073709549568.0
+ Print((uint32)limit32); Print((uint64)limit64)
+ double power = 9223372036854775808.0
+ Print((uint64)power)
+}
+]=] "0\n0\n255\n255\n255\n255\n255\n255\n4294967295\n18446744073709551615\n-1\n-1\n-1\n-1\n255\n65535\n0\n18446744073709551615\n-9223372036854775808\n-2147483648\n16\n1\n1\n255\n65535\n4294967295\n18446744073709549568\n9223372036854775808\n")
+run_program(mixed_integers [=[
+Main() {
+ uint8 a = 255; int8 b = -128
+ Print(a + b); Print(b + a); Print(a > b); Print(b < a)
+ Print(true ? a | b); Print(false ? a | b)
+ uint16 c = 65535; short d = -32768
+ Print(c + d); Print(d + c)
+ uint32 e = 4294967295; int f = -2147483648
+ Print(e + f); Print(f + e); Print(e > f); Print(f > e)
+ Print(e == f); Print(e != f)
+ Print(e + 1); Print(1 + e)
+ Print(e / -1); Print(e % -2)
+ uint64 huge = 18446744073709551615
+ Print(false && huge / (uint64)0 == (uint64)0)
+ Print(true ? huge / (uint64)3 | huge / (uint64)0)
+ Print((huge / (uint64)3 > (uint64)0) && (huge % (uint64)2 == (uint64)1))
+}
+]=] "127\n127\n1\n1\n255\n-128\n32767\n32767\n2147483647\n2147483647\n1\n0\n0\n1\n4294967296\n4294967296\n-4294967295\n1\n0\n6148914691236517205\n1\n")
+reject(uint64_mixed "Main() { uint64 n = 1; Print(n + 1) }" "explicit cast")
+reject(uint64_mixed_reverse "Main() { uint64 n = 1; Print(-1 < n) }" "explicit cast")
+reject(uint64_conditional "Main() { uint64 n = 1; Print(true ? n | -1) }" "explicit cast")
+reject(uint64_to_long "Main() { uint64 n = 1; long s = n }" "type mismatch")
+reject(uint32_to_int "Main() { uint32 n = 1; int s = n }" "type mismatch")
+reject(unsigned_narrow "Main() { uint64 n = 1; uint32 s = n }" "type mismatch")
+reject(uint64_literal_overflow_inferred "Main() { n : 18446744073709551616 }" "integer literal out of range")
+reject(negative_literal_overflow_inferred "Main() { Print(-9223372036854775809) }" "integer literal out of range")
 message(STATUS "Duck integration tests passed")

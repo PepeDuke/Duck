@@ -41,6 +41,8 @@ bodies, and standalone scopes.
 `Examples/Bootstrap/07_StaticContainers.dk` demonstrates grouped static functions.
 `Examples/Bootstrap/08_LongIntegers.dk` demonstrates signed 64-bit values.
 `Examples/Bootstrap/09_TypeCasts.dk` demonstrates C-style explicit casts.
+`Examples/Bootstrap/10_SmallIntegers.dk` demonstrates signed 8-bit and 16-bit values.
+`Examples/Bootstrap/11_UnsignedIntegers.dk` demonstrates unsigned integers and mixed arithmetic.
 Other tutorial files still demonstrate the larger language design.
 
 For another Clang location, configure with `-DDUCK_CLANG=<path-to-clang>`.
@@ -74,13 +76,13 @@ accept explicit files/options only and never reads project configuration.
 
 ## Implemented subset
 
-- Top-level functions with explicit `int`, `long`, `float`, `double`, or `bool` parameters and returns,
+- Top-level functions with explicit supported numeric or `bool` parameters and returns,
   or omitted/explicit `void` returns. Forward calls and recursion work.
-- Mutable scalar reference parameters (`int&`, `long&`, `float&`, `double&`, `bool&`). Arguments must be
+- Mutable scalar reference parameters for all supported numeric and boolean types. Arguments must be
   mutable variables of exactly the declared type. References can be forwarded
   to other functions and multiple parameters can alias the same variable.
   Value parameters still receive copies. Arguments evaluate left to right.
-- Initialized local constants (`#int`, `#long`, `#float`, `#double`, `#bool`). Initializers may be runtime
+- Initialized local constants for all supported numeric and boolean types. Initializers may be runtime
   expressions; the resulting binding cannot be reassigned, incremented, or
   passed to a mutable reference. Constants can be passed by value.
 - A required `Main()` entry point with no parameters or return value.
@@ -98,10 +100,19 @@ accept explicit files/options only and never reads project configuration.
 - Explicitly typed declarations without initializers, such as `int count` or
   `double amount`. Semantic analysis requires assignment before a read.
   Inferred declarations and constants still require an initializer.
-- Signed 32-bit `int` and 64-bit `long`, with exact aliases `int32` and `int64`.
-  Decimal integer literals infer int when they fit, otherwise long. Signed
-  minima (`-2147483648`, `-9223372036854775808`) are supported; values beyond
-  signed 64-bit range are rejected. Aliases work with constants and references.
+- Signed 8-bit `int8`, 16-bit `short`, 32-bit `int`, and 64-bit `long`, with
+  exact aliases `int16`, `int32`, and `int64` for the latter three.
+- Unsigned `uint8`, `uint16`, `uint32`, and `uint64`, with exact aliases
+  `byte` for `uint8` and `uint` for `uint32`. All integer types support locals,
+  constants, parameters, references, returns, arithmetic, casts, and printing.
+  Decimal integer literals infer `int`, then `long`, then `uint64`, choosing
+  the first type that fits. Values above `18446744073709551615` or below
+  `-9223372036854775808` are rejected. Signed minima are supported.
+  Direct integer literals (including negation and conditional branches) in a
+  typed initializer, assignment, argument, or return must fit that
+  destination type: `int8 n = -128` is valid; `int8 n = 128` is rejected.
+  Unsigned destinations reject negative literals except `-0`; use an explicit
+  cast for deliberate wrapping, such as `(uint)-1`.
 - Integer/boolean literals, parentheses, unary `-`
   and `!`, arithmetic `+ - * / %`, comparisons, and numeric/boolean equality.
 - IEEE 754 32-bit `float` and 64-bit `double`, decimal literals such as `1.25`
@@ -110,8 +121,10 @@ accept explicit files/options only and never reads project configuration.
 - Explicit casts `(type)expression` among numeric and boolean types, including
   aliases. Casts bind with unary precedence and may be nested. Float-to-integer
   casts **floor**, so `(int)-9.99` is `-10`; NaN, infinity, and out-of-range
-  floored results trap before conversion. Long-to-int casts retain the low
-  32 bits. Numeric-to-bool tests nonzero (NaN is true); bool-to-numeric yields
+  floored results trap before conversion. Narrowing integer casts retain the
+  destination's low bits. Integer widening sign-extends signed sources and
+  zero-extends unsigned sources; equal-width casts reinterpret the bits.
+  Numeric-to-bool tests nonzero (NaN is true); bool-to-numeric yields
   0 or 1. Text, object, pointer, and void casts are not implemented.
 - Short-circuit `&&` / `||` and Duck's `condition ? value | value` expression.
   Conditions require booleans; conditional branches must have matching
@@ -143,25 +156,49 @@ accept explicit files/options only and never reads project configuration.
 - Source-file, line, and column diagnostics. Invalid programs do not write IR.
 
 Integer addition, subtraction, multiplication, and negation wrap at their
-respective 32-bit or 64-bit width.
-Division truncates toward zero. Division by zero and the signed division
-overflow case are currently unchecked; avoid these inputs. String literals
+respective 8-bit, 16-bit, 32-bit, or 64-bit width.
+Division truncates toward zero, and remainder has the dividend's sign.
+Integer `/`, `%`, `/=`, and `%=` trap at runtime for a zero divisor, and signed
+operations also trap for the signed minimum divided by `-1` (including
+remainder). Unsigned division and comparisons interpret values as nonnegative.
+Checks use the operand
+width after numeric promotion; unselected short-circuit and conditional
+branches do not trap. Floating-point division retains IEEE behavior.
+String literals
 are passed as UTF-8 bytes to the C runtime for this bootstrap, not Duck's
 eventual two-byte `string` representation. Inferred text locals hold references
 to immutable, program-lifetime literals. Explicit `string` declarations,
 string operations, and string parameters/returns are not yet supported.
 
-Numeric conversions widen through `int → long → float → double` (including
+Numeric conversions widen through `int8 → short → int → long → float → double` (including
 direct jumps, such as int to double) for initialization, assignment, value
 arguments, and returns.
-Mixed arithmetic/comparisons and numeric ternaries use the widest operand type.
+Unsigned conversions widen through `uint8 → uint16 → uint32 → uint64`, and
+all integers can convert implicitly to float/double. Unsigned-to-signed
+conversion is implicit only when the signed destination is strictly wider;
+signed-to-unsigned conversion requires a cast.
+Arithmetic, comparisons, and numeric ternaries with matching signedness use
+the widest operand type. Mixed signed/unsigned integers use the smallest
+signed type that contains both complete ranges: `int8 + uint8` uses `short`,
+and `int + uint` uses `long`. Mixing `uint64` with any signed integer requires
+an explicit cast, including `uint64Value + 1`; use `uint64Value + (uint64)1`
+or `uint64Value += 1` for unsigned arithmetic. Mixing integers and floating
+values continues to use the widest floating type.
 Reference arguments still require exact types; an int cannot bind to a long
 reference. Integer-to-floating conversion can round values beyond the target's
-precision. Implicit narrowing long to int, floating values to integers, or double
+precision. Implicit narrowing between integer types, floating values to integers, or double
 to float is rejected; use an explicit cast. Integer
 operations determine their width from their operands before assignment:
 `long n = 2147483647 + 1` still performs wrapping 32-bit addition, then widens.
 Use a long operand when 64-bit arithmetic is intended.
+Two small operands retain their common width: `(int8)127 + (int8)1` wraps to
+`-128`. A plain literal in arithmetic still infers `int`, so `small + 1` has
+type `int`; assigning it to `int8` or `short` requires a cast. Compound
+assignments accept direct in-range literals at the target width, so
+`int8 n = 127; n += 1` wraps to `-128`. Integer casts may deliberately narrow
+out-of-range values: `(int8)255` is `-1`. Unary negation of an unsigned value
+wraps at its width. Floating casts to unsigned types floor first and trap
+if the result is negative, non-finite, or at least 2 raised to the type's width.
 
 An inferred decimal literal has type float. A decimal literal directly used as
 a double initializer, assignment, argument, or return is parsed at double
@@ -198,7 +235,7 @@ containers or fields.
 Execution is sequential. The compiler does not yet implement Duck's automatic
 concurrency, ownership rules, resource locking, or runtime. Instance containers,
 container references, local reference declarations, reference returns, arrays,
-other numeric types, full strings, range-based loops,
+custom byte-width `iN`/`uN` types, other numeric types, full strings, range-based loops,
 markup and compile-time evaluation
 remain future work. Unsupported constructs produce errors; the design
 examples are not a claim of compiler coverage. Non-void functions must have

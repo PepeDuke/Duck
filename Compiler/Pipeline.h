@@ -24,6 +24,7 @@ Symbols collectSymbols(const Program &program, bool requireEntry = true);
 struct FunctionAnalysis {
   std::map<const Expr *, Type> expressionTypes;
   std::map<const Expr *, Type> conversions;
+  std::map<const Expr *, std::string> integerConstants;
   std::map<const Expr *, std::string> floatingConstants;
   std::map<const Expr *, std::string> callTargets;
   std::set<const Stmt *> terminatingLoops;

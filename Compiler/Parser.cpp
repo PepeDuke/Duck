@@ -43,10 +43,25 @@ class Parser {
     return pop();
   }
   bool isType() const {
-    return at("int") || at("int32") || at("long") || at("int64") ||
+    return at("byte") || at("uint") || at("uint8") || at("uint16") ||
+           at("uint32") || at("uint64") ||
+           at("int8") || at("short") || at("int16") ||
+           at("int") || at("int32") || at("long") || at("int64") ||
            at("float") || at("double") || at("bool") || at("void");
   }
   Type type() {
+    if (accept("byte") || accept("uint8"))
+      return Type::UInt8;
+    if (accept("uint16"))
+      return Type::UInt16;
+    if (accept("uint") || accept("uint32"))
+      return Type::UInt32;
+    if (accept("uint64"))
+      return Type::UInt64;
+    if (accept("int8"))
+      return Type::Int8;
+    if (accept("short") || accept("int16"))
+      return Type::Short;
     if (accept("long") || accept("int64"))
       return Type::Long;
     if (accept("float"))
@@ -308,8 +323,9 @@ class Parser {
           lines();
           if (!isType())
             fail(peek(),
-                 "parameter requires a supported explicit type (int, long, "
-                 "float, double, bool, int32, or int64)");
+                 "parameter requires a supported explicit type (int8, short, "
+                 "int16, int, int32, long, int64, byte, uint, uint8, uint16, "
+                 "uint32, uint64, float, double, or bool)");
           Type t = type();
           if (t == Type::Void)
             fail(peek(), "parameter cannot have void type");

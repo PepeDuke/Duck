@@ -1,0 +1,18 @@
+// byte = uint8, uint = uint32. Signed aliases remain int16/short,
+// int32/int, and int64/long.
+Increment(byte& n) { n++ }
+uint64 Maximum() { return 18446744073709551615 }
+
+Main() {
+    byte small = 255
+    Increment(small)
+    Print(small) // 0: unsigned arithmetic wraps at the operand width
+    uint n = 4294967295
+    Print(n)
+    Print(Maximum() / (uint64)3) // unsigned division
+    Print(Maximum() > (uint64)0)
+    // uint32 and int32 values both fit in signed long.
+    Print(n + -1) // 4294967294
+    Print((int)n) // -1: same-width cast reinterprets the bits
+    Print((byte)257) // 1: narrowing keeps the low bits
+}

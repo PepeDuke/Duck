@@ -1,0 +1,17 @@
+// Signed small integers keep their width during same-type arithmetic.
+int8 Next(int8 value) { value++; return value }
+Adjust(int16& value) { value += 2 }
+short Choose(bool first) { return first ? -32768 | 32767 }
+
+Main() {
+    #int8 maximum = 127
+    Print(Next(maximum)) // -128: addition wraps at eight bits
+    short count = 300
+    Adjust(count)       // int16 and short are the same type
+    Print(count)        // 302
+    Print(Choose(true)) // -32768
+    long widened = maximum
+    Print(widened)      // 127
+    Print((int8)255)    // -1: integer casts retain the low bits
+    Print((short)-9.99) // -10: floating casts floor and check the range
+}

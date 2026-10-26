@@ -365,15 +365,21 @@ The current numeric cast rules are:
   and `(int)-9.99` is `-10`. NaN, infinity, or a floored result outside the target
   integer range causes a runtime trap. This differs from C/C++ despite using
   the same cast syntax.
-- Narrowing `long` to `int` retains the low 32 bits, interpreted as a signed
-  integer. Widening `int` to `long` preserves the signed value.
+- Narrowing integer casts retain the destination's low bits. Equal-width
+  signed/unsigned casts reinterpret the bits. Widening sign-extends signed
+  sources and zero-extends unsigned sources.
 - Floating-point narrowing may round or overflow to infinity. A cast of an
   already-rounded value does not recover precision.
 - Numeric-to-`bool` is false for zero and true otherwise (including NaN).
   `bool` converts to numeric `0` or `1`.
 
-The bootstrap supports casts among `int`, `long`, `float`, `double`, and `bool`,
-including `int32`/`int64` aliases. Casts involving objects, pointers, text, and
+The bootstrap supports casts among `int8`, `short`, `int`, `long`, `uint8`,
+`uint16`, `uint32`, `uint64`, `float`, `double`, and `bool`, including
+`int16`/`int32`/`int64`, `byte` (`uint8`), and `uint` (`uint32`) aliases.
+Floating-to-unsigned casts also floor and check the target's range; negative
+floored values trap. See [compiler numeric rules](Compiler/README.md) for
+literal inference and mixed signed/unsigned conversions.
+Casts involving objects, pointers, text, and
 `void` are not implemented. Implicit narrowing remains rejected; write an
 explicit cast when conversion is intended.
 

@@ -1,13 +1,12 @@
 #include "Pipeline.h"
+#include <cstdint>
 #include <sstream>
 namespace duck {
 namespace {
 std::string irType(Type t) {
+  if (integral(t))
+    return "i" + std::to_string(integerWidth(t));
   switch (t) {
-  case Type::Int:
-    return "i32";
-  case Type::Long:
-    return "i64";
   case Type::Float:
     return "float";
   case Type::Double:
@@ -19,6 +18,14 @@ std::string irType(Type t) {
   default:
     return "void";
   }
+}
+// Exact IEEE double powers of two delimit every supported integer range.
+std::string powerOfTwo(int exponent, bool negative = false) {
+  const auto bits = (uint64_t(exponent + 1023) << 52) |
+                    (negative ? uint64_t{1} << 63 : 0);
+  std::ostringstream encoded;
+  encoded << "0x" << std::hex << bits;
+  return encoded.str();
 }
 struct Value {
   Type type;
@@ -44,29 +51,35 @@ class Generator {
   std::string fresh() { return "%v" + std::to_string(next++); }
   std::string label() { return "b" + std::to_string(next++); }
   void emit(const std::string &s) { code << "  " << s << '\n'; }
+  void require(const std::string &valid) {
+    auto success = label(), failure = label();
+    emit("br i1 " + valid + ", label %" + success + ", label %" + failure);
+    startBlock(failure);
+    emit("call void @llvm.trap()");
+    emit("unreachable");
+    startBlock(success);
+  }
   Value convert(Value value, Type target) {
     if (value.type == target)
       return value;
+    if (integral(value.type) && integral(target) &&
+        integerWidth(value.type) == integerWidth(target))
+      return {target, value.value}; // Signedness changes interpretation only.
     auto id = fresh();
     if (floating(value.type) && integral(target)) {
       value = convert(value, Type::Double);
       auto rounded = fresh(), lower = fresh(), upper = fresh(), valid = fresh();
       emit(rounded + " = call double @llvm.floor.f64(double " + value.value +
            ")");
-      const auto low =
-          target == Type::Int ? "0xC1E0000000000000" : "0xC3E0000000000000";
-      const auto high =
-          target == Type::Int ? "0x41E0000000000000" : "0x43E0000000000000";
+      const auto exponent = integerWidth(target) - (unsignedInteger(target) ? 0 : 1);
+      const auto low = unsignedInteger(target) ? "0.000000e+00" : powerOfTwo(exponent, true);
+      const auto high = powerOfTwo(exponent);
       emit(lower + " = fcmp oge double " + rounded + ", " + low);
       emit(upper + " = fcmp olt double " + rounded + ", " + high);
       emit(valid + " = and i1 " + lower + ", " + upper);
-      auto success = label(), failure = label();
-      emit("br i1 " + valid + ", label %" + success + ", label %" + failure);
-      startBlock(failure);
-      emit("call void @llvm.trap()");
-      emit("unreachable");
-      startBlock(success);
-      emit(id + " = fptosi double " + rounded + " to " + irType(target));
+      require(valid);
+      emit(id + (unsignedInteger(target) ? " = fptoui double " : " = fptosi double ") +
+           rounded + " to " + irType(target));
       return {target, id};
     }
     if (target == Type::Bool) {
@@ -78,14 +91,34 @@ class Generator {
     emit(id + " = " +
          (value.type == Type::Bool ? (floating(target) ? "uitofp " : "zext ")
           : integral(value.type) && integral(target)
-              ? (target == Type::Long ? "sext " : "trunc ")
-          : integral(value.type)  ? "sitofp "
+              ? (integerWidth(target) > integerWidth(value.type)
+                     ? (unsignedInteger(value.type) ? "zext " : "sext ") : "trunc ")
+          : integral(value.type)  ? (unsignedInteger(value.type) ? "uitofp " : "sitofp ")
           : target == Type::Float ? "fptrunc "
                                   : "fpext ") +
          irType(value.type) + " " + value.value + " to " + irType(target));
     return {target, id};
   }
   Value binary(const std::string &op, Value a, Value b) {
+    if (integral(a.type) && (op == "/" || op == "%")) {
+      // Both sdiv and srem require a nonzero divisor and must avoid MIN/-1.
+      // Operands have already been evaluated once, in source order.
+      auto nonzero = fresh();
+      const auto type = irType(a.type);
+      emit(nonzero + " = icmp ne " + type + " " + b.value + ", 0");
+      auto valid = nonzero;
+      if (!unsignedInteger(a.type)) {
+        auto minimum = fresh(), negativeOne = fresh(), overflow = fresh(), safe = fresh();
+        valid = fresh();
+        emit(minimum + " = icmp eq " + type + " " + a.value + ", -" +
+             std::to_string(uint64_t{1} << (integerWidth(a.type) - 1)));
+        emit(negativeOne + " = icmp eq " + type + " " + b.value + ", -1");
+        emit(overflow + " = and i1 " + minimum + ", " + negativeOne);
+        emit(safe + " = xor i1 " + overflow + ", true");
+        emit(valid + " = and i1 " + nonzero + ", " + safe);
+      }
+      require(valid);
+    }
     auto id = fresh();
     const std::map<std::string, std::string> ints{
         {"+", "add"},      {"-", "sub"},       {"*", "mul"},
@@ -97,7 +130,16 @@ class Generator {
         {"/", "fdiv"},      {"<", "fcmp olt"},  {">", "fcmp ogt"},
         {"<=", "fcmp ole"}, {">=", "fcmp oge"}, {"==", "fcmp oeq"},
         {"!=", "fcmp une"}};
-    emit(id + " = " + (floating(a.type) ? reals : ints).at(op) + " " +
+    auto instruction = (floating(a.type) ? reals : ints).at(op);
+    if (unsignedInteger(a.type)) {
+      if (op == "/") instruction = "udiv";
+      else if (op == "%") instruction = "urem";
+      else if (op == "<") instruction = "icmp ult";
+      else if (op == ">") instruction = "icmp ugt";
+      else if (op == "<=") instruction = "icmp ule";
+      else if (op == ">=") instruction = "icmp uge";
+    }
+    emit(id + " = " + instruction + " " +
          irType(a.type) + " " + a.value + ", " + b.value);
     return {op == "<" || op == ">" || op == "<=" || op == ">=" || op == "==" ||
                     op == "!="
@@ -157,14 +199,14 @@ class Generator {
   }
   Value lowerExpression(const Expr &e) {
     const auto &op = e.token.text;
+    auto integer = analysis.integerConstants.find(&e);
+    if (integer != analysis.integerConstants.end())
+      return {analysis.expressionTypes.at(&e), integer->second};
     if (e.kind == "cast")
       return convert(expression(*e.args[0]), e.castType);
     if (e.kind == "real")
       return {analysis.expressionTypes.at(&e),
               analysis.floatingConstants.at(&e)};
-    if (e.kind == "int") {
-      return {analysis.expressionTypes.at(&e), std::to_string(std::stoll(op))};
-    }
     if (e.kind == "bool")
       return {Type::Bool, op == "true" ? "1" : "0"};
     if (e.kind == "text")
@@ -187,9 +229,14 @@ class Generator {
         }
         if (v.type == Type::Float)
           v = convert(v, Type::Double);
+        // All 8/16-bit values fit C's int varargs promotion.
+        if (integral(v.type) && integerWidth(v.type) < 32)
+          v = convert(v, Type::Int);
         auto fmt = textConstant(v.type == Type::Text     ? "%s\n"
                                 : v.type == Type::Double ? "%g\n"
                                 : v.type == Type::Long   ? "%lld\n"
+                                : v.type == Type::UInt64 ? "%llu\n"
+                                : v.type == Type::UInt32 ? "%u\n"
                                                          : "%d\n");
         emit("call i32 (ptr, ...) @printf(ptr " + fmt + ", " + irType(v.type) +
              " " + v.value + ")");
@@ -221,14 +268,6 @@ class Generator {
            " @duck." + target + "(" + args + ")");
       return {f.result, id};
     }
-    // Signed minima need a unary-minus special case: their magnitudes don't
-    // fit.
-    if (e.kind == "unary" && op == "-" && e.args[0]->kind == "int" &&
-        e.args[0]->token.text == "9223372036854775808")
-      return {Type::Long, "-9223372036854775808"};
-    if (e.kind == "unary" && op == "-" && e.args[0]->kind == "int" &&
-        e.args[0]->token.text == "2147483648")
-      return {Type::Int, "-2147483648"};
     auto a = expression(*e.args[0]);
     auto id = fresh();
     if (e.kind == "conditional") {

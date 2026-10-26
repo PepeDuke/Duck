@@ -73,6 +73,14 @@ Utility #{ int Identity(int n) { return n } }
 int Qualified() { return Utility.Identity(6) }
 long Large() { return 5000000000 }
 int FloorCast(double n) { return (int)n }
+int8 Small(int8 n) { n++; return n }
+short SmallFloor(double n) { return (int16)n }
+int8 SmallMinimum() { return -128 }
+short SmallSum(int8 n, short m) { return n + m }
+uint64 UnsignedMaximum() { return 18446744073709551615 }
+uint64 UnsignedDivide(uint64 n) { return n / (uint64)3 }
+long Mixed(uint32 n, int m) { return n + m }
+byte UnsignedFloor(double n) { return (uint8)n }
 )";
     const auto program = duck::parse(duck::lex(source));
     const auto symbols = duck::collectSymbols(program);
