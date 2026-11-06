@@ -1,0 +1,19 @@
+// Integer bit operations preserve width. Shifts preserve the left operand's
+// type; counts must be at least zero and less than that type's bit width.
+SetFlag(byte& flags, byte mask) { flags |= mask }
+
+Main() {
+    byte flags = 0b0101
+    SetFlag(flags, 0b0010)
+    flags &= 0b0110
+    flags ^= 0b0011
+    Print(flags)                    // 5
+    Print(~flags)                   // 250 (eight bits)
+    flags <<= 1
+    flags >>= 2
+    Print(flags)                    // 2
+    Print(-8 >> 1)                  // -4 (signed right shift)
+    Print((uint)0x80000000 >> 31)    // 1 (unsigned right shift)
+    Print(true ? (1 | 2) | 4)        // 3; group OR in a true arm
+    Print(false ? 1 | 2 | 4)        // 6; OR is allowed in a false arm
+}

@@ -43,6 +43,8 @@ bodies, and standalone scopes.
 `Examples/Bootstrap/09_TypeCasts.dk` demonstrates C-style explicit casts.
 `Examples/Bootstrap/10_SmallIntegers.dk` demonstrates signed 8-bit and 16-bit values.
 `Examples/Bootstrap/11_UnsignedIntegers.dk` demonstrates unsigned integers and mixed arithmetic.
+`Examples/Bootstrap/12_IntegerLiterals.dk` demonstrates hexadecimal and binary literals.
+`Examples/Bootstrap/13_Bitwise.dk` demonstrates bitwise operations and checked shifts.
 Other tutorial files still demonstrate the larger language design.
 
 For another Clang location, configure with `-DDUCK_CLANG=<path-to-clang>`.
@@ -105,7 +107,8 @@ accept explicit files/options only and never reads project configuration.
 - Unsigned `uint8`, `uint16`, `uint32`, and `uint64`, with exact aliases
   `byte` for `uint8` and `uint` for `uint32`. All integer types support locals,
   constants, parameters, references, returns, arithmetic, casts, and printing.
-  Decimal integer literals infer `int`, then `long`, then `uint64`, choosing
+  Decimal, hexadecimal (`0x`/`0X`), and binary (`0b`/`0B`) integer literals
+  infer `int`, then `long`, then `uint64`, choosing
   the first type that fits. Values above `18446744073709551615` or below
   `-9223372036854775808` are rejected. Signed minima are supported.
   Direct integer literals (including negation and conditional branches) in a
@@ -113,8 +116,29 @@ accept explicit files/options only and never reads project configuration.
   destination type: `int8 n = -128` is valid; `int8 n = 128` is rejected.
   Unsigned destinations reject negative literals except `-0`; use an explicit
   cast for deliberate wrapping, such as `(uint)-1`.
+  Prefixes must be followed by digits valid for their base. Hex digits are
+  case-insensitive; `e`/`E` is a hex digit rather than an exponent marker.
+  Leading zeroes on decimal literals do not imply octal. Literal separators,
+  suffixes, octal prefixes, and hexadecimal floating-point forms are unsupported.
+  Prefixed literals describe magnitudes: `0xFF` is positive 255, whereas
+  `(int8)0xFF` is -1. Negative signed minima such as `-0x8000000000000000`
+  are accepted.
 - Integer/boolean literals, parentheses, unary `-`
   and `!`, arithmetic `+ - * / %`, comparisons, and numeric/boolean equality.
+- Integer bitwise `~`, `&`, `|`, `^`, shifts `<<` / `>>`, and compound
+  assignments `&=`, `|=`, `^=`, `<<=`, `>>=`. Bitwise binary operations use
+  the same common integer type as arithmetic. Shifts preserve the left
+  operand's type and accept any integer count type. Counts below zero or
+  greater than or equal to the left operand's width trap before shifting,
+  including compound assignments. Left shifts discard high bits; signed
+  right shifts extend the sign bit, and unsigned right shifts insert zeros.
+  Booleans and floating-point operands are rejected.
+  Precedence follows C: arithmetic, shifts, comparisons, equality, bitwise
+  AND, XOR, OR, logical AND, logical OR, then conditional expressions.
+  In `condition ? yes | no`, the first unparenthesized `|` in the true arm
+  is the separator; parenthesize bitwise OR there: `ready ? (a | b) | c`.
+  The false arm may contain OR directly. Nested conditionals remain
+  right-associative, and call arguments have their own expression context.
 - IEEE 754 32-bit `float` and 64-bit `double`, decimal literals such as `1.25`
   and exponent forms such as `1e3` or `1.25e-2`. Decimal points require digits
   on both sides; type suffixes are not yet supported.

@@ -100,6 +100,15 @@ class Generator {
     return {target, id};
   }
   Value binary(const std::string &op, Value a, Value b) {
+    if (op == "<<" || op == ">>") {
+      // Check at the original count width before any truncation. Comparing
+      // as unsigned rejects negative signed counts as well.
+      auto valid = fresh();
+      emit(valid + " = icmp ult " + irType(b.type) + " " + b.value + ", " +
+           std::to_string(integerWidth(a.type)));
+      require(valid);
+      b = convert(b, a.type);
+    }
     if (integral(a.type) && (op == "/" || op == "%")) {
       // Both sdiv and srem require a nonzero divisor and must avoid MIN/-1.
       // Operands have already been evaluated once, in source order.
@@ -124,7 +133,9 @@ class Generator {
         {"+", "add"},      {"-", "sub"},       {"*", "mul"},
         {"/", "sdiv"},     {"%", "srem"},      {"<", "icmp slt"},
         {">", "icmp sgt"}, {"<=", "icmp sle"}, {">=", "icmp sge"},
-        {"==", "icmp eq"}, {"!=", "icmp ne"}};
+        {"==", "icmp eq"}, {"!=", "icmp ne"},
+        {"&", "and"}, {"|", "or"}, {"^", "xor"},
+        {"<<", "shl"}, {">>", "ashr"}};
     const std::map<std::string, std::string> reals{
         {"+", "fadd"},      {"-", "fsub"},      {"*", "fmul"},
         {"/", "fdiv"},      {"<", "fcmp olt"},  {">", "fcmp ogt"},
@@ -138,6 +149,7 @@ class Generator {
       else if (op == ">") instruction = "icmp ugt";
       else if (op == "<=") instruction = "icmp ule";
       else if (op == ">=") instruction = "icmp uge";
+      else if (op == ">>") instruction = "lshr";
     }
     emit(id + " = " + instruction + " " +
          irType(a.type) + " " + a.value + ", " + b.value);
@@ -307,7 +319,8 @@ class Generator {
         emit(id + " = fneg " + irType(a.type) + " " + a.value);
         return {a.type, id};
       }
-      emit(id + (op == "!" ? " = xor i1 " + a.value + ", true"
+      emit(id + (op == "~" ? " = xor " + irType(a.type) + " " + a.value + ", -1"
+                 : op == "!" ? " = xor i1 " + a.value + ", true"
                            : " = sub " + irType(a.type) + " 0, " + a.value));
       return {a.type, id};
     }
@@ -406,7 +419,9 @@ class Generator {
       declare(name, v, s.constant);
     } else if (s.kind == "assign" || s.kind == "++" || s.kind == "--" ||
                s.kind == "+=" || s.kind == "-=" || s.kind == "*=" ||
-               s.kind == "/=" || s.kind == "%=") {
+               s.kind == "/=" || s.kind == "%=" || s.kind == "&=" ||
+               s.kind == "|=" || s.kind == "^=" ||
+               s.kind == "<<=" || s.kind == ">>=") {
       auto name = s.token;
       name.text = s.name;
       auto address = variable(name);
@@ -420,7 +435,8 @@ class Generator {
              address.value);
         auto operand = s.expr ? expression(*s.expr)
                               : convert({Type::Int, "1"}, address.type);
-        v = binary(s.kind.substr(0, 1), {address.type, old}, operand);
+        v = binary(s.kind.substr(0, s.kind.size() - 1),
+                   {address.type, old}, operand);
       }
       emit("store " + irType(v.type) + " " + v.value + ", ptr " +
            address.value);

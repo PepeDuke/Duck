@@ -2,8 +2,10 @@
 
 The build tool owns `.dkp` project files, source discovery, module selection,
 dependency ordering, object compilation, and linking. The compiler does not
-read project files. The tool requires Python 3.11+, `duckc`, and Clang; it has
-no third-party Python dependencies. Commands run as argument arrays without a shell.
+read project files. The tool is a C++17 executable named `duck`, built alongside
+`duckc` by CMake. Building Duck projects requires `duckc` and Clang. Commands run
+as argument arrays without a shell. TOML parsing uses vendored toml++ v3.4.0
+(`vendor/tomlplusplus`, MIT license); configuring and building needs no downloads.
 
 From the repository root on Windows:
 
@@ -14,9 +16,12 @@ cmake --build build --config Debug
 .\Examples\Projects\Modular\.duck\build\debug\ModularDemo.exe
 ```
 
-The executable prints `42`. The portable invocation is
-`python BuildTool/duck.py build path/to/project.dkp`. This implementation has
-been exercised on Windows; compiler/platform support remains the bootstrap's.
+The executable prints `42`. Invoke the build tool directly with
+`build/Debug/duck.exe build path/to/project.dkp` on Windows, or
+`build/duck build path/to/project.dkp` with a single-configuration Unix build.
+`duck.cmd` searches `build/Debug`, `build/Release`, then `build` for the executable.
+This implementation has been exercised on Windows; compiler/platform support
+remains the bootstrap's.
 
 ## Project format
 
@@ -56,8 +61,8 @@ enabled = false
 Paths/globs are relative to the project file. Bare tool names resolve through
 PATH; tool paths resolve relative to the project. `--compiler` and `--clang`
 override them, with relative paths interpreted from the working directory.
-Without settings the tool tries PATH, this repository's compiler build folders,
-and the usual Windows LLVM installation.
+Without settings the tool tries PATH, the build-tool executable's directory,
+this repository's compiler build folders, and the usual Windows LLVM installation.
 
 The entry module must define `Main`; other modules cannot. All enabled modules
 are built and linked, even if not reachable from the entry module. Dependencies
@@ -130,10 +135,13 @@ implemented; each invocation recompiles its selected modules.
 
 ## Tests
 
-`Tests/build_tool.py` verifies graph validation, source ownership, selection,
-direct dependency enforcement, separate object builds, native linking, paths
-with spaces, and exclusion of stale disabled objects. CMake registers it when
-Python 3.11+ is available. Run the full suite with:
+`Tests/build_tool.py` invokes the C++ executable to verify graph validation,
+source ownership, selection, direct dependency enforcement, separate object
+builds, native linking, paths with spaces and shell metacharacters, recursive
+globs, TOML validation, failed rebuilds, and exclusion of stale disabled objects.
+CMake registers it when
+Python is available. Python is used only by this test harness, not by the build
+tool. Run the full suite with:
 
 ```powershell
 ctest --test-dir build -C Debug --output-on-failure

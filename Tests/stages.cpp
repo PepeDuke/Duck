@@ -81,6 +81,11 @@ uint64 UnsignedMaximum() { return 18446744073709551615 }
 uint64 UnsignedDivide(uint64 n) { return n / (uint64)3 }
 long Mixed(uint32 n, int m) { return n + m }
 byte UnsignedFloor(double n) { return (uint8)n }
+uint64 Hexadecimal() { return 0xFFFFFFFFFFFFFFFF }
+long BinaryMinimum() { return -0b1000000000000000000000000000000000000000000000000000000000000000 }
+uint64 Bitwise(uint64 n) { return ~(n ^ (uint64)0xFF) }
+byte Shift(byte n, long count) { n <<= count; return n >> count }
+int BitwiseConditional(bool ready) { return ready ? (1 | 2) | 4 | 8 }
 )";
     const auto program = duck::parse(duck::lex(source));
     const auto symbols = duck::collectSymbols(program);

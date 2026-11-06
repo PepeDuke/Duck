@@ -33,6 +33,13 @@ inline int integerWidth(Type t) {
 }
 inline bool integral(Type t) { return integerWidth(t) != 0; }
 inline bool numeric(Type t) { return integral(t) || floating(t); }
+inline int integerLiteralBase(const std::string &text) {
+  if (text.size() >= 2 && text[0] == '0') {
+    if (text[1] == 'x' || text[1] == 'X') return 16;
+    if (text[1] == 'b' || text[1] == 'B') return 2;
+  }
+  return 10;
+}
 inline Type commonNumeric(Type a, Type b) {
   if (a == Type::Double || b == Type::Double)
     return Type::Double;

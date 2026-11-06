@@ -79,6 +79,20 @@ std::vector<Token> lex(const std::string &source,
       continue;
     }
     if (std::isdigit(static_cast<unsigned char>(c))) {
+      // Consume a prefixed integer as one token, including invalid digits,
+      // so semantic diagnostics point to the complete literal. Hex e/E is
+      // a digit, never a decimal exponent marker.
+      if (i + 1 < source.size() &&
+          integerLiteralBase(source.substr(i, 2)) != 10) {
+        t.text += take();
+        t.text += take();
+        while (i < source.size() &&
+               (std::isalnum(static_cast<unsigned char>(source[i])) ||
+                source[i] == '_'))
+          t.text += take();
+        out.push_back(t);
+        continue;
+      }
       while (i < source.size() &&
              std::isdigit(static_cast<unsigned char>(source[i])))
         t.text += take();
@@ -116,7 +130,11 @@ std::vector<Token> lex(const std::string &source,
         if (pair == "==" || pair == "!=" || pair == "<=" || pair == ">=" ||
             pair == "++" || pair == "--" || pair == "&&" || pair == "||" ||
             pair == "+=" || pair == "-=" || pair == "*=" || pair == "/=" ||
-            pair == "%=")
+            pair == "%=" || pair == "&=" || pair == "|=" || pair == "^=" ||
+            pair == "<<" || pair == ">>")
+          t.text += take();
+        if ((t.text == "<<" || t.text == ">>") &&
+            i < source.size() && source[i] == '=')
           t.text += take();
       }
     }

@@ -83,22 +83,30 @@ class Parser {
       return 1;
     if (s == "&&")
       return 2;
-    if (s == "==" || s == "!=")
+    if (s == "|")
       return 3;
-    if (s == "<" || s == ">" || s == "<=" || s == ">=")
+    if (s == "^")
       return 4;
-    if (s == "+" || s == "-")
+    if (s == "&")
       return 5;
-    if (s == "*" || s == "/" || s == "%")
+    if (s == "==" || s == "!=")
       return 6;
+    if (s == "<" || s == ">" || s == "<=" || s == ">=")
+      return 7;
+    if (s == "<<" || s == ">>")
+      return 8;
+    if (s == "+" || s == "-")
+      return 9;
+    if (s == "*" || s == "/" || s == "%")
+      return 10;
     return 0;
   }
-  std::unique_ptr<Expr> expression(int minimum = 1) {
+  std::unique_ptr<Expr> expression(int minimum = 1, bool stopAtPipe = false) {
     auto e = std::make_unique<Expr>();
     e->token = peek();
-    if (accept("-") || accept("!")) {
+    if (accept("-") || accept("!") || accept("~")) {
       e->kind = "unary";
-      e->args.push_back(expression(7));
+      e->args.push_back(expression(11, stopAtPipe));
     } else if (accept("(")) {
       lines();
       if (isType()) {
@@ -106,7 +114,7 @@ class Parser {
         e->castType = type();
         lines();
         expect(")");
-        e->args.push_back(expression(7));
+        e->args.push_back(expression(11, stopAtPipe));
       } else {
         e = expression();
         lines();
@@ -119,8 +127,9 @@ class Parser {
       e->kind = "bool";
       pop();
     } else if (std::isdigit(static_cast<unsigned char>(peek().text[0]))) {
-      e->kind = peek().text.find_first_of(".eE") == std::string::npos ? "int"
-                                                                      : "real";
+      e->kind = integerLiteralBase(peek().text) != 10 ||
+                        peek().text.find_first_of(".eE") == std::string::npos
+                    ? "int" : "real";
       pop();
     } else {
       e->token = identifier();
@@ -139,13 +148,15 @@ class Parser {
         expect(")");
       }
     }
-    while (precedence(peek()) >= minimum) {
+    // In a conditional's true arm, the first unparenthesized pipe is
+    // its separator. Parentheses and call arguments start fresh expressions.
+    while (precedence(peek()) >= minimum && !(stopAtPipe && at("|"))) {
       auto parent = std::make_unique<Expr>();
       parent->token = pop();
       parent->kind = "binary";
       int p = precedence(parent->token);
       parent->args.push_back(std::move(e));
-      parent->args.push_back(expression(p + 1));
+      parent->args.push_back(expression(p + 1, stopAtPipe));
       e = std::move(parent);
     }
     if (minimum == 1 && at("?")) {
@@ -153,9 +164,9 @@ class Parser {
       parent->token = pop();
       parent->kind = "conditional";
       parent->args.push_back(std::move(e));
-      parent->args.push_back(expression());
+      parent->args.push_back(expression(1, true));
       expect("|");
-      parent->args.push_back(expression());
+      parent->args.push_back(expression(1, stopAtPipe));
       e = std::move(parent);
     }
     return e;
@@ -270,7 +281,9 @@ class Parser {
                 tokens[pos + 1].text == "++" || tokens[pos + 1].text == "--" ||
                 tokens[pos + 1].text == "+=" || tokens[pos + 1].text == "-=" ||
                 tokens[pos + 1].text == "*=" || tokens[pos + 1].text == "/=" ||
-                tokens[pos + 1].text == "%=")) {
+                tokens[pos + 1].text == "%=" || tokens[pos + 1].text == "&=" ||
+                tokens[pos + 1].text == "|=" || tokens[pos + 1].text == "^=" ||
+                tokens[pos + 1].text == "<<=" || tokens[pos + 1].text == ">>=")) {
       s->name = identifier().text;
       auto op = pop().text;
       s->kind = op == ":" ? "let" : op == "=" ? "assign" : op;

@@ -1,6 +1,5 @@
 """Build-tool validation and end-to-end module/link tests."""
 import argparse
-import importlib.util
 import os
 from pathlib import Path
 import subprocess
@@ -8,11 +7,8 @@ import sys
 import tempfile
 import unittest
 
-ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("duck_builder", ROOT / "BuildTool/duck.py")
-builder = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(builder)
 parser = argparse.ArgumentParser()
+parser.add_argument("--builder", required=True)
 parser.add_argument("--compiler", required=True)
 parser.add_argument("--clang", required=True)
 options, rest = parser.parse_known_args()
@@ -35,7 +31,7 @@ enabled = false
 
 class Projects(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="duck project ")
+        self.temp = tempfile.TemporaryDirectory(prefix="duck project & ")
         self.root = Path(self.temp.name)
         self.project = self.root / "demo.dkp"
         self.project.write_text(BASE, encoding="utf-8")
@@ -48,7 +44,7 @@ class Projects(unittest.TestCase):
         self.project.write_text(text, encoding="utf-8")
 
     def invoke(self, *args, success=True):
-        result = subprocess.run([sys.executable, str(ROOT / "BuildTool/duck.py"), "build",
+        result = subprocess.run([options.builder, "build",
                                  str(self.project), "--compiler", options.compiler, "--clang", options.clang, *args],
                                 capture_output=True, text=True, timeout=60)
         if success:
@@ -58,9 +54,15 @@ class Projects(unittest.TestCase):
         return result
 
     def test_graph_and_overrides(self):
-        self.assertEqual(list(builder.Project(self.project).plan()), ["core", "app"])
-        self.assertEqual(list(builder.Project(self.project, enable=["extra"]).plan()), ["core", "app", "extra"])
-        self.assertEqual(list(builder.Project(self.project, enable=["extra"]).plan("extra")), ["core", "extra"])
+        self.invoke()
+        output = self.root / ".duck/build/debug"
+        self.assertTrue((output / "core.o").exists())
+        self.assertTrue((output / "app.o").exists())
+        self.assertFalse((output / "extra.o").exists())
+        self.invoke("--enable", "extra")
+        self.assertTrue((output / "extra.o").exists())
+        self.invoke("--enable", "extra", "--module", "extra", "--profile", "release")
+        self.assertFalse((self.root / ".duck/build/release/app.o").exists())
         self.assertEqual(self.project.read_text(), BASE)
 
     def test_invalid_graphs(self):
@@ -79,16 +81,61 @@ class Projects(unittest.TestCase):
         for text, error in cases:
             with self.subTest(error=error):
                 self.write(text)
-                with self.assertRaisesRegex(builder.BuildError, error):
-                    builder.Project(self.project).plan()
+                self.assertIn(error, self.invoke(success=False).stderr)
 
     def test_bad_overrides(self):
-        with self.assertRaisesRegex(builder.BuildError, "both enabled and disabled"):
-            builder.Project(self.project, enable=["extra"], disable=["extra"])
-        with self.assertRaisesRegex(builder.BuildError, "unknown module"):
-            builder.Project(self.project, enable=["missing"])
-        with self.assertRaisesRegex(builder.BuildError, "entry module cannot be disabled"):
-            builder.Project(self.project, disable=["app"]).plan()
+        self.assertIn("both enabled and disabled", self.invoke("--enable", "extra", "--disable", "extra", success=False).stderr)
+        self.assertIn("unknown module", self.invoke("--enable", "missing", success=False).stderr)
+        self.assertIn("entry module cannot be disabled", self.invoke("--disable", "app", success=False).stderr)
+
+    def test_manifest_validation(self):
+        cases = [
+            (BASE.replace('version = 1', 'version = 1.0'), "version = 1"),
+            (BASE.replace('name = "Demo"', 'name = "CON"'), "reserved filename"),
+            (BASE.replace('sources = ["core.dk"]', 'sources = []'), "cannot be empty"),
+            (BASE.replace('sources = ["core.dk"]', 'sources = ["core.dk", "core.dk"]'), "duplicates"),
+            (BASE.replace('sources = ["core.dk"]', 'sources = [1]'), "string"),
+            (BASE.replace('sources = ["core.dk"]', 'sources = ["demo.dkp"]'), "not a .dk file"),
+            (BASE + '\n[toolchain]\ncompiler = false\n', "nonempty string"),
+            (BASE + '\n[link]\nlibraries = ["-bad"]\n', "must not be linker options"),
+            (BASE + '\n[link]\nlibrary_paths = ["missing"]\n', "library directory not found"),
+            (BASE + '\n[link]\nlibraries = ["x", "x"]\n', "duplicates"),
+            (BASE + '\n[link]\nunknown = []\n', "unknown keys"),
+            (BASE + '\n[link\n', "Error"),
+        ]
+        for text, error in cases:
+            with self.subTest(error=error):
+                self.write(text)
+                self.assertIn(error, self.invoke(success=False).stderr)
+
+    def test_recursive_globs_and_toml(self):
+        # Exercise actual TOML syntax, zero-depth **, nested files, character
+        # classes, overlapping patterns, and exclusion of hidden directories.
+        directory = self.root / "src"
+        (directory / "nested").mkdir(parents=True)
+        (directory / ".hidden").mkdir()
+        (self.root / "core.dk").rename(directory / "core.dk")
+        (directory / "nested/helper.dk").write_text("int Helper() { return 1 }", encoding="utf-8")
+        (directory / ".hidden/bad.dk").write_text("invalid code", encoding="utf-8")
+        self.write(BASE.replace('version = 1', 'version = 0x1').replace(
+            'sources = ["core.dk"]', "sources = [\n  'src/**/*.dk', # recursive\n  'src/[c]ore.?k',\n]"))
+        self.invoke()
+        ir = (self.root / ".duck/build/debug/core.ll").read_text()
+        self.assertIn("define i32 @duck.Helper", ir)
+        self.assertEqual(ir.count("define i32 @duck.Add"), 1)
+
+    def test_disabled_sources_are_not_required(self):
+        (self.root / "extra.dk").unlink()
+        self.invoke("--module", "core")
+        self.assertIn("matches no files", self.invoke("--enable", "extra", success=False).stderr)
+
+    def test_invalid_cli(self):
+        for args, error in [(("--module", "missing"), "unknown module"),
+                            (("--profile", "fast"), "debug or release"),
+                            (("--unknown",), "unknown option"),
+                            (("--module",), "missing value")]:
+            with self.subTest(args=args):
+                self.assertIn(error, self.invoke(*args, success=False).stderr)
 
     def test_separate_objects_and_optional_module(self):
         self.invoke("--enable", "extra")
@@ -184,6 +231,25 @@ class Projects(unittest.TestCase):
         (self.root / "app.dk").write_text("Main() { Missing() }", encoding="utf-8")
         self.invoke(success=False)
         self.assertFalse((self.root / ".duck/build/debug/core.o").exists())
+
+    def test_failed_rebuild_preserves_artifacts(self):
+        self.invoke()
+        output = self.root / ".duck/build/debug"
+        before = {path.name: path.read_bytes() for path in output.iterdir()}
+        (self.root / "core.dk").write_text("int Add(int a, int b) { return 99 }", encoding="utf-8")
+        (self.root / "bad.o").write_bytes(b"invalid native object")
+        self.write(BASE + '\n[link]\nlibraries = ["bad.o"]\n')
+        self.invoke(success=False)
+        self.assertEqual({path.name: path.read_bytes() for path in output.iterdir()}, before)
+
+    def test_toolchain_configuration_and_cli_precedence(self):
+        compiler = os.path.relpath(options.compiler, self.root).replace("\\", "/")
+        self.write(BASE + "\n[toolchain]\ncompiler = '" + compiler + "'\nclang = '" + options.clang + "'\n")
+        result = subprocess.run([options.builder, "build", str(self.project)],
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.write(BASE + '\n[toolchain]\ncompiler = "missing-compiler"\nclang = "missing-clang"\n')
+        self.invoke()
 
     def test_missing_library(self):
         self.write(BASE + '\n[link]\nlibraries = ["missing.lib"]\n')

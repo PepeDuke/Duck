@@ -154,14 +154,27 @@ class Analyzer {
                                  e.args[0]->kind == "int";
     if (e.kind == "int" || negativeLiteral) {
       const auto &digits = negativeLiteral ? e.args[0]->token.text : op;
+      const auto base = integerLiteralBase(digits);
+      const auto magnitude = base == 10 ? digits : digits.substr(2);
+      if (magnitude.empty())
+        fail(e.token, "integer literal requires digits after its prefix");
+      // Validate before conversion so malformed huge literals do not hide
+      // invalid digits behind an overflow diagnostic.
+      for (char digit : magnitude) {
+        int value = digit >= '0' && digit <= '9' ? digit - '0'
+                  : digit >= 'a' && digit <= 'f' ? digit - 'a' + 10
+                  : digit >= 'A' && digit <= 'F' ? digit - 'A' + 10 : -1;
+        if (value < 0 || value >= base)
+          fail(e.token, "invalid integer literal");
+      }
       size_t consumed = 0;
       uint64_t value = 0;
       try {
-        value = std::stoull(digits, &consumed);
+        value = std::stoull(magnitude, &consumed, base);
       } catch (...) {
         fail(e.token, "integer literal out of range");
       }
-      if (consumed != digits.size())
+      if (consumed != magnitude.size())
         fail(e.token, "invalid integer literal");
       Type type;
       if (negativeLiteral) {
@@ -262,6 +275,8 @@ class Analyzer {
     if (e.kind == "unary") {
       if (op == "!")
         require(first, Type::Bool, e.token);
+      else if (op == "~" && !integral(first))
+        fail(e.token, "bitwise operators require integer operands");
       else if (!numeric(first))
         require(first, Type::Int, e.token);
       return first;
@@ -272,6 +287,13 @@ class Analyzer {
       return Type::Bool;
     }
     auto second = expression(*e.args[1]);
+    if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") {
+      if (!integral(first) || !integral(second))
+        fail(e.token, "bitwise operators require integer operands");
+      // Shift counts retain their own type until the backend checks bounds.
+      if (op == "<<" || op == ">>")
+        return first;
+    }
     if (numeric(first) && numeric(second)) {
       auto type = common(first, second, e.token);
       convert(*e.args[0], first, type);
@@ -399,11 +421,20 @@ class Analyzer {
         fail(s.token, "cannot modify constant '" + s.name + "'");
       if (s.kind != "assign")
         requireInitialized(name);
+      const bool bitwise = s.kind == "&=" || s.kind == "|=" || s.kind == "^=" ||
+                           s.kind == "<<=" || s.kind == ">>=";
+      if (bitwise && !integral(local.type))
+        fail(s.token, "bitwise operators require integer operands");
       if (s.kind != "assign" &&
           (!numeric(local.type) || (s.kind == "%=" && !integral(local.type))))
         require(local.type, Type::Int, s.token);
-      if (s.expr)
-        expression(*s.expr, local.type);
+      if (s.expr) {
+        if (s.kind == "<<=" || s.kind == ">>=") {
+          if (!integral(expression(*s.expr)))
+            fail(s.expr->token, "bitwise operators require integer operands");
+        } else
+          expression(*s.expr, local.type);
+      }
       lookup(name).initialized = true;
     }
     return false;

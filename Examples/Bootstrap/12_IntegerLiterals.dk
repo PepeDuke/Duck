@@ -1,0 +1,14 @@
+uint64 Maximum() { return 0xFFFFFFFFFFFFFFFF }
+
+Main() {
+    byte flags = 0b10100101
+    uint color = 0xFF8800
+    int8 minimum = -0x80
+    Print(flags)     // 165
+    Print(color)     // 16746496
+    Print(minimum)   // -128
+    Print(Maximum()) // 18446744073709551615
+    Print(0XDEAD)    // 57005: uppercase prefixes are also accepted
+    Print(0B1010)    // 10
+    Print((byte)0x1FF) // 255: explicit narrowing keeps the low bits
+}

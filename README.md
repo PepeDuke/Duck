@@ -339,6 +339,11 @@ markup // <-- hold tags tree for Mark Up
 func // <-- holds function
 macro // <-- return type of macros
 ```
+Integer literals may use decimal, hexadecimal (`0xFF`), or binary (`0b1010`)
+notation. Prefixes may also be uppercase. Their values use the same type
+inference and range checks regardless of base; `0xFF` means positive 255.
+Leading zeroes alone keep decimal notation (`012` means 12).
+
 ## Explicit type casts in Duck
 
 Duck uses C-style cast syntax: put the target type in parentheses before the
@@ -1323,12 +1328,18 @@ Print(p.Age)     // prints 25
 
 ## Bitwise and shift operators in Duck
 Similar to c++ or C#, Duck is using standard ~, <<, >>, &, |, and ^ symbols for work with bits.
+The bootstrap implements these operators for integers, together with `&=`,
+`|=`, `^=`, `<<=`, and `>>=`. Shifts preserve the left operand's width;
+negative counts or counts at least that width trap. Signed right shifts
+extend the sign bit; unsigned right shifts insert zeros. Bitwise operators
+use C precedence. In a conditional true arm, parenthesize OR to distinguish
+it from the separator: `ready ? (a | b) | c`.
 ``` c++
 uint x = 0x05		// 00000101
 Print(x & 0x03) 	// 00000001  <-- Bitwise AND   
 Print(x | 0x03)		// 00000111  <-- Bitwise OR
 Print(x ^ 0x03) 	// 00000110  <-- Bitwise XOR
-Print(~x)		    // 11111100   <-- Bitwise NOT
+Print(~x)		    // 4294967290 (uint32) <-- Bitwise NOT
 Print(x << 1)		// 00001010  <-- Left shift 
 Print(x >> 1)		// 00000010  <-- Right shift 
 ``` 
