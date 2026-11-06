@@ -18,8 +18,10 @@ struct Token {
 }
 enum class Type {
   Void, Int8, Short, Int, Long, UInt8, UInt16, UInt32, UInt64,
-  Float, Double, Bool, Text
+  Float, Double, Bool, Text, Pointer, String, Name
 };
+inline bool managedText(Type t) { return t == Type::String || t == Type::Name; }
+inline bool textType(Type t) { return managedText(t) || t == Type::Text; }
 inline bool floating(Type t) { return t == Type::Float || t == Type::Double; }
 inline bool unsignedInteger(Type t) {
   return t == Type::UInt8 || t == Type::UInt16 ||
@@ -80,6 +82,7 @@ struct Function {
   Type result;
   std::vector<Parameter> params;
   std::vector<std::unique_ptr<Stmt>> body;
+  std::string nativeSymbol; // Nonempty for a bodyless extern "C" declaration.
 };
 using Program = std::vector<Function>;
 } // namespace duck

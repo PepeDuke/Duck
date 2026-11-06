@@ -38,7 +38,8 @@ class Parser {
     if (isType() || t.text == "true" || t.text == "false" ||
         t.text == "return" || t.text == "if" || t.text == "else" ||
         t.text == "while" || t.text == "for" || t.text == "break" ||
-        t.text == "continue" || t.text == "do")
+        t.text == "continue" || t.text == "do" || t.text == "extern" ||
+        t.text == "null")
       fail(t, "reserved keyword cannot be an identifier");
     return pop();
   }
@@ -47,7 +48,8 @@ class Parser {
            at("uint32") || at("uint64") ||
            at("int8") || at("short") || at("int16") ||
            at("int") || at("int32") || at("long") || at("int64") ||
-           at("float") || at("double") || at("bool") || at("void");
+           at("float") || at("double") || at("bool") || at("void") || at("cstring") ||
+           at("string") || at("name");
   }
   Type type() {
     if (accept("byte") || accept("uint8"))
@@ -72,8 +74,12 @@ class Parser {
       return Type::Int;
     if (accept("bool"))
       return Type::Bool;
+    if (accept("string")) return Type::String;
+    if (accept("name")) return Type::Name;
+    if (accept("cstring"))
+      return Type::Text;
     expect("void");
-    return Type::Void;
+    return accept("*") ? Type::Pointer : Type::Void;
   }
   static int precedence(const Token &t) {
     if (t.string)
@@ -123,6 +129,8 @@ class Parser {
     } else if (peek().string) {
       e->kind = "text";
       pop();
+    } else if (accept("null")) {
+      e->kind = "null";
     } else if (at("true") || at("false")) {
       e->kind = "bool";
       pop();
@@ -300,10 +308,16 @@ class Parser {
                     bool nested) {
     separators();
     while (!at("<eof>") && !(nested && at("}"))) {
+      bool external = accept("extern");
+      if (external) {
+        if (!peek().string || peek().text != "C")
+          fail(peek(), "native declarations require extern \"C\"");
+        pop();
+      }
       bool typed = isType();
       Type result = typed ? type() : Type::Void;
       Token name = identifier();
-      if (!typed && !at("(")) {
+      if (!external && !typed && !at("(")) {
         lines();
         if (at("{"))
           fail(name, "instance containers are not implemented yet; use #{ for "
@@ -328,7 +342,8 @@ class Parser {
         }
       }
       name.text = prefix + name.text;
-      Function f{std::move(name), result, {}, {}};
+      auto nativeName = name.text.substr(prefix.size());
+      Function f{std::move(name), result, {}, {}, {}};
       expect("(");
       lines();
       if (!at(")"))
@@ -338,7 +353,7 @@ class Parser {
             fail(peek(),
                  "parameter requires a supported explicit type (int8, short, "
                  "int16, int, int32, long, int64, byte, uint, uint8, uint16, "
-                 "uint32, uint64, float, double, or bool)");
+                 "uint32, uint64, float, double, bool, string, name, cstring, or void*)");
           Type t = type();
           if (t == Type::Void)
             fail(peek(), "parameter cannot have void type");
@@ -347,7 +362,17 @@ class Parser {
           lines();
         } while (accept(","));
       expect(")");
-      f.body = block();
+      if (external) {
+        f.nativeSymbol = nativeName;
+        if (accept("=")) {
+          if (!peek().string || peek().text.empty())
+            fail(peek(), "native symbol must be a nonempty string literal");
+          f.nativeSymbol = pop().text;
+        }
+        if (at("{"))
+          fail(peek(), "native declaration cannot have a body");
+      } else
+        f.body = block();
       functions.push_back(std::move(f));
       if (!at("<eof>") && !at("\n") && !at(";") && !(nested && at("}")))
         fail(peek(), "expected newline between functions");

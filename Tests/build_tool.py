@@ -53,6 +53,46 @@ class Projects(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout)
         return result
 
+    def test_library_project_reference(self):
+        engine = self.root / "separate engine"
+        engine.mkdir()
+        (engine / "core.dk").write_text("int Add(int a, int b) { return a + b }", encoding="utf-8")
+        library = engine / "Engine.dkp"
+        library.write_text('version = 1\n[project]\nname = "Engine"\nkind = "library"\n'
+                           '[modules.core]\nsources = ["core.dk"]\n', encoding="utf-8")
+        self.write('version = 1\nreferences = ["separate engine/Engine.dkp"]\n'
+                   '[project]\nname = "Demo"\nentry = "app"\n'
+                   '[modules.app]\nsources = ["app.dk"]\ndepends = ["core"]\n')
+        self.invoke()
+        output = self.root / ".duck/build/debug"
+        exe = output / ("Demo.exe" if os.name == "nt" else "Demo")
+        self.assertEqual(subprocess.check_output([str(exe)], text=True).strip(), "42")
+        self.assertTrue((output / "core.o").exists())
+        self.assertTrue((output / "app.o").exists())
+        self.project = library
+        self.invoke()
+        self.assertTrue((engine / ".duck/build/debug/core.o").exists())
+        self.assertFalse((engine / ".duck/build/debug/Engine.exe").exists())
+        library.write_text(library.read_text().replace('version = 1',
+                           'version = 1\nreferences = ["Engine.dkp"]'), encoding="utf-8")
+        self.assertIn("project reference cycle", self.invoke(success=False).stderr)
+
+    def test_reference_rejects_executable_and_duplicate_modules(self):
+        other = self.root / "other.dkp"
+        other.write_text(BASE, encoding="utf-8")
+        self.write(BASE.replace('version = 1', 'version = 1\nreferences = ["other.dkp"]'))
+        self.assertIn("must be a library", self.invoke(success=False).stderr)
+        other.write_text(BASE.replace('entry = "app"', 'kind = "library"'), encoding="utf-8")
+        self.assertIn("duplicate module", self.invoke(success=False).stderr)
+
+    def test_library_manifest_validation(self):
+        self.write(BASE.replace('entry = "app"', 'kind = "unknown"'))
+        self.assertIn("project.kind", self.invoke(success=False).stderr)
+        self.write(BASE.replace('entry = "app"', 'kind = "library"\nentry = "app"'))
+        self.assertIn("cannot have an entry", self.invoke(success=False).stderr)
+        self.write(BASE.replace('entry = "app"', 'kind = "library"'))
+        self.assertIn("Main", self.invoke(success=False).stderr)
+
     def test_graph_and_overrides(self):
         self.invoke()
         output = self.root / ".duck/build/debug"

@@ -115,6 +115,20 @@ int BitwiseConditional(bool ready) { return ready ? (1 | 2) | 4 | 8 }
     check(duck::compile(program) == parallel,
           "repeated compilation leaked state");
 
+    auto native = duck::parse(duck::lex(
+        "extern \"C\" int Absolute(int value) = \"abs\"\n"
+        "Main() { Print(Absolute(-7)) }", "native.dk"));
+    const auto nativeSymbols = duck::collectSymbols(native);
+    auto nativeAnalysis = duck::analyzeFunction(native.front(), nativeSymbols);
+    auto nativeFragment = duck::lowerFunction(native.front(), nativeSymbols, nativeAnalysis);
+    check(nativeFragment.definition.empty() && nativeFragment.globals.empty(),
+          "native declarations must not lower to Duck definitions");
+    auto nativeIR = duck::compile(native);
+    check(nativeIR.find("declare i32 @abs(i32)") != std::string::npos &&
+              nativeIR.find("call i32 @abs(i32 -7)") != std::string::npos &&
+              nativeIR.find("@duck.Absolute") == std::string::npos,
+          "native symbol alias did not survive compilation stages");
+
     auto compileSource = [&source] {
       return duck::compile(duck::parse(duck::lex(source)));
     };

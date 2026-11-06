@@ -80,6 +80,8 @@ accept explicit files/options only and never reads project configuration.
 
 - Top-level functions with explicit supported numeric or `bool` parameters and returns,
   or omitted/explicit `void` returns. Forward calls and recursion work.
+  `string`, `name`, `cstring`, and opaque `void*` parameters, locals, and returns
+  are also supported. See the text and native interop sections below.
 - Mutable scalar reference parameters for all supported numeric and boolean types. Arguments must be
   mutable variables of exactly the declared type. References can be forwarded
   to other functions and multiple parameters can alias the same variable.
@@ -149,7 +151,8 @@ accept explicit files/options only and never reads project configuration.
   destination's low bits. Integer widening sign-extends signed sources and
   zero-extends unsigned sources; equal-width casts reinterpret the bits.
   Numeric-to-bool tests nonzero (NaN is true); bool-to-numeric yields
-  0 or 1. Text, object, pointer, and void casts are not implemented.
+  0 or 1. Explicit casts between `string` and `name` transcode text. Object, pointer,
+  `cstring`, and void casts are not implemented.
 - Short-circuit `&&` / `||` and Duck's `condition ? value | value` expression.
   Conditions require booleans; conditional branches must have matching
   non-void types or numeric types that can widen to a common type.
@@ -169,10 +172,11 @@ accept explicit files/options only and never reads project configuration.
   `while` shown in the broader design is not yet supported.
   For-initializer locals belong to the loop
   scope. The step cannot declare a variable.
-- `Print` with one numeric, boolean, or string literal value. Floating-point
+- `Print` with one numeric, boolean, `string`, `name`, or `cstring` value. Floating-point
   output uses `%g` (six significant digits). Booleans print
-  as `0` or `1`. Strings support `\n`, `\r`, `\t`, `\\`, and `\"` escapes.
-  Literal text is passed as data to `printf`, including percent characters.
+  as `0` or `1`. Text supports `\n`, `\r`, `\t`, `\\`, `\"`, `\0`,
+  `\uXXXX`, and `\UXXXXXXXX` escapes.
+  Text is printed as data, so percent characters never become format specifiers.
   Inferred locals can hold and reassign these literal values, including
   conditional selections such as `label : ready ? "yes" | "no"`.
 - Line and block comments, newline statement terminators, optional semicolons,
@@ -188,16 +192,15 @@ remainder). Unsigned division and comparisons interpret values as nonnegative.
 Checks use the operand
 width after numeric promotion; unselected short-circuit and conditional
 branches do not trap. Floating-point division retains IEEE behavior.
-String literals
-are passed as UTF-8 bytes to the C runtime for this bootstrap, not Duck's
-eventual two-byte `string` representation. Inferred text locals hold references
-to immutable, program-lifetime literals. Explicit `string` declarations,
-string operations, and string parameters/returns are not yet supported.
+Text literals default to UTF-16 `string`. In a typed text context the same
+literal can initialize UTF-8 `name` or native `cstring`. Literals are validated
+as Unicode; neither the target OS nor host `wchar_t` changes their encoding.
+See [text values](#string-and-name-values) for operations, lifetime and interop.
 
-Numeric conversions widen through `int8 → short → int → long → float → double` (including
+Numeric conversions widen through `int8 â†’ short â†’ int â†’ long â†’ float â†’ double` (including
 direct jumps, such as int to double) for initialization, assignment, value
 arguments, and returns.
-Unsigned conversions widen through `uint8 → uint16 → uint32 → uint64`, and
+Unsigned conversions widen through `uint8 â†’ uint16 â†’ uint32 â†’ uint64`, and
 all integers can convert implicitly to float/double. Unsigned-to-signed
 conversion is implicit only when the signed destination is strictly wider;
 signed-to-unsigned conversion requires a cast.
@@ -259,7 +262,7 @@ containers or fields.
 Execution is sequential. The compiler does not yet implement Duck's automatic
 concurrency, ownership rules, resource locking, or runtime. Instance containers,
 container references, local reference declarations, reference returns, arrays,
-custom byte-width `iN`/`uN` types, other numeric types, full strings, range-based loops,
+custom byte-width `iN`/`uN` types, other numeric types, mutable text buffers, range-based loops,
 markup and compile-time evaluation
 remain future work. Unsupported constructs produce errors; the design
 examples are not a claim of compiler coverage. Non-void functions must have
@@ -272,20 +275,179 @@ and static tutorial (`04_ContainersAndStaticBlocks.dk`) therefore remains a
 design example. Qualified names currently refer to static functions, not object
 member access. The executable entry point must still be a global `Main`.
 
+## String and name values
+
+`string` stores UTF-16 code units (always 16 bits); `name` stores UTF-8 bytes.
+They are distinct, immutable text value types with reassignable variables.
+`name` currently has content equality, not an interned identifier table.
+
+```c++
+string title = "Hellfeather \U0001F986"
+name utf8 = (name)title
+string restored = (string)utf8
+Print(restored == title)
+Print(Length(title))  // 14 UTF-16 code units
+Print(Length(utf8))   // 16 UTF-8 bytes
+Print(CodeUnitAt(title, 12)) // 55358: high surrogate
+```
+
+Supported operations:
+
+- Locals, inference, constants, assignment, parameters, returns, mutable reference
+  parameters, and conditional expressions. Uninitialized variables still require
+  assignment before reading. A reference can reassign a value, not edit its bytes.
+- `+` and `+=` concatenate values of the same type. `==` and `!=` compare content,
+  including embedded NULs. Equality does not perform Unicode normalization.
+- `(name)value` and `(string)value` explicitly convert between encodings at runtime.
+  Conversion preserves Unicode scalars, including supplementary characters.
+  Named values never change encoding implicitly. Literals adopt a typed destination
+  (including arguments/returns) or an adjacent text operand; otherwise they infer
+  `string`. Both branches of a conditional must have compatible types.
+- `Length(value)` returns a `long` code-unit count; it is not a grapheme/character
+  count. `CodeUnitAt(value, index)` returns a `uint32` code unit and traps for a
+  negative/out-of-range index. Code units cannot be modified individually.
+- `Print` emits UTF-8 bytes with a newline for either type, independent of locale
+  and `wchar_t` width. Terminal display still depends on its UTF-8/font support.
+
+Source literals must contain valid UTF-8. Escapes include `\0`, `\uXXXX`, and
+`\UXXXXXXXX`; Unicode escapes must name scalar values, so isolated surrogate
+escapes are rejected. Use `\U0001F986` for a supplementary character. UTF-16
+surrogate pairs are generated automatically. Length, equality, conversion and
+printing preserve embedded NUL code units.
+
+Literals use immutable program-lifetime storage. Concatenation/conversion create
+immutable shared storage with deterministic reference counting. Assignment,
+argument evaluation, returns and scope exits retain/release it; this includes
+break/continue and early returns. No tracing garbage collector is involved.
+The current compiler executes sequentially; this reference count implementation
+does not provide future concurrent sharing semantics. `Tests/text.py` instruments
+text allocations and checks that loop/return/reference cases release all storage.
+
+The internal ABI is an opaque pointer to a reference count, an i64 code-unit
+length, and terminated data. This layout is compiler-private, not a stable native
+or distribution ABI. Direct `duckc` → Clang builds work without an extra runtime
+library: required helpers are emitted as module-local LLVM IR and use the C
+allocator. Allocation failure and size overflow trap.
+
+Native declarations may take `string` or `name` by value. The compiler passes a
+read-only pointer to terminated UTF-16 or UTF-8 data, respectively, and keeps the
+owner alive through the call. This is suitable for a Windows Unicode title or a
+UTF-8 native API. The native signature must match that encoding; do not assume a
+host `wchar_t*` is always UTF-16. A native C API may stop at an embedded NUL even
+though Duck's length-aware operations preserve it. Native code must neither
+modify nor retain the pointer. Native text returns and mutable text references
+are rejected until copying/validation/lifetime rules are implemented.
+
+`cstring` remains a distinct, immutable UTF-8 literal-pointer interop type.
+It supports typed literal assignment, Duck parameters/returns and Print, but not
+managed text operations or casts to/from `string`/`name`. Its lack of ownership
+prevents safely borrowing arbitrary dynamically created text into a lasting
+`cstring` variable. Use a `name` native parameter for a read-only UTF-8 borrow.
+
+See [14_Text.dk](../Examples/Bootstrap/14_Text.dk) for an executable example.
+Substring, search, formatting, normalization, grapheme iteration and mutable
+buffers remain future work.
+
+## Native API calls and opaque handles
+
+The engine can now call native libraries directly from Duck. Declarations have
+no body and use the platform C calling convention:
+
+```c++
+Platform
+#{
+    extern "C" int Counter(long& ticks) = "QueryPerformanceCounter"
+    extern "C" int Frequency(long& value) = "QueryPerformanceFrequency"
+}
+extern "C" int puts(cstring message)
+
+Main()
+{
+    long ticks = 0
+    Print(Platform.Counter(ticks) != 0)
+    puts("Called from Duck")
+}
+```
+
+An optional `= "symbol"` maps a Duck function name to a native linker symbol.
+Without an alias, the unqualified function name is used, even inside a static
+container. Symbols must be ASCII identifiers; `main` and `printf` are reserved
+by the bootstrap (as are `malloc`, `free`, and `putchar`, used by text helpers). Only `extern "C"` is accepted. Declarations end at a newline,
+semicolon, enclosing brace, or EOF. The compiler rejects bodies, conflicting
+signatures for the same native symbol, and native Main declarations. Compatible
+aliases share one LLVM declaration. Native declarations can be exported through
+ordinary direct module dependencies; their bodies are never emitted.
+
+Native signatures currently support:
+
+- By value: signed/unsigned 32-bit and 64-bit integers, float, double, `void*`,
+  and `string`, `name`, or `cstring` arguments. Native returns allow the supported
+  numeric/pointer types or void, but exclude all text types.
+- By reference: all supported numeric types and `void*&`. References pass the
+  address of an initialized, mutable, exactly typed variable. Initialize output
+  arguments explicitly; native calls do not bypass definite assignment checks.
+- `bool`, 8/16-bit integers by value, native text returns, and text references are
+  rejected until their ABI/lifetime behavior is implemented. For Windows BOOL,
+  declare `int` and compare the return with zero. Duck `long` is always 64-bit;
+  it is not necessarily the host C `long` type.
+
+`void*` is an opaque handle type. It supports null, assignment, function arguments
+and returns, mutable references, conditionals, and equality/inequality. It does
+not support dereferencing, arithmetic, ordering, numeric casts, or Print. Use
+`handle != null` to check a handle. A local handle is not initialized implicitly.
+There is no automatic native resource ownership: explicitly call the native
+library's destroy/close function when required.
+
+`cstring` refers to immutable UTF-8 bytes with a trailing zero, suitable for
+native `const char*` input. Duck functions can accept and return it, and Print
+accepts it. It is distinct from an opaque handle and cannot be null or cast to
+`void*`. Native callees must not modify its storage. Native references borrow
+Duck storage only during the call and must not be retained. These native
+contracts are the binding author's responsibility; Duck does not inspect the
+library implementation. General pointers, buffers, callbacks, structures by
+value, varargs, C++ name mangling, and alternate calling conventions remain
+unsupported.
+
+Add libraries to the `.dkp` module's `libraries` array or pass them to Clang
+when linking IR directly. Library names and prototype correctness must match
+the selected platform; the compiler does not read C headers. The current
+integration target is Windows x64. In particular, these bindings do not claim
+support for 32-bit Windows stdcall APIs.
+
+[Examples/Projects/NativeClock](../Examples/Projects/NativeClock/NativeClock.dkp)
+is a Duck-only Windows clock example using Kernel32 (no handwritten C++ shim):
+
+```powershell
+./duck.cmd build Examples/Projects/NativeClock/NativeClock.dkp
+./Examples/Projects/NativeClock/.duck/build/debug/NativeClock.exe
+```
+
+It prints four `1` values after querying frequency and checking two ordered
+readings. The signatures follow Microsoft's
+[QueryPerformanceCounter](https://learn.microsoft.com/en-us/windows/win32/api/profileapi/nf-profileapi-queryperformancecounter)
+and [QueryPerformanceFrequency](https://learn.microsoft.com/en-us/windows/win32/api/profileapi/nf-profileapi-queryperformancefrequency)
+documentation; native calls use LLVM's
+[default C calling convention](https://llvm.org/docs/LangRef.html#calling-conventions).
+
+`Tests/native_interop.py` compiles an independent C fixture, links it through a
+referenced Duck library project, and checks scalar/ref/handle/string ABI behavior
+at both optimization profiles. It also verifies declaration deduplication,
+imported conflicts, diagnostics and the real Windows clock example.
+
 ## Implementation and validation
 
 The compiler is a reusable `duck_compiler` library with explicit stage APIs in
 `Pipeline.h`. `main.cpp` only handles file I/O and invokes the pipeline.
 
-| Stage | Input → output | Implementation |
+| Stage | Input â†’ output | Implementation |
 | --- | --- | --- |
-| Tokenize | Source text → tokens with locations | `Lexer.cpp` |
-| Parse | Tokens → syntax tree | `Parser.cpp` |
-| Combine units | Per-file syntax trees in input order → program | `Pipeline.cpp` |
-| Collect declarations | Syntax tree → function signatures | `Symbols.cpp` |
-| Analyze a function | Function + signatures → types, conversions, literal constants | `Semantics.cpp` |
-| Lower a function | Function + signatures + analysis → LLVM fragment | `Codegen.cpp` |
-| Assemble | Fragments in source order → LLVM module | `Pipeline.cpp` |
+| Tokenize | Source text â†’ tokens with locations | `Lexer.cpp` |
+| Parse | Tokens â†’ syntax tree | `Parser.cpp` |
+| Combine units | Per-file syntax trees in input order â†’ program | `Pipeline.cpp` |
+| Collect declarations | Syntax tree â†’ function signatures | `Symbols.cpp` |
+| Analyze a function | Function + signatures â†’ types, conversions, literal constants | `Semantics.cpp` |
+| Lower a function | Function + signatures + analysis â†’ LLVM fragment | `Codegen.cpp` |
+| Assemble | Fragments in source order â†’ LLVM module | `Pipeline.cpp` |
 
 Semantic analysis checks names, types, references, constants, definite assignment, and control flow
 without creating LLVM instructions. All functions are analyzed successfully
@@ -313,7 +475,7 @@ promote them to registers. A native `main` wrapper calls Duck's `Main`.
 without lowering, forward/mutually recursive calls, concurrent analysis and
 lowering, and byte-for-byte deterministic assembly across scheduling orders.
 
-`Tests/run.cmake` exercises the full frontend → LLVM → linker → executable
+`Tests/run.cmake` exercises the full frontend â†’ LLVM â†’ linker â†’ executable
 pipeline at both `-O0` and `-O2` and verifies output. Tests include nested loops,
 short-circuit side effects, conditional branches, and compound assignments.
 Reference tests cover caller mutation, aliasing, forwarding, recursion, value

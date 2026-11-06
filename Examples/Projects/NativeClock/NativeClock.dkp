@@ -1,0 +1,13 @@
+version = 1
+
+[project]
+name = "NativeClock"
+entry = "app"
+
+[modules.platform]
+sources = ["platform/*.dk"]
+libraries = ["Kernel32"]
+
+[modules.app]
+sources = ["app/*.dk"]
+depends = ["platform"]

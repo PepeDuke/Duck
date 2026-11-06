@@ -124,8 +124,9 @@ interface files and distributing libraries without sources are future work.
 `.lib`, `.a`, `.so`, `.dylib`, `.o`, or `.obj` paths. `library_paths` supplies
 search directories. Objects precede module libraries in dependent-first order;
 project-wide libraries come last. Explicit files/directories are checked before
-building. Native declarations and calling conventions are separate compiler
-features: linking a native library does not yet expose its APIs to Duck code.
+building. Native APIs are exposed using the compiler's bodyless `extern "C"` declarations,
+optionally with a `= "symbol"` alias. See [native calls](../Compiler/README.md#native-api-calls-and-opaque-handles)
+for supported types and ABI limits. Linking alone does not infer declarations.
 
 This is build-time modularity. Enabling a module includes code but does not
 automatically register or execute it. Runtime plugin discovery, stable ABI,
@@ -146,3 +147,46 @@ tool. Run the full suite with:
 ```powershell
 ctest --test-dir build -C Debug --output-on-failure
 ```
+
+
+## Library projects and project references
+
+An executable can reference separately maintained library projects:
+
+```toml
+version = 1
+references = ["../Quaxel-Engine/Quaxel.dkp"]
+[project]
+name = "Hellfeather"
+entry = "game"
+[modules.game]
+sources = ["Source/**/*.dk"]
+depends = ["quaxel_core"]
+```
+
+The referenced manifest owns its module definitions:
+
+```toml
+version = 1
+[project]
+name = "Quaxel"
+kind = "library"
+[modules.quaxel_core]
+sources = ["Source/Core/**/*.dk"]
+```
+
+`project.kind` defaults to `executable`. Libraries must omit `entry` and compile
+all enabled modules to objects without linking an executable. Every library
+module is compiled with `--library`, so it cannot define Main. Executable
+projects still require an entry module. References may only target libraries.
+
+References resolve relative to their declaring manifest, recursively. Imported
+sources and native link paths retain that manifest's base directory. Imported
+modules retain their names; the root project's enabled/disabled overrides apply
+to the combined module graph. Referenced toolchain/build-directory settings are
+used only when building that library directly; the consuming root owns its build.
+Root modules must explicitly depend on imported modules to call their functions.
+Project reference cycles and duplicate module names are rejected (including a
+shared library reached through multiple reference paths). This first version
+requires a reference tree without shared dependencies. References do not provide
+packages, version resolution, binary interfaces or a module namespace.

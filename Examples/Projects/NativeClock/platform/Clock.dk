@@ -1,0 +1,23 @@
+// Windows x64: BOOL is a 32-bit int, LARGE_INTEGER is a 64-bit value.
+// References supply the writable storage required by these APIs.
+WindowsClock
+#{
+    extern "C" int Frequency(long& value) = "QueryPerformanceFrequency"
+    extern "C" int Counter(long& value) = "QueryPerformanceCounter"
+
+    bool Initialize(long& frequency)
+    {
+        return Frequency(frequency) != 0 && frequency > 0
+    }
+
+    bool Read(long& ticks)
+    {
+        return Counter(ticks) != 0
+    }
+
+    double ElapsedSeconds(long start, long end, long frequency)
+    {
+        // Caller supplies a valid frequency and ordered readings from this clock.
+        return (double)(end - start) / (double)frequency
+    }
+}

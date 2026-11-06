@@ -1,0 +1,15 @@
+// string = UTF-16; name = UTF-8. Length counts code units, not characters.
+string Greeting(string who) { return "Hello, " + who }
+Main()
+{
+    string title = "Hellfeather 🦆"
+    name utf8 = (name)title
+    Print(title)
+    Print(utf8)
+    Print(Length(title))
+    Print(Length(utf8))
+    Print((string)utf8 == title)
+    Print(Greeting("Duck"))
+    title += "!"
+    Print(title)
+}

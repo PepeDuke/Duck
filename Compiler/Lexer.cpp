@@ -1,4 +1,5 @@
 #include "Pipeline.h"
+#include "Unicode.h"
 #include <cctype>
 namespace duck {
 std::vector<Token> lex(const std::string &source,
@@ -54,6 +55,25 @@ std::vector<Token> lex(const std::string &source,
             fail(t, "unterminated string literal");
           ch = take();
           switch (ch) {
+          case 'u':
+          case 'U': {
+            const int digits = ch == 'u' ? 4 : 8;
+            uint32_t cp = 0;
+            for (int n = 0; n < digits; ++n) {
+              if (i == source.size()) fail(t, "incomplete Unicode escape");
+              char h = take();
+              int digit = h >= '0' && h <= '9' ? h - '0'
+                        : h >= 'a' && h <= 'f' ? h - 'a' + 10
+                        : h >= 'A' && h <= 'F' ? h - 'A' + 10 : -1;
+              if (digit < 0) fail(t, "invalid Unicode escape");
+              cp = (cp << 4) | static_cast<uint32_t>(digit);
+            }
+            if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+              fail(t, "Unicode escape must be a scalar value");
+            appendUTF8(t.text, cp);
+            continue;
+          }
+          case '0': ch = '\0'; break;
           case 'n':
             ch = '\n';
             break;
@@ -75,6 +95,7 @@ std::vector<Token> lex(const std::string &source,
       if (i == source.size())
         fail(t, "unterminated string literal");
       take();
+      decodeUTF8(t);
       out.push_back(t);
       continue;
     }

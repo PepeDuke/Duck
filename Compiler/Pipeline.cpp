@@ -17,6 +17,9 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
   std::string module =
       "; Duck bootstrap LLVM IR\ndeclare i32 @printf(ptr, ...)\n"
       "declare double @llvm.floor.f64(double)\ndeclare void @llvm.trap()\n";
+  bool needsText = false;
+  for (const auto &f : functions) needsText = needsText || f.usesTextRuntime;
+  if (needsText) module += textRuntimeIR();
   for (const auto &f : functions)
     module += f.globals;
   module += '\n';
@@ -44,12 +47,16 @@ std::string compileModule(const Program &program, const Program &imports,
     if (!symbols.emplace(f.name.text, imported.at(f.name.text)).second)
       fail(f.name, "duplicate imported function '" + f.name.text + "'");
   }
+  validateNativeSymbols(symbols);
+  auto declarations = imported;
+  for (const auto &[name, signature] : symbols)
+    if (!signature.nativeSymbol.empty()) declarations.emplace(name, signature);
   std::vector<FunctionAnalysis> analyses;
   for (const auto &function : program)
     analyses.push_back(analyzeFunction(function, symbols));
   std::vector<FunctionIR> fragments;
   for (size_t i = 0; i < program.size(); ++i)
     fragments.push_back(lowerFunction(program[i], symbols, analyses[i]));
-  return emitDeclarations(imported) + assembleModule(fragments, entry);
+  return emitDeclarations(declarations) + assembleModule(fragments, entry);
 }
 } // namespace duck

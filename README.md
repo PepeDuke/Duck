@@ -26,6 +26,10 @@ broader than the implemented subset. See [Compiler/README.md](Compiler/README.md
 for build instructions, executable examples, and current limitations.
 The separate [build tool](BuildTool/README.md) builds modular programs from
 `.dkp` projects, with explicit dependencies, optional modules, and native linking.
+The bootstrap also supports `extern "C"` native API declarations, opaque `void*`
+handles, UTF-16 `string` and UTF-8 `name` values with deterministic cleanup,
+and native text arguments; see the
+[native interop guide](Compiler/README.md#native-api-calls-and-opaque-handles).
 
 stages
 1. design stage - make sure the syntax is consistent, complete and simple to use
@@ -312,8 +316,8 @@ int
 long
 float
 double
-name     // string 1 byte UTF-8
-string   // string 2 byte TChar
+name     // UTF-8 text (8-bit code units)
+string   // UTF-16 text on every platform (16-bit code units)
 char
 uint
 uint8
@@ -339,6 +343,13 @@ markup // <-- hold tags tree for Mark Up
 func // <-- holds function
 macro // <-- return type of macros
 ```
+
+`name` is UTF-8 and `string` is UTF-16 on every platform. These encodings do not
+follow the host's `wchar_t` or `TCHAR` configuration. A code unit is not
+necessarily one complete Unicode character. Native API adapters own any
+required encoding conversions. The bootstrap compiler's explicit `cstring`
+is a separate native interop type, not an implementation of either language type.
+
 Integer literals may use decimal, hexadecimal (`0xFF`), or binary (`0b1010`)
 notation. Prefixes may also be uppercase. Their values use the same type
 inference and range checks regardless of base; `0xFF` means positive 255.
@@ -384,8 +395,8 @@ The bootstrap supports casts among `int8`, `short`, `int`, `long`, `uint8`,
 Floating-to-unsigned casts also floor and check the target's range; negative
 floored values trap. See [compiler numeric rules](Compiler/README.md) for
 literal inference and mixed signed/unsigned conversions.
-Casts involving objects, pointers, text, and
-`void` are not implemented. Implicit narrowing remains rejected; write an
+Explicit casts between `string` (UTF-16) and `name` (UTF-8) transcode text.
+Casts involving objects, pointers, `cstring`, and `void` are not implemented. Implicit narrowing remains rejected; write an
 explicit cast when conversion is intended.
 
 ## Constant variables in Duck

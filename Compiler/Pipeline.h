@@ -15,9 +15,12 @@ Program combineUnits(std::vector<Program> units);
 struct Signature {
   Type result;
   std::vector<Parameter> parameters;
+  std::string nativeSymbol;
+  Token declaration;
 };
 using Symbols = std::map<std::string, Signature>;
 Symbols collectSymbols(const Program &program, bool requireEntry = true);
+void validateNativeSymbols(const Symbols &symbols);
 
 // Expression pointers refer to the input AST, which must outlive this artifact.
 // Each function gets its own analysis, suitable for independent worker tasks.
@@ -35,11 +38,13 @@ FunctionAnalysis analyzeFunction(const Function &function,
 struct FunctionIR {
   std::string globals;
   std::string definition;
+  bool usesTextRuntime = false;
 };
 FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
                          const FunctionAnalysis &analysis);
 std::string assembleModule(const std::vector<FunctionIR> &functions,
                            bool entry = true);
+std::string textRuntimeIR();
 std::string emitDeclarations(const Symbols &symbols);
 
 // Sequential orchestration for now. Analysis finishes before lowering begins.

@@ -163,18 +163,23 @@ public:
     Strings order;
     Link link{toml::table{}, "link"};
 
-    explicit Project(const Options& options) {
+    explicit Project(const Options& options, std::set<fs::path> activeProjects = {}) {
         auto path = fs::weakly_canonical(fs::absolute(options.project));
         if (lower(path.extension().u8string()) != ".dkp") fail("project file must have the .dkp extension");
+        if (!activeProjects.insert(path).second) fail("project reference cycle: " + path.u8string());
         root = path.parent_path();
         auto data = toml::parse_file(path.u8string());
-        table(&data, {"version", "project", "modules", "toolchain", "link"}, "project file");
+        table(&data, {"version", "project", "modules", "toolchain", "link", "references"}, "project file");
         auto version = data.get("version");
         if (!version || !version->is_integer() || version->value<int64_t>() != 1)
             fail("project file requires version = 1");
-        const auto& config = table(data.get("project"), {"name", "entry", "build_dir"}, "project");
+        const auto& config = table(data.get("project"), {"name", "entry", "build_dir", "kind"}, "project");
         projectName = name(string(config.get("name"), "project.name"), "project.name");
-        entry = name(string(config.get("entry"), "project.entry"), "project.entry");
+        auto kind = config.contains("kind") ? string(config.get("kind"), "project.kind") : "executable";
+        if (kind != "executable" && kind != "library") fail("project.kind must be executable or library");
+        if (kind == "library") {
+            if (config.contains("entry")) fail("library project cannot have an entry module");
+        } else entry = name(string(config.get("entry"), "project.entry"), "project.entry");
         buildDir = fs::weakly_canonical(root / fs::u8path(config.contains("build_dir") ?
             string(config.get("build_dir"), "project.build_dir") : ".duck/build"));
         if (auto tools = data.get("toolchain")) {
@@ -192,7 +197,35 @@ public:
             modules.emplace(id, Module(module, id));
             declarations.emplace_back(value.source().begin, id);
         }
-        if (!modules.count(entry)) fail("entry module '" + entry + "' does not exist");
+        if (!entry.empty() && !modules.count(entry)) fail("entry module '" + entry + "' does not exist");
+        // References contribute separately compiled modules, never an executable entry.
+        for (const auto& reference : strings(data.get("references"), "references")) {
+            Options childOptions;
+            childOptions.project = root / fs::u8path(reference);
+            Project child(childOptions, activeProjects);
+            if (!child.entry.empty()) fail("referenced project must be a library: " + reference);
+            auto rebaseLink = [&](Link& value) {
+                for (auto& directory : value.directories)
+                    directory = (child.root / fs::u8path(directory)).u8string();
+                for (auto& library : value.libraries) {
+                    auto ext = lower(fs::u8path(library).extension().u8string());
+                    if (library.find_first_of("/\\") != std::string::npos ||
+                        ext == ".lib" || ext == ".a" || ext == ".so" || ext == ".dylib" || ext == ".o" || ext == ".obj")
+                        library = (child.root / fs::u8path(library)).u8string();
+                }
+            };
+            for (const auto& id : child.order) {
+                auto module = child.modules.at(id);
+                for (auto& pattern : module.patterns) pattern = (child.root / fs::u8path(pattern)).u8string();
+                rebaseLink(module);
+                if (!modules.emplace(id, std::move(module)).second)
+                    fail("duplicate module from project reference: " + id);
+                declarations.emplace_back(toml::source_position{}, id);
+            }
+            rebaseLink(child.link);
+            link.libraries.insert(link.libraries.end(), child.link.libraries.begin(), child.link.libraries.end());
+            link.directories.insert(link.directories.end(), child.link.directories.begin(), child.link.directories.end());
+        }
         for (const auto& id : options.enable)
             if (std::find(options.disable.begin(), options.disable.end(), id) != options.disable.end())
                 fail("a module cannot be both enabled and disabled");
@@ -229,7 +262,7 @@ public:
 
     std::vector<std::pair<std::string, Paths>> plan(const std::string& target) const {
         if (!target.empty() && !modules.count(target)) fail("unknown module '" + target + "'");
-        if (target.empty() && !modules.at(entry).enabled) fail("entry module cannot be disabled for an executable build");
+        if (target.empty() && !entry.empty() && !modules.at(entry).enabled) fail("entry module cannot be disabled for an executable build");
         std::set<std::string> selected;
         std::function<void(const std::string&)> select = [&](const std::string& id) {
             const auto& module = modules.at(id);
@@ -317,7 +350,7 @@ static void build(const Options& options, const fs::path& bin) {
     auto compiler = project.tool("compiler", options.compiler, bin);
     auto clang = project.tool("clang", options.clang, bin);
     Strings flags;
-    if (options.module.empty()) {
+    if (options.module.empty() && !project.entry.empty()) {
         for (auto it = sources.rbegin(); it != sources.rend(); ++it) project.linkFlags(project.modules.at(it->first), flags);
         project.linkFlags(project.link, flags);
     }
@@ -340,7 +373,7 @@ static void build(const Options& options, const fs::path& bin) {
         objects.push_back(object.u8string());
         artifacts.insert(artifacts.end(), {ir, object});
     }
-    if (options.module.empty()) {
+    if (options.module.empty() && !project.entry.empty()) {
         auto output = work.path / project.projectName;
 #ifdef _WIN32
         output += ".exe";

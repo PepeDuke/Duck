@@ -33,8 +33,12 @@ std::string typeName(Type type) {
     return "double";
   case Type::Bool:
     return "bool";
+  case Type::String: return "string";
+  case Type::Name: return "name";
   case Type::Text:
-    return "literal text";
+    return "cstring";
+  case Type::Pointer:
+    return "void*";
   default:
     return "void";
   }
@@ -120,9 +124,10 @@ class Analyzer {
     const auto &op = e.token.text;
     if (e.kind == "cast") {
       auto source = expression(*e.args[0]);
+      if (managedText(source) && managedText(e.castType)) return e.castType;
       if ((!numeric(source) && source != Type::Bool) ||
           (!numeric(e.castType) && e.castType != Type::Bool))
-        fail(e.token, "casts currently require numeric or bool types");
+        fail(e.token, "casts currently require numeric/bool types or string/name encoding conversions");
       return e.castType;
     }
     if (e.kind == "real") {
@@ -203,20 +208,33 @@ class Analyzer {
       }
       return type;
     }
+    if (e.kind == "null")
+      return Type::Pointer;
     if (e.kind == "bool")
       return Type::Bool;
     if (e.kind == "text")
-      return Type::Text;
+      return textType(expected) ? expected : Type::String;
     if (e.kind == "name") {
       requireInitialized(e.token);
       return lookup(e.token).type;
     }
     if (e.kind == "call") {
+      if (op == "Length" || op == "CodeUnitAt") {
+        if (e.args.size() != (op == "Length" ? 1u : 2u))
+          fail(e.token, "wrong argument count for '" + op + "'");
+        auto text = expression(*e.args[0]);
+        if (!managedText(text)) fail(e.token, op + " requires string or name");
+        if (op == "CodeUnitAt") expression(*e.args[1], Type::Long);
+        return op == "Length" ? Type::Long : Type::UInt32;
+      }
       if (op == "Print") {
         if (e.args.size() != 1)
           fail(e.token, "Print expects one argument");
-        if (expression(*e.args[0]) == Type::Void)
+        auto printed = expression(*e.args[0]);
+        if (printed == Type::Void)
           fail(e.token, "cannot print void");
+        if (printed == Type::Pointer)
+          fail(e.token, "cannot print an opaque pointer; compare it with null instead");
         return Type::Void;
       }
       auto found = symbols.end();
@@ -254,7 +272,8 @@ class Analyzer {
       return signature.result;
     }
     auto first = expression(*e.args[0],
-                            e.kind == "unary" && op == "-" && numeric(expected)
+                            (e.kind == "unary" && op == "-" && numeric(expected)) ||
+                            (e.kind == "binary" && op == "+" && managedText(expected))
                                 ? expected
                                 : Type::Void);
     if (e.kind == "conditional") {
@@ -262,7 +281,13 @@ class Analyzer {
       auto yes = expression(*e.args[1], expected);
       if (yes == Type::Void)
         fail(e.token, "conditional branches must produce values");
-      auto no = expression(*e.args[2], expected);
+      auto hint = expected;
+      if (hint == Type::Void && textType(yes) && e.args[1]->kind != "text") hint = yes;
+      auto no = expression(*e.args[2], hint);
+      if (expected == Type::Void && e.args[1]->kind == "text" && textType(no)) {
+        yes = no;
+        analysis.expressionTypes[e.args[1].get()] = no;
+      }
       if (numeric(yes) && numeric(no)) {
         auto type = common(yes, no, e.token);
         convert(*e.args[1], yes, type);
@@ -286,7 +311,22 @@ class Analyzer {
       require(expression(*e.args[1]), Type::Bool, e.token);
       return Type::Bool;
     }
-    auto second = expression(*e.args[1]);
+    auto hint = Type::Void;
+    if (op == "+" && managedText(expected)) hint = expected;
+    else if (textType(first) &&
+             (e.args[0]->kind != "text" || e.args[1]->kind == "text")) hint = first;
+    auto second = expression(*e.args[1], hint);
+    // Literals adopt the other operand's text type; named values never change encoding implicitly.
+    if (e.args[0]->kind == "text" && textType(second) && textType(first)) {
+      first = second;
+      analysis.expressionTypes[e.args[0].get()] = second;
+    }
+    if (managedText(first) && managedText(second)) {
+      require(second, first, e.token);
+      if (op == "+") return first;
+      if (op == "==" || op == "!=") return Type::Bool;
+      fail(e.token, "text supports only concatenation and equality");
+    }
     if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") {
       if (!integral(first) || !integral(second))
         fail(e.token, "bitwise operators require integer operands");
@@ -302,8 +342,8 @@ class Analyzer {
     } else
       require(second, first, e.token);
     if (op == "==" || op == "!=") {
-      if (!numeric(first) && first != Type::Bool)
-        fail(e.token, "equality supports numeric and bool values only");
+      if (!numeric(first) && first != Type::Bool && first != Type::Pointer)
+        fail(e.token, "equality supports numeric, bool, and opaque pointer values only");
       return Type::Bool;
     }
     if (!numeric(first) || (op == "%" && !integral(first)))
@@ -425,7 +465,7 @@ class Analyzer {
                            s.kind == "<<=" || s.kind == ">>=";
       if (bitwise && !integral(local.type))
         fail(s.token, "bitwise operators require integer operands");
-      if (s.kind != "assign" &&
+      if (s.kind != "assign" && !(s.kind == "+=" && managedText(local.type)) &&
           (!numeric(local.type) || (s.kind == "%=" && !integral(local.type))))
         require(local.type, Type::Int, s.token);
       if (s.expr) {
@@ -450,6 +490,8 @@ public:
     scopes.emplace_back();
     for (const auto &parameter : function.params)
       bind(parameter.name, {parameter.type, false});
+    if (!function.nativeSymbol.empty())
+      return std::move(analysis);
     if (!sequence(function.body) && result != Type::Void)
       fail(function.name, "not all paths return a value");
     return std::move(analysis);

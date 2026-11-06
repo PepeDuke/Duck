@@ -1,4 +1,5 @@
 #include "Pipeline.h"
+#include "Unicode.h"
 #include <cstdint>
 #include <sstream>
 namespace duck {
@@ -13,7 +14,10 @@ std::string irType(Type t) {
     return "double";
   case Type::Bool:
     return "i1";
+  case Type::String:
+  case Type::Name:
   case Type::Text:
+  case Type::Pointer:
     return "ptr";
   default:
     return "void";
@@ -35,6 +39,7 @@ struct Binding {
   Type type;
   std::string value;
   bool constant = false;
+  bool owned = false;
 };
 class Generator {
   const Symbols &functions;
@@ -44,10 +49,12 @@ class Generator {
   std::ostringstream globals, code, allocations;
   struct Loop {
     std::string exit, next;
+    size_t scopeDepth;
   };
   std::vector<Loop> loops;
   std::string currentBlock = "entry";
   int next = 0, strings = 0;
+  bool usesTextRuntime = false;
   std::string fresh() { return "%v" + std::to_string(next++); }
   std::string label() { return "b" + std::to_string(next++); }
   void emit(const std::string &s) { code << "  " << s << '\n'; }
@@ -59,9 +66,41 @@ class Generator {
     emit("unreachable");
     startBlock(success);
   }
+  static std::string textWidth(Type type) { return type == Type::String ? "2" : "1"; }
+  void retain(Value value) {
+    if (!managedText(value.type)) return;
+    usesTextRuntime = true;
+    emit("call void @duck.text.retain(ptr " + value.value + ")");
+  }
+  void release(Value value) {
+    if (!managedText(value.type)) return;
+    usesTextRuntime = true;
+    emit("call void @duck.text.release(ptr " + value.value + ")");
+  }
+  void releaseBinding(const Binding &binding) {
+    if (!managedText(binding.type)) return;
+    auto old = fresh();
+    emit(old + " = load ptr, ptr " + binding.value);
+    release({binding.type, old});
+  }
+  void cleanupScopes(size_t first) {
+    for (size_t i = scopes.size(); i > first; --i)
+      for (const auto &[name, binding] : scopes[i - 1]) {
+        (void)name;
+        if (binding.owned) releaseBinding(binding);
+      }
+  }
   Value convert(Value value, Type target) {
     if (value.type == target)
       return value;
+    if (managedText(value.type) && managedText(target)) {
+      usesTextRuntime = true;
+      auto converted = fresh();
+      emit(converted + " = call ptr @duck.text.convert(ptr " + value.value +
+           ", i64 " + textWidth(value.type) + ", i64 " + textWidth(target) + ")");
+      release(value);
+      return {target, converted};
+    }
     if (integral(value.type) && integral(target) &&
         integerWidth(value.type) == integerWidth(target))
       return {target, value.value}; // Signedness changes interpretation only.
@@ -100,6 +139,21 @@ class Generator {
     return {target, id};
   }
   Value binary(const std::string &op, Value a, Value b) {
+    if (managedText(a.type)) {
+      usesTextRuntime = true;
+      auto id = fresh();
+      bool concat = op == "+";
+      emit(id + " = call " + (concat ? "ptr @duck.text.concat" : "i1 @duck.text.equal") +
+           "(ptr " + a.value + ", ptr " + b.value + ", i64 " + textWidth(a.type) + ")");
+      release(a);
+      release(b);
+      if (op == "!=") {
+        auto inverse = fresh();
+        emit(inverse + " = xor i1 " + id + ", true");
+        id = inverse;
+      }
+      return {concat ? a.type : Type::Bool, id};
+    }
     if (op == "<<" || op == ">>") {
       // Check at the original count width before any truncation. Comparing
       // as unsigned rejects negative signed counts as well.
@@ -180,10 +234,11 @@ class Generator {
     auto address = fresh();
     allocations << "  " << address << " = alloca " << irType(value.type)
                 << '\n';
+    if (managedText(value.type) && value.value.empty()) value.value = "null";
     if (!value.value.empty())
       emit("store " + irType(value.type) + " " + value.value + ", ptr " +
            address);
-    bind(t, {value.type, address, constant});
+    bind(t, {value.type, address, constant, true});
   }
   std::string textConstant(const std::string &value) {
     std::string name = "@str." + symbolPrefix + "." + std::to_string(strings++),
@@ -197,6 +252,29 @@ class Generator {
     globals << name << " = private unnamed_addr constant [" << value.size() + 1
             << " x i8] c\"" << escaped << "\\00\"\n";
     return name;
+  }
+  Value managedLiteral(const Expr &e, Type type) {
+    std::vector<uint32_t> units;
+    if (type == Type::Name) {
+      for (unsigned char byte : e.token.text) units.push_back(byte);
+    } else {
+      for (auto cp : decodeUTF8(e.token)) {
+        if (cp < 0x10000) units.push_back(cp);
+        else {
+          cp -= 0x10000;
+          units.push_back(0xD800 | (cp >> 10));
+          units.push_back(0xDC00 | (cp & 1023));
+        }
+      }
+    }
+    auto symbol = "@str." + symbolPrefix + "." + std::to_string(strings++);
+    auto unit = type == Type::String ? "i16" : "i8";
+    auto array = "[" + std::to_string(units.size() + 1) + " x " + unit + "]";
+    globals << symbol << " = private unnamed_addr constant { i64, i64, " << array
+            << " } { i64 -1, i64 " << units.size() << ", " << array << " [";
+    for (auto value : units) globals << unit << " " << value << ", ";
+    globals << unit << " 0] }, align 8\n";
+    return {type, symbol};
   }
   Value expression(const Expr &e) {
     // The analysis artifact is required, including in release builds.
@@ -219,21 +297,47 @@ class Generator {
     if (e.kind == "real")
       return {analysis.expressionTypes.at(&e),
               analysis.floatingConstants.at(&e)};
+    if (e.kind == "null")
+      return {Type::Pointer, "null"};
     if (e.kind == "bool")
       return {Type::Bool, op == "true" ? "1" : "0"};
-    if (e.kind == "text")
+    if (e.kind == "text") {
+      auto type = analysis.expressionTypes.at(&e);
+      if (managedText(type)) return managedLiteral(e, type);
       return {Type::Text, textConstant(op)};
+    }
     if (e.kind == "name") {
       auto v = variable(e.token);
       auto id = fresh();
       emit(id + " = load " + irType(v.type) + ", ptr " + v.value);
+      retain({v.type, id});
       return {v.type, id};
     }
     if (e.kind == "call") {
+      if (op == "Length" || op == "CodeUnitAt") {
+        usesTextRuntime = true;
+        auto text = expression(*e.args[0]);
+        auto id = fresh();
+        if (op == "Length")
+          emit(id + " = call i64 @duck.text.length(ptr " + text.value + ")");
+        else {
+          auto index = expression(*e.args[1]);
+          emit(id + " = call i32 @duck.text.unit(ptr " + text.value + ", i64 " +
+               index.value + ", i64 " + textWidth(text.type) + ")");
+        }
+        release(text);
+        return {op == "Length" ? Type::Long : Type::UInt32, id};
+      }
       if (op == "Print") {
 
         auto v = expression(*e.args[0]);
 
+        if (managedText(v.type)) {
+          usesTextRuntime = true;
+          emit("call void @duck.text.print(ptr " + v.value + ", i64 " + textWidth(v.type) + ")");
+          release(v);
+          return {Type::Void, ""};
+        }
         if (v.type == Type::Bool) {
           auto id = fresh();
           emit(id + " = zext i1 " + v.value + " to i32");
@@ -260,6 +364,7 @@ class Generator {
       const auto &f = found->second;
 
       std::string args;
+      std::vector<Value> arguments;
       for (size_t i = 0; i < e.args.size(); ++i) {
         const auto &parameter = f.parameters[i];
         const auto &argument = *e.args[i];
@@ -272,12 +377,19 @@ class Generator {
           args += "ptr " + binding.value;
         } else {
           auto v = expression(argument);
+          arguments.push_back(v);
+          if (!f.nativeSymbol.empty() && managedText(v.type)) {
+            auto data = fresh();
+            emit(data + " = getelementptr i8, ptr " + v.value + ", i64 16");
+            v.value = data; // Read-only native borrow; owner stays alive through the call.
+          }
           args += irType(v.type) + " " + v.value;
         }
       }
       auto id = f.result == Type::Void ? "" : fresh();
       emit((id.empty() ? "" : id + " = ") + "call " + irType(f.result) +
-           " @duck." + target + "(" + args + ")");
+           " @" + (f.nativeSymbol.empty() ? "duck." + target : f.nativeSymbol) + "(" + args + ")");
+      for (auto argument : arguments) release(argument);
       return {f.result, id};
     }
     auto a = expression(*e.args[0]);
@@ -334,6 +446,7 @@ class Generator {
 
       terminated = statement(*s);
     }
+    if (!terminated) cleanupScopes(scopes.size() - 1);
     scopes.pop_back();
     return terminated;
   }
@@ -341,13 +454,14 @@ class Generator {
     if (s.kind == "block")
       return block(s.body);
     if (s.kind == "break" || s.kind == "continue") {
-
+      cleanupScopes(loops.back().scopeDepth);
       emit("br label %" +
            (s.kind == "break" ? loops.back().exit : loops.back().next));
       return true;
     }
     if (s.kind == "return") {
       Value v = s.expr ? expression(*s.expr) : Value{Type::Void, ""};
+      cleanupScopes(0);
       emit("ret " + irType(v.type) +
            (v.type == Type::Void ? "" : " " + v.value));
       return true;
@@ -372,7 +486,7 @@ class Generator {
     if (s.kind == "do") {
       auto body = label(), check = label(), end = label();
       emit("br label %" + body);
-      loops.push_back({end, check});
+      loops.push_back({end, check, scopes.size()});
       startBlock(body);
       if (!block(s.body))
         emit("br label %" + check);
@@ -396,7 +510,7 @@ class Generator {
       startBlock(check);
       auto v = s.expr ? expression(*s.expr) : Value{Type::Bool, "1"};
       emit("br i1 " + v.value + ", label %" + body + ", label %" + end);
-      loops.push_back({end, s.kind == "for" ? step : check});
+      loops.push_back({end, s.kind == "for" ? step : check, scopes.size()});
       startBlock(body);
       if (!block(s.body))
         emit("br label %" + loops.back().next);
@@ -408,6 +522,7 @@ class Generator {
         emit("br label %" + check);
       }
       startBlock(end);
+      cleanupScopes(scopes.size() - 1);
       scopes.pop_back();
       return false;
     }
@@ -433,15 +548,17 @@ class Generator {
         auto old = fresh();
         emit(old + " = load " + irType(address.type) + ", ptr " +
              address.value);
+        retain({address.type, old});
         auto operand = s.expr ? expression(*s.expr)
                               : convert({Type::Int, "1"}, address.type);
         v = binary(s.kind.substr(0, s.kind.size() - 1),
                    {address.type, old}, operand);
       }
+      releaseBinding(address);
       emit("store " + irType(v.type) + " " + v.value + ", ptr " +
            address.value);
     } else
-      expression(*s.expr);
+      release(expression(*s.expr));
     return false;
   }
 
@@ -462,29 +579,36 @@ public:
              << arg;
       if (parameter.reference)
         bind(parameter.name, {parameter.type, arg});
-      else
+      else {
+        retain({parameter.type, arg});
         declare(parameter.name, {parameter.type, arg});
+      }
     }
     bool terminated = false;
     for (const auto &s : f.body)
       terminated = statement(*s);
-    if (!terminated)
+    if (!terminated) {
+      cleanupScopes(0);
       emit("ret void");
+    }
     output << ") {\nentry:\n" << allocations.str() << code.str() << "}\n\n";
-    return {globals.str(), output.str()};
+    return {globals.str(), output.str(), usesTextRuntime};
   }
 };
 } // namespace
 FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
                          const FunctionAnalysis &analysis) {
+  if (!function.nativeSymbol.empty()) return {};
   return Generator(symbols, analysis, function.name.text).generate(function);
 }
 std::string emitDeclarations(const Symbols &symbols) {
   std::string declarations;
+  std::set<std::string> emitted;
   for (const auto &item : symbols) {
     const auto &signature = item.second;
-    declarations +=
-        "declare " + irType(signature.result) + " @duck." + item.first + "(";
+    auto symbol = signature.nativeSymbol.empty() ? "duck." + item.first : signature.nativeSymbol;
+    if (!emitted.insert(symbol).second) continue;
+    declarations += "declare " + irType(signature.result) + " @" + symbol + "(";
     for (size_t i = 0; i < signature.parameters.size(); ++i) {
       if (i)
         declarations += ", ";

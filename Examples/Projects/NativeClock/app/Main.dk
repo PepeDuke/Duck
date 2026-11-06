@@ -1,0 +1,16 @@
+// EXPECT: four 1s. Queries the OS directly; no C/C++ engine shim.
+Main()
+{
+    long frequency = 0
+    bool ready = WindowsClock.Initialize(frequency)
+    Print(ready)
+    if !ready { return }
+
+    long start = 0
+    long end = 0
+    bool first = WindowsClock.Read(start)
+    bool second = WindowsClock.Read(end)
+    Print(first)
+    Print(second)
+    Print(first && second && WindowsClock.ElapsedSeconds(start, end, frequency) >= 0.0)
+}
