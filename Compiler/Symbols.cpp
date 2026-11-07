@@ -274,9 +274,9 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
       (void)signature;
       clash = clash || function.rfind(name + ".", 0) == 0;
     }
-    if (clash || !symbols.statics.emplace(name, StaticInfo{field.name, field.type, field.constant,
-                                                           field.protectedAccess,
-                                                           field.initializer.get()}).second)
+    StaticInfo info{field.name, field.type, field.constant, field.protectedAccess, field.initializer.get()};
+    info.order = symbols.statics.size();
+    if (clash || !symbols.statics.emplace(name, info).second)
       fail(field.name, "duplicate static field or member '" + name + "'");
     const auto &t = field.type;
     if (!(numeric(t) || t == Type::Bool || enumValue(t) || t == Type::Pointer || recordValue(t) ||
@@ -284,9 +284,6 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
       fail(field.name, "static fields of type " + typeName(t) +
                            " are not supported yet; use a number, bool, enum, string, name, big, "
                            "void*, or container");
-    if (recordValue(t) && field.initializer)
-      fail(field.name, "container static fields start from the container's defaults; "
-                       "initializers are not supported yet");
   }
   auto main = symbols.find("Main");
   if (requireEntry && main == symbols.end())
@@ -337,6 +334,13 @@ Symbols::const_iterator Symbols::findMethod(const std::string &record, const std
 bool Symbols::managedRecord(const std::string &record) const {
   for (const auto &field : records.at(record).fields)
     if (managed(field.type)) return true;
+  return false;
+}
+bool Symbols::runtimeDefaults(const std::string &record) const {
+  for (const auto &field : records.at(record).fields)
+    if (field.runtimeDefault ||
+        (recordValue(field.type) && !field.initializer && runtimeDefaults(field.type.record)))
+      return true;
   return false;
 }
 bool Symbols::derivesFrom(const std::string &record, const std::string &ancestor) const {

@@ -713,7 +713,7 @@ reject(container_duplicate "Math #{ F() {} }\nMath #{ F() {} }\nMain() {}" "dupl
 reject(container_missing "Math #{ F() {} }\nMain() { Math.Missing() }" "unknown function")
 reject(container_no_global_entry "Math #{ Main() {} }" "program requires Main")
 reject(container_private_lookup "Math #{ F() {} }\nMain() { F() }" "unknown function")
-reject(container_instance "Math { int n = 1 + 1 }\nMain() {}" "field initializer must be a literal")
+reject(container_instance "Math { int n = true }\nMain() {}" "type mismatch")
 reject(container_field "Math #{ #F() {} }\nMain() {}" "constant static field requires an explicit type")
 run_program(static_fields [=[
 Point
@@ -766,8 +766,8 @@ Main()
 reject(static_constant_write "Game #{ #int Max = 1 }\nMain() { Game.Max = 2 }" "cannot modify constant")
 reject(static_constant_missing "Game #{ #int Max }\nMain() {}" "requires an initializer")
 reject(static_protected "Game #{ -int Secret }\nMain() { Print(Game.Secret) }" "'Secret' is a protected member of 'Game'")
-reject(static_reads_static "Game #{ int A = 1\nint B = A }\nMain() {}" "field initializers cannot read static fields")
-reject(static_nonconstant "Game #{ int A = 1 + 2 }\nMain() {}" "field initializer must be a literal, type limit, or enum member")
+reject(static_reads_later "Game #{ int B = A + 1\nint A = 1 }\nMain() {}" "static field 'Game.A' is initialized after 'Game.B'; static fields initialize in declaration order")
+reject(static_reads_itself "Game #{ int A = A + 1 }\nMain() {}" "static field 'Game.A' cannot read itself")
 reject(static_out_of_range "Game #{ byte A = 300 }\nMain() {}" "out of range")
 reject(static_managed "Game #{ cstring Title }\nMain() {}" "static fields of type cstring are not supported yet")
 run_program(field_defaults [=[
@@ -846,10 +846,71 @@ Main()
 }
 ]=] "Duck\n3\nDuck\nGoose!\nGoose!/tag\nMade!\nDuck\n9\n0\n1\nLeft\n1.5\nDuck quack\nWelcome! Made!\n0\n")
 reject(field_default_type "A { int n = \"x\" }\nMain() {}" "type mismatch")
-reject(field_default_reads_static "G #{ int S = 1 }\nA { int n = G.S }\nMain() {}" "field initializers cannot read static fields")
-reject(field_default_reads_field "A { int m = 1\nint n = m }\nMain() {}" "unknown variable 'm'")
-reject(field_default_container "P { int x }\nA { P p = {x: 1} }\nMain() {}" "container-typed fields start from that container's defaults")
-reject(static_container_initializer "P { int x }\nG #{ P p = {x: 1} }\nMain() {}" "container static fields start from the container's defaults")
+reject(field_default_reads_field "A { int m = 1\nint n = m }\nMain() {}" "initializers cannot read fields; 'm' is a field of 'A'")
+reject(field_default_calls_method "A { int n = Read()\nint Read() { return 1 } }\nMain() {}" "'Read' is an instance method")
+reject(static_runtime_constant_write "G #{ #int A = 1 + 1 }\nMain() { G.A = 2 }" "cannot modify constant")
+run_program(runtime_initializers [=[
+Point
+{
+    int X = Seed()
+    int Y = 2
+    big Mass = 12345678901234567890
+}
+Named : Point
+{
+    string Title = Label("duck")
+    Point Origin = {X: 100}
+    int Count = Counter.Next()
+}
+Counter #{
+    int Value = 10
+    int Next()
+    {
+        Value++
+        return Value
+    }
+}
+Config #{
+    int Base = 40
+    int Answer = Base + 2
+    #int Limit = Base * 10
+    string Banner = "v" + Label("1")
+    big Huge = 99999999999999999999
+    Point Home = {X: Answer, Y: 7}
+    Named Default
+}
+int Seed()
+{
+    Print("seed")
+    return 5
+}
+string Label(string s) { return "<" + s + ">" }
+Main()
+{
+    Print("main")
+    Print(Config.Answer)
+    Print(Config.Limit)
+    Print(Config.Banner)
+    Print(Config.Huge + 1)
+    Print(Config.Home.X + Config.Home.Y)
+    Print(Config.Default.Title)
+    Print(Config.Default.Count)
+    Named n()
+    Print(n.X + n.Y)
+    Print(n.Title)
+    Print(n.Origin.X + n.Origin.Y)
+    Print(n.Count)
+    Print(n.Mass)
+    Named m = {Title: "given", X: 1}
+    Print(m.Title)
+    Print(m.X)
+    Print(m.Count)
+    for i : 0; i < 1000; i++ {
+        Named t = m
+        t.Title = t.Title + "!"
+    }
+}
+]=] "seed\nmain\n42\n400\nv<1>\n100000000000000000000\n49\n<duck>\n11\nseed\n7\n<duck>\n102\n12\n12345678901234567890\ngiven\n1\n13\n")
 reject(managed_heap_container "A { string s }\nMain() { A* p() }" "heap containers with string, name, or big fields")
 reject(managed_heap_copy "A { string s }\nMain() { A a()\nA* p = a }" "heap containers with string, name, or big fields")
 reject(managed_pointer_cast "A { string s }\nMain() { void* v = null\nA* p = (A*)v }" "cannot cast to a pointer to a container with string, name, or big fields")

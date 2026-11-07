@@ -32,7 +32,7 @@ Containers and namespaces
    Proposal: Collect static fields as qualified symbols and emit storage once in the defining module. Route qualified reads and writes to that storage and specify initialization order before allowing initializers that read other static fields.
 [x] Support field initializers and managed string/name fields.
    Proposal: Keep initializer expressions on field declarations and type-check them against the field type. Static fields already accept constant initializers; extend them to managed types and, once an order is specified, to initializers that read other static fields. Generate initialization, copy, assignment, and cleanup for managed records using the text runtime; keep their managed layout out of raw native struct bindings.
-[] Allow non-constant field and static initializers.
+[x] Allow non-constant field and static initializers.
    Proposal: Specify static initialization order (declaration order within a module, imported modules first) and run it from a per-module initializer before Main. Evaluate non-constant instance defaults in a generated per-container construction routine shared by default construction and partial initializers. Then lift the restrictions on reading other statics, big defaults other than zero, and container-typed initializers, and decide whether managed containers may live on the heap.
 [x] Allow a container to chain static and instance blocks.
    Proposal: Parse a named container followed by a sequence of adjacent bodies, tagging each body as static or instance. Preserve the existing adjacency rule and resolve member calls using the receiver kind.
@@ -45,7 +45,7 @@ Containers and namespaces
 
 Construction and object model
 [] Support custom constructors and destructors.
-   Proposal: Register constructor overloads and one destructor per container. Resolve construction by argument types and invoke the destructor from lexical or heap cleanup exactly once for each fully constructed object.
+   Proposal: Register constructor overloads and one destructor per container. Resolve construction by argument types and invoke the destructor from lexical or heap cleanup exactly once for each fully constructed object. Use the same per-container cleanup to release string, name, and big fields on heap drop, then allow those containers on the heap.
 [] Support partial and composite constructors and reject use before initialization is complete.
    Proposal: Track completed constructor parts in definite-initialization analysis. Compose parent and child parts in a declared order, merge completion facts at branches, and diagnose a method call if any required part may still be missing.
 [] Allow an existing object to be reinitialized by calling its constructor again.

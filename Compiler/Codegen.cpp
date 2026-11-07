@@ -1,6 +1,7 @@
 #include "Pipeline.h"
 #include "Unicode.h"
 #include "WideInteger.h"
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <sstream>
@@ -112,8 +113,10 @@ std::string recordConstant(const Symbols &symbols, const std::string &record) {
   for (size_t i = 0; i < fields.size(); ++i) {
     const auto &field = fields[i];
     value += (i ? ", " : "") + irType(field.type) + " ";
+    // A runtime default starts from the value an uninitialized field has.
     if (recordValue(field.type)) value += recordConstant(symbols, field.type.record);
-    else if (!field.initializer) value += managedValue(field.type) ? managedZero(field.type) : "zeroinitializer";
+    else if (!field.initializer || field.runtimeDefault)
+      value += managedValue(field.type) ? managedZero(field.type) : "zeroinitializer";
     else if (field.initialValue.empty()) value += defaultTextSymbol(record, field);
     else value += field.initialValue;
   }
@@ -191,12 +194,43 @@ class Generator {
     usesTextRuntime = true;
     emit("call void @duck.text.release(ptr " + value.value + ")");
   }
-  // A record's default value: zero, or its defaults loaded from constant storage.
-  std::string defaultValue(const Type &type) {
+  // Evaluates the runtime defaults of the record at address in layout order,
+  // through nested containers and parents, except for skipped field paths.
+  void runDefaults(const std::string &record, const std::string &address,
+                   const std::set<std::vector<size_t>> &skip, std::vector<size_t> path) {
+    Type type = Type::Record;
+    type.record = record;
+    const auto &fields = functions.records.at(record).fields;
+    for (size_t i = 0; i < fields.size(); ++i) {
+      path.push_back(i);
+      const auto &field = fields[i];
+      if (skip.count(path)) {
+      } else if (field.runtimeDefault) {
+        emit("call void @duck." + defaultKey(record, field.name.text) + "(ptr " + address + ")");
+      } else if (recordValue(field.type) && !field.initializer &&
+                 functions.runtimeDefaults(field.type.record)) {
+        auto part = fresh();
+        emit(part + " = getelementptr " + irType(type) + ", ptr " + address + ", i32 0, i32 " +
+             std::to_string(i));
+        runDefaults(field.type.record, part, skip, path);
+      }
+      path.pop_back();
+    }
+  }
+  // A record's default value: zero, or its constant defaults, then its
+  // runtime defaults evaluated in place. Skipped fields keep the constant base.
+  std::string defaultValue(const Type &type, const std::set<std::vector<size_t>> &skip = {}) {
     if (!recordValue(type) || !hasDefaults(functions, type.record)) return "zeroinitializer";
     auto id = fresh();
     emit(id + " = load " + irType(type) + ", ptr @duck$default." + type.record);
-    return id;
+    if (!functions.runtimeDefaults(type.record)) return id;
+    auto slot = fresh();
+    allocations << "  " << slot << " = alloca " << irType(type) << '\n';
+    emit("store " + irType(type) + " " + id + ", ptr " + slot);
+    runDefaults(type.record, slot, skip, {});
+    auto value = fresh();
+    emit(value + " = load " + irType(type) + ", ptr " + slot);
+    return value;
   }
   static std::string ownerFlag(Type type) { return type.role == Type::Owner ? "true" : "false"; }
   std::string moveOwner(const Token &source) {
@@ -631,9 +665,11 @@ class Generator {
               "{ i256 " + decimal->second.first + ", i32 " + decimal->second.second + " }"};
     if (e.kind == "initializer") {
       auto type = analysis.expressionTypes.at(&e);
-      // Unnamed fields keep their defaults; a replaced default is a literal,
-      // so overwriting it needs no release.
-      std::string value = defaultValue(type);
+      // Unnamed fields take their defaults; a named field's default is never
+      // evaluated, and its constant base needs no release when overwritten.
+      std::set<std::vector<size_t>> named;
+      for (const auto &field : e.args) named.insert(analysis.fieldIndices.at(field.get()));
+      std::string value = defaultValue(type, named);
       for (const auto &field : e.args) {
         auto v = expression(*field->args.front());
         auto aggregate = fresh();
@@ -1254,7 +1290,7 @@ public:
       : functions(symbols), analysis(analysis), symbolPrefix(name) {}
   FunctionIR generate(const Function &f) {
     scopes.emplace_back();
-    if (f.method) {
+    if (f.method && !f.generated) {
       const auto &self = f.params.front().type;
       for (const auto &path : functions.visibleFields(self.record)) {
         auto address = fresh();
@@ -1310,9 +1346,11 @@ std::string emitRecords(const Symbols &symbols) {
   std::set<std::string> zeros;
   for (const auto &[name, record] : symbols.records)
     for (const auto &field : record.fields)
-      if (managedValue(field.type) && !field.initializer) zeros.insert(managedZero(field.type));
+      if (managedValue(field.type) && (!field.initializer || field.runtimeDefault))
+        zeros.insert(managedZero(field.type));
   for (const auto &[name, info] : symbols.statics)
-    if (managedValue(info.type) && !info.initializer && !info.imported) zeros.insert(managedZero(info.type));
+    if (managedValue(info.type) && (!info.initializer || info.runtime) && !info.imported)
+      zeros.insert(managedZero(info.type));
   for (const auto &zero : zeros) {
     if (zero == "@duck$big.zero")
       ir += zero + " = private unnamed_addr constant { i64, i64, i64, [0 x i32] } "
@@ -1322,7 +1360,7 @@ std::string emitRecords(const Symbols &symbols) {
   }
   for (const auto &[name, record] : symbols.records) {
     for (const auto &field : record.fields)
-      if (field.initializer && field.initialValue.empty())
+      if (field.initializer && !field.runtimeDefault && field.initialValue.empty())
         ir += managedTextGlobal(defaultTextSymbol(name, field), field.initializer->token, field.type);
     if (hasDefaults(symbols, name))
       ir += "@duck$default." + name + " = private unnamed_addr constant %struct." + name + " " +
@@ -1369,13 +1407,42 @@ std::string emitStatics(const Symbols &symbols) {
     auto value = info.value;
     std::string literal;
     if (recordValue(info.type)) value = recordConstant(symbols, info.type.record);
-    else if (managedValue(info.type) && !info.initializer) value = managedZero(info.type);
+    else if (managedValue(info.type) && (!info.initializer || info.runtime)) value = managedZero(info.type);
+    else if (info.runtime) value = "zeroinitializer";
     else if (info.initializer && value.empty()) {
       value = "@duck$static." + name + "$text";
       literal = managedTextGlobal(value, info.initializer->token, info.type);
     }
-    ir += std::string(info.constant ? "constant " : "global ") + irType(info.type) + " " + value + "\n" + literal;
+    // A constant evaluated at run time is written once, before Main.
+    ir += std::string(info.constant && !info.runtime ? "constant " : "global ") + irType(info.type) + " " +
+          value + "\n" + literal;
   }
+  // Initialization order: every imported static, then this module's statics
+  // in declaration order. Each static's $init runs at most once and first
+  // runs its predecessor, the first one running the imported $inits, so the
+  // order holds whichever module's startup the linker runs first.
+  std::vector<std::pair<size_t, std::string>> own;
+  std::vector<std::string> imported;
+  for (const auto &[name, info] : symbols.statics)
+    if (info.imported) imported.push_back(name);
+    else own.emplace_back(info.order, name);
+  std::sort(own.begin(), own.end());
+  for (const auto &name : imported) ir += "declare void @duck$static." + name + "$init()\n";
+  for (size_t i = 0; i < own.size(); ++i) {
+    const auto &name = own[i].second;
+    const auto done = "@duck$static." + name + "$done";
+    ir += done + " = internal global i1 false\n";
+    ir += "define void @duck$static." + name + "$init() {\nentry:\n  %done = load i1, ptr " + done +
+          "\n  br i1 %done, label %exit, label %run\nrun:\n  store i1 true, ptr " + done + "\n";
+    if (i) ir += "  call void @duck$static." + own[i - 1].second + "$init()\n";
+    else for (const auto &other : imported) ir += "  call void @duck$static." + other + "$init()\n";
+    if (symbols.statics.at(name).runtime) ir += "  call void @duck." + name + "$eval()\n";
+    ir += "  br label %exit\nexit:\n  ret void\n}\n";
+  }
+  if (!own.empty())
+    ir += "define internal void @duck$startup() {\nentry:\n  call void @duck$static." + own.back().second +
+          "$init()\n  ret void\n}\n@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] "
+          "[{ i32, ptr, ptr } { i32 65535, ptr @duck$startup, ptr null }]\n";
   return ir;
 }
 std::string emitDeclarations(const Symbols &symbols) {

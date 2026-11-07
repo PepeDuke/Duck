@@ -54,6 +54,8 @@ struct StaticInfo {
   const Expr *initializer = nullptr; // Refers to the input AST.
   bool imported = false;             // Storage is defined by another module.
   std::string value;                 // LLVM constant, set by resolveStaticInitializers.
+  size_t order = 0;                  // Declaration order within its module.
+  bool runtime = false;              // Initialized by a generated $eval before Main.
 };
 struct Symbols : std::map<std::string, Signature> {
   std::map<std::string, Record> records;
@@ -71,6 +73,9 @@ struct Symbols : std::map<std::string, Signature> {
   // A container holding string, name, or big storage anywhere in its layout,
   // nested containers and parents included. Copies retain and cleanup releases.
   bool managedRecord(const std::string &record) const;
+  // A container whose construction evaluates defaults at run time, in its
+  // own fields, nested containers, or parents.
+  bool runtimeDefaults(const std::string &record) const;
   bool managed(const Type &type) const {
     return managedValue(type) || (recordValue(type) && managedRecord(type.record));
   }
@@ -97,6 +102,14 @@ void resolveStaticInitializers(Symbols &symbols);
 // Evaluates container field defaults with the same constant rules as static
 // initializers, plus string and name literals.
 void resolveFieldDefaults(Symbols &symbols);
+// Generates `Container.$default$Field` methods for runtime defaults and
+// `Static$eval` functions for runtime static initializers. Signatures for
+// imported containers go to declarations; bodies only for this module.
+std::vector<Function> generateInitializers(Symbols &symbols, Symbols &declarations);
+// Key of the generated method evaluating a field's runtime default.
+inline std::string defaultKey(const std::string &record, const std::string &field) {
+  return methodKey(record, "default$" + field);
+}
 void validateNativeSymbols(const Symbols &symbols);
 
 // Expression pointers refer to the input AST, which must outlive this artifact.

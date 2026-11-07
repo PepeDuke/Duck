@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <limits>
 #include <locale>
+#include <optional>
 #include <sstream>
 
 namespace duck {
@@ -152,7 +153,11 @@ class Analyzer {
   const Expr *ownerDestination = nullptr;
   std::string container;
   bool method = false;
-  bool staticInitializer = false; // Analyzing a static field's constant initializer.
+  // Set in a generated static $eval: the static it initializes, and the
+  // assignment target that may write it.
+  std::string initializing;
+  const Expr *initializationTarget = nullptr;
+  bool initializerScope = false; // Analyzing a default or static initializer.
 
   void require(Type actual, Type expected, const Token &token) {
     if (actual != expected)
@@ -169,6 +174,11 @@ class Analyzer {
   }
   Local &lookup(const Token &token) {
     if (auto local = findLocal(token)) return *local;
+    // Initializers are analyzed without fields in scope.
+    MemberPath path;
+    if (initializerScope && symbols.records.count(container) &&
+        symbols.findField(container, token.text, path))
+      fail(token, "initializers cannot read fields; '" + token.text + "' is a field of '" + container + "'");
     fail(token, "unknown variable '" + token.text + "'");
   }
   void requireInitialized(const Token &token) {
@@ -300,13 +310,18 @@ class Analyzer {
   Local location(const Expr &e, bool read = true) {
     Local local{Type::Void, false};
     if (const auto qualified = staticPath(e); !qualified.empty()) {
-      if (staticInitializer)
-        fail(e.token, "field initializers cannot read static fields; use a constant");
       const auto &info = symbols.statics.at(qualified);
+      // Statics initialize in declaration order, after every imported static.
+      if (!initializing.empty() && &e != initializationTarget && !info.imported &&
+          info.order >= symbols.statics.at(initializing).order)
+        fail(e.token, qualified == initializing
+                          ? "static field '" + qualified + "' cannot read itself in its initializer"
+                          : "static field '" + qualified + "' is initialized after '" + initializing +
+                                "'; static fields initialize in declaration order");
       const auto dot = qualified.rfind('.');
       requireAccess(info.protectedAccess, qualified.substr(0, dot), qualified.substr(dot + 1), e.token);
       analysis.staticFields[&e] = qualified;
-      local = {info.type, info.constant};
+      local = {info.type, info.constant && &e != initializationTarget};
     } else if (e.kind == "name") {
       local = lookup(e.token);
       if (local.receiver) analysis.receiverStorage.insert(&e);
@@ -1117,16 +1132,15 @@ public:
       : symbols(symbols), result(result) {}
   // The LLVM constant for a static field initializer. Only literals, type
   // limits, and enum members of the field's type are compile-time constants.
-  std::string constant(const std::string &qualified, const Expr &e, Type type) {
+  // Type-checks an initializer in its container's scope, without locals or
+  // fields. Returns its LLVM constant, or nothing when it must be evaluated
+  // at run time; an empty string is a string/name literal.
+  std::optional<std::string> constant(const std::string &qualified, const Expr &e, Type type) {
     container = qualified.substr(0, qualified.rfind('.'));
-    staticInitializer = true;
+    initializerScope = true;
     scopes.emplace_back();
-    if (bigInteger(type))
-      fail(e.token, "big fields cannot have an initializer yet; they start at zero");
-    if (recordValue(type))
-      fail(e.token, "container-typed fields start from that container's defaults; "
-                    "initializers are not supported yet");
     expression(e, type);
+    if (bigInteger(type) || recordValue(type)) return std::nullopt;
     // A string or name literal; lowering emits it as immortal constant storage.
     if (e.kind == "text" && managedText(type)) return "";
     const bool converted = analysis.conversions.count(&e) != 0;
@@ -1160,8 +1174,7 @@ public:
         return encode(value);
       }
     }
-    fail(e.token, "field initializer must be a literal, type limit, or enum member "
-                  "of the field's type");
+    return std::nullopt;
   }
   FunctionAnalysis run(const Function &function) {
     auto dot = function.name.text.rfind('.');
@@ -1169,7 +1182,11 @@ public:
       container = function.name.text.substr(0, dot);
     scopes.emplace_back();
     method = function.method;
-    if (method) {
+    if (!function.initializes.empty()) {
+      initializing = function.initializes;
+      initializationTarget = function.body.front()->target.get();
+    }
+    if (method && !function.generated) {
       for (const auto &path : symbols.visibleFields(container))
         bind(path.field->name, {path.field->type, false, true, true});
       scopes.emplace_back();
@@ -1194,15 +1211,100 @@ FunctionAnalysis analyzeFunction(const Function &function,
 void resolveFieldDefaults(Symbols &symbols) {
   for (auto &[name, record] : symbols.records)
     for (auto &field : record.fields)
-      if (field.initializer)
-        field.initialValue = Analyzer(symbols, Type::Void)
-                                 .constant(name + "." + field.name.text, *field.initializer, field.type);
+      if (field.initializer) {
+        auto value = Analyzer(symbols, Type::Void)
+                         .constant(name + "." + field.name.text, *field.initializer, field.type);
+        field.runtimeDefault = !value;
+        if (value) field.initialValue = *value;
+      }
 }
 void resolveStaticInitializers(Symbols &symbols) {
   for (auto &[name, info] : symbols.statics) {
     if (info.imported) continue;
-    info.value = info.initializer ? Analyzer(symbols, Type::Void).constant(name, *info.initializer, info.type)
-                                  : "zeroinitializer";
+    if (!info.initializer) {
+      info.value = "zeroinitializer";
+      info.runtime = recordValue(info.type) && symbols.runtimeDefaults(info.type.record);
+      continue;
+    }
+    auto value = Analyzer(symbols, Type::Void).constant(name, *info.initializer, info.type);
+    info.runtime = !value;
+    if (value) info.value = *value;
   }
+}
+namespace {
+std::unique_ptr<Expr> clone(const Expr &e) {
+  auto copy = std::make_unique<Expr>();
+  copy->token = e.token;
+  copy->kind = e.kind;
+  copy->castType = e.castType;
+  for (const auto &arg : e.args) copy->args.push_back(clone(*arg));
+  if (e.receiver) copy->receiver = clone(*e.receiver);
+  return copy;
+}
+// `target = value` as the generated function's whole body.
+Function assignment(Token name, std::vector<Parameter> params, std::unique_ptr<Expr> target,
+                    std::unique_ptr<Expr> value) {
+  Function f{name, Type::Void, std::move(params), {}, false, {}};
+  auto s = std::make_unique<Stmt>();
+  s->token = value->token;
+  s->kind = "assign";
+  s->target = std::move(target);
+  s->expr = std::move(value);
+  f.body.push_back(std::move(s));
+  f.generated = true;
+  return f;
+}
+} // namespace
+std::vector<Function> generateInitializers(Symbols &symbols, Symbols &declarations) {
+  std::vector<Function> generated;
+  for (const auto &[name, record] : symbols.records)
+    for (const auto &field : record.fields) {
+      if (!field.runtimeDefault) continue;
+      // A method whose receiver, $self, cannot be named by the default itself.
+      Token self = field.name, key = field.name;
+      self.text = "$self";
+      key.text = defaultKey(name, field.name.text);
+      Type type = Type::Record;
+      type.record = name;
+      std::vector<Parameter> params{{self, type, true}};
+      Signature signature{Type::Void, params, "", key, {}, true, false};
+      symbols.emplace(key.text, signature);
+      if (record.imported) {
+        declarations.emplace(key.text, signature);
+        continue;
+      }
+      auto target = std::make_unique<Expr>();
+      target->kind = ".";
+      target->token = field.name;
+      auto receiver = std::make_unique<Expr>();
+      receiver->kind = "name";
+      receiver->token = self;
+      target->args.push_back(std::move(receiver));
+      generated.push_back(assignment(key, params, std::move(target), clone(*field.initializer)));
+      generated.back().method = true;
+    }
+  for (const auto &[name, info] : symbols.statics) {
+    if (info.imported || !info.runtime) continue;
+    Token key = info.declaration;
+    key.text = name + "$eval";
+    symbols.emplace(key.text, Signature{Type::Void, {}, "", key, {}, false, false});
+    // The bare name resolves to this static from its container's scope.
+    auto target = std::make_unique<Expr>();
+    target->kind = "name";
+    target->token = info.declaration;
+    target->token.text = name.substr(name.rfind('.') + 1);
+    std::unique_ptr<Expr> value;
+    if (info.initializer) value = clone(*info.initializer);
+    else {
+      // A container whose defaults run at construction: default-construct it.
+      value = std::make_unique<Expr>();
+      value->kind = "call";
+      value->token = info.declaration;
+      value->token.text = info.type.record;
+    }
+    generated.push_back(assignment(key, {}, std::move(target), std::move(value)));
+    generated.back().initializes = name;
+  }
+  return generated;
 }
 } // namespace duck

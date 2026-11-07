@@ -265,6 +265,22 @@ class Projects(unittest.TestCase):
         result = self.invoke(success=False)
         self.assertIn("cannot extend imported container 'Badge'", result.stderr)
 
+    def test_static_initialization_order_across_modules(self):
+        # app imports only mid; core's statics still initialize first, before Main.
+        self.write(BASE.replace('depends = ["core"]', 'depends = ["mid"]', 1) +
+                   '\n[modules.mid]\nsources = ["mid.dk"]\ndepends = ["core"]\n')
+        (self.root / "core.dk").write_text(
+            "Core #{\n int Base = Start()\n int Start() { Print(\"core\")\nreturn 40 }\n}", encoding="utf-8")
+        (self.root / "mid.dk").write_text(
+            "Mid #{\n int Value = Core.Base + 1\n}\nint Peek() { return Core.Base }", encoding="utf-8")
+        (self.root / "app.dk").write_text(
+            "App #{\n int Total = Mid.Value + 1\n}\nMain() { Print(\"main\")\nPrint(App.Total)\nPrint(Peek()) }",
+            encoding="utf-8")
+        self.invoke()
+        exe = self.root / ".duck/build/debug" / ("Demo.exe" if os.name == "nt" else "Demo")
+        self.assertEqual(subprocess.check_output([str(exe)], text=True).splitlines(),
+                         ["core", "main", "42", "40"])
+
     def test_long_interface(self):
         (self.root / "core.dk").write_text(
             "Bump(int64& n) { n++ }\nlong Twice(long n) { return n * 2 }", encoding="utf-8")

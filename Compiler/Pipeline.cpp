@@ -75,8 +75,8 @@ std::string compileModule(const Program &program, const Program &imports,
   const auto imported = collectSymbols(imports, false);
   // Only the defining module may add instance members; an importer that
   // extended the container would disagree about its layout.
-  for (const auto &[name, record] : imported.records)
-    if (!symbols.records.emplace(name, record).second)
+  for (auto [name, record] : imported.records)
+    if (record.imported = true; !symbols.records.emplace(name, record).second)
       for (const auto &fragment : program.records)
         if (fragment.name.text == name)
           fail(fragment.name, "cannot extend imported container '" + name +
@@ -109,6 +109,7 @@ std::string compileModule(const Program &program, const Program &imports,
   auto declarations = imported;
   for (const auto &[name, signature] : symbols)
     if (!signature.nativeSymbol.empty()) declarations.emplace(name, signature);
+  const auto generated = generateInitializers(symbols, declarations);
   std::vector<FunctionAnalysis> analyses;
   for (const auto &function : program)
     analyses.push_back(analyzeFunction(function, symbols));
@@ -126,6 +127,9 @@ std::string compileModule(const Program &program, const Program &imports,
   std::vector<FunctionIR> fragments;
   for (size_t i = 0; i < program.size(); ++i)
     fragments.push_back(lowerFunction(program[i], symbols, analyses[i]));
+  // Generated initializers run sequentially; they are never task candidates.
+  for (const auto &function : generated)
+    fragments.push_back(lowerFunction(function, symbols, analyzeFunction(function, symbols)));
   return emitRecords(symbols) + emitEnums(symbols) + emitStatics(symbols) +
          emitDeclarations(declarations) + assembleModule(fragments, entry, nativeSymbols);
 }

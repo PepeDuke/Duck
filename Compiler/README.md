@@ -314,13 +314,21 @@ reported at the later declaration, along with where the first one is. A module
 can add static blocks to a container it imports, but not instance members,
 because the defining module has already fixed the layout that importers share.
 
-Fields can declare defaults, as in `int Count = 3` or `string Title = "Duck"`.
-A default must be a compile-time constant of the field's type: a literal, a
-negated literal, `null`, a type limit such as `int.Max`, an enum member, or a
-`string`/`name` literal. Default construction (`Named n()`, `Named()`) and the
+Fields can declare defaults, as in `int Count = 3`, `string Title = Label("x")`,
+or `Point Origin = {X: 1}`. A default is any expression of the field's type
+that reads no fields and calls no instance methods; it may call functions and
+read static fields. Default construction (`Named n()`, `Named()`) and the
 fields a `{ Field: value }` initializer leaves out take these defaults, as do
-inherited and nested container fields; other fields start at zero. Each module
-keeps a private constant copy of the defaults it uses.
+inherited and nested container fields; other fields start at zero.
+
+Construction starts from the constant defaults (literals, negated literals,
+`null`, type limits, enum members, and `string`/`name` literals), kept as a
+private constant copy in each module. It then evaluates the remaining defaults
+in layout order: parents first, then the container's own fields, entering
+nested containers. Each runs in a generated method (`Container.$default$Field`)
+defined in the container's module. A field named in a `{ ... }` initializer
+never evaluates its default; unnamed defaults run first, then the named values
+in written order.
 
 Fields of type `string`, `name`, and `big` make a container managed. Managed
 storage is never null: such a field without a default starts as `""` or zero.
@@ -329,7 +337,9 @@ releases the values it replaces, and parameters, temporaries, and locals
 release theirs when they go out of scope, through nested containers and
 parents. A managed container's layout is compiler-private, so it cannot be
 passed to native code by reference, allocated on the heap, or reached through
-a raw pointer cast. A `big` field takes no default other than zero yet.
+a raw pointer cast. Heap allocation stays off for these containers because heap
+cleanup frees the storage without releasing the text and big values inside;
+that needs per-container destructors.
 
 A `#{}` block can also hold static data fields, such as `int Score = 10`,
 `#int Max = 100` for a constant, or `-int Secret` for a protected field. Each
@@ -338,13 +348,23 @@ declared `external` in modules that import it. Read and write a field by its
 qualified name (`Game.Score`, `Game.Level.Number`); functions in the block and
 in blocks nested inside it can also use the bare name, which locals shadow.
 Fields hold numbers, `bool`, enums, `string`, `name`, `big`, `void*`, or
-containers. Initializers follow the field default rules above. Storage is
-initialized before `Main` runs, so no initialization order is observable;
-initializers that read other static fields are rejected until an order is
-specified. Container-typed static fields start from the container's defaults
-and take no initializer. `tiny` fields and pointer fields other than `void*`
-are not supported yet. A function that touches static storage is never run as
-a worker task, because the storage is shared between threads.
+containers, with any initializer of the field's type; a container-typed field
+without one starts from the container's defaults. Constant initializers become
+the storage's initial value. The others run before `Main` in this order: every
+static of the imported modules, then this module's statics in declaration
+order (input file order, then source order). An initializer may read any
+imported static and any static declared earlier in its module; reading itself
+or a later one is rejected. A function an initializer calls sees later statics
+at their initial constant or zero value. A `#` constant may also take a
+computed initializer, which is still written only once.
+
+Each static has a `$init` function that runs at most once. It first runs the
+previous static's `$init`, or, for a module's first static, every imported
+static's, so the order holds whichever module's startup runs first. Each
+module with static fields registers a startup routine in `llvm.global_ctors`.
+`tiny` fields and pointer fields other than `void*` are not supported yet. A
+function that touches static storage is never run as a worker task, because
+the storage is shared between threads.
 
 Declare parents after a colon, as in `Cat : Animal, Human { ... }`. Each
 parent's state is embedded at the front of the derived layout in list order,
