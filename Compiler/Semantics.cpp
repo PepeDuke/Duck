@@ -314,6 +314,7 @@ class Analyzer {
     }
     if (e.kind == "char")
       return Type::Char;
+    if (e.kind == "typeMember") return typeLimit(e);
     if (e.kind == "construct") {
       const auto type = e.castType;
       const auto count = e.args.size();
@@ -746,6 +747,43 @@ class Analyzer {
       require(first, Type::Int, e.token);
     return op == "<" || op == ">" || op == "<=" || op == ">=" ? Type::Bool
                                                               : first;
+  }
+  // T.Min and T.Max for integer and floating types, as typed constants. For
+  // float and double, Min is the lowest finite value, -Max.
+  Type typeLimit(const Expr &e) {
+    const auto type = e.castType;
+    const auto &member = e.token.text;
+    if (!integral(type) && !floating(type))
+      fail(e.token, "type '" + typeName(type) + "' has no Min or Max" +
+                        (arbitraryNumber(type) ? "; its range is unbounded" : ""));
+    if (member != "Min" && member != "Max")
+      fail(e.token, "type '" + typeName(type) + "' has no member '" + member +
+                        "'; use Min or Max");
+    if (floating(type)) {
+      double value = type == Type::Float ? double(std::numeric_limits<float>::max())
+                                         : std::numeric_limits<double>::max();
+      if (member == "Min") value = -value;
+      uint64_t bits = 0;
+      std::memcpy(&bits, &value, sizeof(bits));
+      std::ostringstream encoded;
+      encoded << "0x" << std::hex << std::uppercase << std::setfill('0') << std::setw(16) << bits;
+      analysis.floatingConstants[&e] = encoded.str();
+      return type;
+    }
+    const auto width = unsigned(integerWidth(type));
+    const bool isUnsigned = unsignedInteger(type);
+    if (member == "Min") {
+      analysis.integerConstants[&e] =
+          isUnsigned ? "0" : "-" + Magnitude::powerOfTwo(width - 1).decimal();
+      return type;
+    }
+    // All ones in the value bits: width bits unsigned, width - 1 signed.
+    const auto bits = isUnsigned ? width : width - 1;
+    Magnitude maximum;
+    maximum.limbs.assign((bits + 31) / 32, 0xFFFFFFFFu);
+    if (bits % 32) maximum.limbs.back() = (uint32_t{1} << (bits % 32)) - 1;
+    analysis.integerConstants[&e] = maximum.decimal();
+    return type;
   }
   // A left literal operand of big/tiny arithmetic takes the destination type
   // where it could not convert implicitly anyway: integer literals beyond 64

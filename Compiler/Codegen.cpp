@@ -578,7 +578,7 @@ class Generator {
       return {Type::Char, std::to_string(decodeUTF8(e.token).front())};
     if (e.kind == "construct")
       return construct(e);
-    if (e.kind == "real")
+    if (e.kind == "real" || e.kind == "typeMember")
       return {analysis.expressionTypes.at(&e),
               analysis.floatingConstants.at(&e)};
     if (e.kind == "null")

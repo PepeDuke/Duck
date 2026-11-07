@@ -92,7 +92,9 @@ accept explicit files/options only and never reads project configuration.
   Value parameters still receive copies. Arguments evaluate left to right.
 - Initialized local constants for all supported numeric and boolean types. Initializers may be runtime
   expressions; the resulting binding cannot be reassigned, incremented, or
-  passed to a mutable reference. Constants can be passed by value.
+  passed to a mutable reference. Constants can be passed by value. A constant
+  requires its initializer: `#int age = 5` is valid, `#int age` is rejected,
+  and a later `age = 6` is rejected.
 - A required `Main()` entry point with no parameters or return value.
 - Static container function groups, such as `Math #{ int Twice(int n) { return
   n * 2 } }`, called as `Math.Twice(3)`. Groups may be nested, repeated across
@@ -131,6 +133,12 @@ accept explicit files/options only and never reads project configuration.
   Prefixed literals describe magnitudes: `0xFF` is positive 255, whereas
   `(int8)0xFF` is -1. Negative signed minima such as `-0x8000000000000000`
   are accepted.
+- Type limits `T.Min` and `T.Max` for every integer type, including custom
+  widths (`i3.Max` is 8388607, `u16.Max` is 2^128 - 1), and for `float` and
+  `double`, where `Min` is the lowest finite value, `-Max`. Each limit is a
+  constant of type `T`, so `long n = int.Max` widens while `byte b = int.Max`
+  is a type mismatch. `bool`, text, calendar, `big`, and `tiny` types have no
+  limits. See [20_TypeLimits.dk](../Examples/Bootstrap/20_TypeLimits.dk).
 - Integer/boolean literals, parentheses, unary `-`
   and `!`, arithmetic `+ - * / %`, comparisons, and numeric/boolean equality.
 - Integer bitwise `~`, `&`, `|`, `^`, shifts `<<` / `>>`, and compound

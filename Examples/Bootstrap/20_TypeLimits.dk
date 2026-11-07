@@ -1,0 +1,22 @@
+// Built-in type limits: T.Min and T.Max are typed constants for every integer
+// width, including custom iN/uN byte widths, and for float and double.
+// For float and double, Min is the lowest finite value (-Max).
+
+int Clamp(long value)
+{
+    if value > int.Max { return int.Max }
+    if value < int.Min { return int.Min }
+    return (int)value
+}
+
+Main()
+{
+    Print(int.Max)             // 2147483647
+    Print(int.Min)             // -2147483648
+    Print(byte.Max)            // 255
+    Print(i3.Max)              // 8388607 (24-bit signed)
+    Print(u16.Max)             // 2^128 - 1
+    long beyond = int.Max
+    Print(Clamp(beyond + 1))   // 2147483647
+    Print(float.Max > 1.0e38)  // 1
+}

@@ -410,6 +410,8 @@ explicit cast when conversion is intended.
 as cont sign we use the same as static
 ``` c++
 #int age = 5  // <- this is constant value, so it can't be changed
+age = 6       // <- error: cannot modify constant 'age'
+#int limit    // <- error: a constant requires an initializer
 ```
 
 ## Functions in duck

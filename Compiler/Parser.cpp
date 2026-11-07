@@ -45,8 +45,13 @@ class Parser {
   bool namedType() const {
     return !peek().string && containerNames.count(peek().text);
   }
+  // int.Max, i3.Min, double.Max: a built-in type followed by a member.
+  bool typeMember() const {
+    const auto &next = tokens.at(pos + 1);
+    return isType() && !next.string && next.text == ".";
+  }
   bool declarationType() const {
-    if (!namedType()) return isType();
+    if (!namedType()) return isType() && !typeMember();
     const auto &next = tokens.at(pos + 1);
     return !next.string && (next.text == "*" || next.text == "&" ||
            std::isalpha(static_cast<unsigned char>(next.text[0])) || next.text[0] == '_');
@@ -167,7 +172,7 @@ class Parser {
       e->args.push_back(expression(11, stopAtPipe));
     } else if (accept("(")) {
       lines();
-      if ((isType() && !constructorType()) ||
+      if ((isType() && !constructorType() && !typeMember()) ||
           (namedType() && tokens[pos + 1].text == "*")) {
         e->kind = "cast";
         e->castType = type();
@@ -200,6 +205,11 @@ class Parser {
     } else if (peek().string) {
       e->kind = "text";
       pop();
+    } else if (typeMember()) {
+      e->kind = "typeMember";
+      e->castType = baseType();
+      expect(".");
+      e->token = identifier();
     } else if (constructorType()) {
       e->kind = "construct";
       e->castType = baseType();
@@ -388,7 +398,8 @@ class Parser {
           fail(s->token, "heap construction requires a typed pointer");
         s->kind = "own";
       } else if (s->constant) {
-        expect("=");
+        if (!accept("="))
+          fail(peek(), "constant '" + s->name + "' requires an initializer, as in #int age = 5");
         s->expr = expression();
       } else if (accept("="))
         s->expr = expression();

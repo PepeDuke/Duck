@@ -92,9 +92,9 @@ Types, enums, and constants
    Proposal: Choose an arbitrary-precision integer representation for big/ubig and a decimal implementation supporting the promised precision for tiny/utiny. Specify rounding and unsigned subtraction behavior before adding literal parsing and runtime arithmetic.
 [x] Implement extensible #@ enums with integer, float, and string values.
    Proposal: Collect enum fragments before assigning implicit values. Store each member's name and underlying value so printing a member preserves its name while arithmetic or concatenation can use its value.
-[] Expose built-in type limits such as int.Max.
+[x] Expose built-in type limits such as int.Max.
    Proposal: Recognize qualified numeric type members during expression analysis. Derive Min and Max from the compiler's width and signedness information and emit typed constants, including for non-host widths.
-[] Reconcile the README's uninitialized #int age example with the compiler's initializer requirement.
+[x] Reconcile the README's uninitialized #int age example with the compiler's initializer requirement.
    Proposal: Proposed resolution: keep the existing initialized-constant rule and change the README example to #int age = 18. Keep a rejection test for a missing initializer and one for reassignment.
 
 Reflection, duck typing, and lambdas
