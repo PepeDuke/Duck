@@ -152,6 +152,7 @@ class Analyzer {
   const Expr *ownerDestination = nullptr;
   std::string container;
   bool method = false;
+  bool staticInitializer = false; // Analyzing a static field's constant initializer.
 
   void require(Type actual, Type expected, const Token &token) {
     if (actual != expected)
@@ -239,6 +240,23 @@ class Analyzer {
     }
     return type;
   }
+  // A protected member is visible inside its declaring container, the
+  // static containers nested in it, and containers that derive from it.
+  void requireAccess(bool isProtected, const std::string &declaring,
+                     const std::string &member, const Token &token) const {
+    if (!isProtected || container == declaring || container.rfind(declaring + ".", 0) == 0 ||
+        symbols.derivesFrom(container, declaring))
+      return;
+    fail(token, "'" + member + "' is a protected member of '" + declaring +
+                    "'; access it through a public member instead");
+  }
+  void requireAccess(Symbols::const_iterator function, const Token &token) const {
+    const auto &name = function->first;
+    const auto dot = name.rfind('.');
+    if (dot != std::string::npos)
+      requireAccess(function->second.protectedAccess, name.substr(0, dot),
+                    name.substr(dot + 1), token);
+  }
   Symbols::const_iterator resolve(const std::string &op) const {
     auto found = symbols.end();
     // Resolve relative names from the innermost static container outward.
@@ -252,11 +270,45 @@ class Analyzer {
       found = symbols.find(op);
     return found;
   }
+  // The qualified static field a name or dotted path denotes, resolved from
+  // the innermost static container outward, or empty. Locals shadow statics.
+  std::string staticPath(const Expr &e) {
+    std::string path;
+    const Expr *root = &e;
+    while (root->kind == ".") {
+      path = "." + root->token.text + path;
+      root = root->args[0].get();
+    }
+    if (root->kind != "name" || findLocal(root->token)) return "";
+    path = root->token.text + path;
+    for (auto scope = container;; ) {
+      const auto candidate = scope.empty() ? path : scope + "." + path;
+      if (symbols.statics.count(candidate)) return candidate;
+      if (scope.empty()) return "";
+      const auto dot = scope.rfind('.');
+      scope = dot == std::string::npos ? "" : scope.substr(0, dot);
+    }
+  }
+  // True when e, or a dotted prefix of it, is static storage.
+  bool staticStorage(const Expr &e) {
+    for (const Expr *part = &e;; part = part->args[0].get()) {
+      if (!staticPath(*part).empty()) return true;
+      if (part->kind != ".") return false;
+    }
+  }
   // An addressable expression denotes existing storage. Dot inherits the
   // mutability of its base; dereferencing borrows the pointed-to storage.
   Local location(const Expr &e, bool read = true) {
     Local local{Type::Void, false};
-    if (e.kind == "name") {
+    if (const auto qualified = staticPath(e); !qualified.empty()) {
+      if (staticInitializer)
+        fail(e.token, "field initializers cannot read static fields; use a constant");
+      const auto &info = symbols.statics.at(qualified);
+      const auto dot = qualified.rfind('.');
+      requireAccess(info.protectedAccess, qualified.substr(0, dot), qualified.substr(dot + 1), e.token);
+      analysis.staticFields[&e] = qualified;
+      local = {info.type, info.constant};
+    } else if (e.kind == "name") {
       local = lookup(e.token);
       if (local.receiver) analysis.receiverStorage.insert(&e);
       if (read) requireInitialized(e.token);
@@ -279,12 +331,12 @@ class Analyzer {
         local.constant = false; // A constant pointer can point to mutable storage.
       }
       if (!recordValue(local.type)) fail(e.token, "field access requires a container or a pointer to a container");
-      const auto &fields = symbols.records.at(local.type.record).fields;
-      size_t i = 0;
-      while (i < fields.size() && fields[i].name.text != e.token.text) ++i;
-      if (i == fields.size()) fail(e.token, "unknown container field '" + e.token.text + "'");
-      analysis.fieldIndices[&e] = i;
-      local.type = fields[i].type;
+      MemberPath path;
+      if (!symbols.findField(local.type.record, e.token.text, path))
+        fail(e.token, "unknown container field '" + e.token.text + "'");
+      requireAccess(path.field->protectedAccess, path.declaring, e.token.text, e.token);
+      analysis.fieldIndices[&e] = path.indices;
+      local.type = path.field->type;
     } else fail(e.token, "operand must be a mutable variable, field, or dereference");
     analysis.expressionTypes[&e] = local.type;
     return local;
@@ -300,15 +352,18 @@ class Analyzer {
     const auto &op = e.token.text;
     if (e.kind == "initializer") {
       if (!recordValue(expected)) fail(e.token, "named initialization requires a container value type");
-      const auto &fields = symbols.records.at(expected.record).fields;
-      std::set<size_t> assigned;
+      std::set<std::string> assigned;
       for (const auto &field : e.args) {
-        size_t i = 0;
-        while (i < fields.size() && fields[i].name.text != field->token.text) ++i;
-        if (i == fields.size()) fail(field->token, "unknown container field");
-        if (!assigned.insert(i).second) fail(field->token, "duplicate field initializer");
-        analysis.fieldIndices[field.get()] = i;
-        expression(*field->args.front(), fields[i].type);
+        MemberPath path;
+        if (!symbols.findField(expected.record, field->token.text, path))
+          fail(field->token, "unknown container field");
+        requireAccess(path.field->protectedAccess, path.declaring, field->token.text, field->token);
+        if (path.field->parentView)
+          fail(field->token, "initialize inherited fields by name, not through parent '" +
+                                 field->token.text + "'");
+        if (!assigned.insert(field->token.text).second) fail(field->token, "duplicate field initializer");
+        analysis.fieldIndices[field.get()] = path.indices;
+        expression(*field->args.front(), path.field->type);
       }
       return expected;
     }
@@ -347,6 +402,9 @@ class Analyzer {
       return type;
     }
     if (e.kind == "cast") {
+      if (e.castType.depth && e.castType.base == Type::Record && symbols.records.count(e.castType.record) &&
+          symbols.managedRecord(e.castType.record))
+        fail(e.token, "cannot cast to a pointer to a container with string, name, or big fields");
       auto source = decay(*e.args[0], expression(*e.args[0]));
       if (source.role != Type::Raw) fail(e.token, "cannot cast a tracked heap reference");
       symbols.validateType(e.castType, e.token);
@@ -513,6 +571,7 @@ class Analyzer {
         if (!local && function != symbols.end()) {
           const auto &sig = function->second;
           if (sig.method) fail(arg.token, "instance method requires a receiver");
+          requireAccess(function, arg.token);
           if (sig.result.role != Type::Raw || (sig.result != Type::Void && !nativeScalar(sig.result)))
             fail(arg.token, "unsupported callback return ABI");
           for (const auto &p : sig.parameters)
@@ -548,11 +607,21 @@ class Analyzer {
         return Type::Void;
       }
       auto found = resolve(op);
+      // Inside an instance method an unqualified name finds the container's
+      // own or inherited methods before static or global functions.
+      if (method && !e.receiver && op.find('.') == std::string::npos) {
+        MemberPath path;
+        auto member = symbols.findMethod(container, op, path);
+        if (member != symbols.end()) {
+          found = member;
+          if (!path.indices.empty()) analysis.receiverPaths[&e] = {container, path.indices};
+        }
+      }
       bool instance = false;
       if (e.receiver) {
         const Expr *root = e.receiver.get();
         while (root->kind == ".") root = root->args[0].get();
-        instance = root->kind != "name" || findLocal(root->token);
+        instance = root->kind != "name" || findLocal(root->token) || staticStorage(*e.receiver);
         if (instance) {
           const auto &base = *e.receiver;
           Type t;
@@ -563,8 +632,10 @@ class Analyzer {
           } else t = expression(base);
           if (t.depth) t = t.pointee();
           if (!recordValue(t)) fail(base.token, "method receiver requires a container");
-          found = symbols.find(t.record + op.substr(op.rfind('.')));
-          if (found == symbols.end() || !found->second.method) fail(e.token, "unknown instance method '" + op + "'");
+          MemberPath path;
+          found = symbols.findMethod(t.record, op.substr(op.rfind('.') + 1), path);
+          if (found == symbols.end()) fail(e.token, "unknown instance method '" + op + "'");
+          if (!path.indices.empty()) analysis.receiverPaths[&e] = {t.record, path.indices};
         }
       }
       if (found == symbols.end() && !e.receiver && !symbols.records.count(op)) {
@@ -579,6 +650,7 @@ class Analyzer {
       }
       if (found == symbols.end())
         fail(e.token, "unknown function '" + op + "'");
+      requireAccess(found, e.token);
       analysis.callTargets[&e] = found->first;
       const auto &signature = found->second;
       if (signature.result.role == Type::Owner && ownerDestination != &e)
@@ -988,6 +1060,8 @@ class Analyzer {
         declared.role = type.role;
         require(type, declared, s.token);
       }
+      if (type.role == Type::Owner && type.depth == 1 && symbols.managed(type.pointee()))
+        fail(s.token, "heap containers with string, name, or big fields are not supported yet");
       analysis.localTypes[&s] = type;
       auto name = s.token;
       name.text = s.name;
@@ -1026,7 +1100,8 @@ class Analyzer {
         } else
           expression(*s.expr, local.type);
       }
-      if (s.target->kind == "name") lookup(s.target->token).initialized = true;
+      if (s.target->kind == "name" && !analysis.staticFields.count(s.target.get()))
+        lookup(s.target->token).initialized = true;
     }
     return false;
   }
@@ -1034,6 +1109,54 @@ class Analyzer {
 public:
   Analyzer(const Symbols &symbols, Type result)
       : symbols(symbols), result(result) {}
+  // The LLVM constant for a static field initializer. Only literals, type
+  // limits, and enum members of the field's type are compile-time constants.
+  std::string constant(const std::string &qualified, const Expr &e, Type type) {
+    container = qualified.substr(0, qualified.rfind('.'));
+    staticInitializer = true;
+    scopes.emplace_back();
+    if (bigInteger(type))
+      fail(e.token, "big fields cannot have an initializer yet; they start at zero");
+    if (recordValue(type))
+      fail(e.token, "container-typed fields start from that container's defaults; "
+                    "initializers are not supported yet");
+    expression(e, type);
+    // A string or name literal; lowering emits it as immortal constant storage.
+    if (e.kind == "text" && managedText(type)) return "";
+    const bool converted = analysis.conversions.count(&e) != 0;
+    auto encode = [](double value) {
+      uint64_t bits = 0;
+      std::memcpy(&bits, &value, sizeof(bits));
+      std::ostringstream encoded;
+      encoded << "0x" << std::hex << std::uppercase << std::setfill('0') << std::setw(16) << bits;
+      return encoded.str();
+    };
+    if (e.kind == "bool") return e.token.text;
+    if (e.kind == "null") return "null";
+    if (auto member = analysis.enumMembers.find(&e); member != analysis.enumMembers.end() && !converted)
+      return std::to_string(member->second);
+    if (auto integer = analysis.integerConstants.find(&e); integer != analysis.integerConstants.end()) {
+      if (!converted || integral(type)) return integer->second;
+      if (floating(type)) {
+        const auto value = std::stold(integer->second);
+        return encode(type == Type::Float ? double(float(value)) : double(value));
+      }
+    }
+    if (auto real = analysis.floatingConstants.find(&e); real != analysis.floatingConstants.end() && !converted)
+      return real->second;
+    // A negated floating literal: flip the sign bit of the encoded value.
+    if (e.kind == "unary" && e.token.text == "-" && !converted) {
+      auto real = analysis.floatingConstants.find(e.args[0].get());
+      if (real != analysis.floatingConstants.end()) {
+        auto bits = std::stoull(real->second.substr(2), nullptr, 16) ^ (uint64_t(1) << 63);
+        double value = 0;
+        std::memcpy(&value, &bits, sizeof(bits));
+        return encode(value);
+      }
+    }
+    fail(e.token, "field initializer must be a literal, type limit, or enum member "
+                  "of the field's type");
+  }
   FunctionAnalysis run(const Function &function) {
     auto dot = function.name.text.rfind('.');
     if (dot != std::string::npos)
@@ -1041,8 +1164,8 @@ public:
     scopes.emplace_back();
     method = function.method;
     if (method) {
-      for (const auto &field : symbols.records.at(container).fields)
-        bind(field.name, {field.type, false, true, true});
+      for (const auto &path : symbols.visibleFields(container))
+        bind(path.field->name, {path.field->type, false, true, true});
       scopes.emplace_back();
     }
     symbols.validateType(result, function.name);
@@ -1061,5 +1184,19 @@ public:
 FunctionAnalysis analyzeFunction(const Function &function,
                                  const Symbols &symbols) {
   return Analyzer(symbols, function.result).run(function);
+}
+void resolveFieldDefaults(Symbols &symbols) {
+  for (auto &[name, record] : symbols.records)
+    for (auto &field : record.fields)
+      if (field.initializer)
+        field.initialValue = Analyzer(symbols, Type::Void)
+                                 .constant(name + "." + field.name.text, *field.initializer, field.type);
+}
+void resolveStaticInitializers(Symbols &symbols) {
+  for (auto &[name, info] : symbols.statics) {
+    if (info.imported) continue;
+    info.value = info.initializer ? Analyzer(symbols, Type::Void).constant(name, *info.initializer, info.type)
+                                  : "zeroinitializer";
+  }
 }
 } // namespace duck

@@ -62,6 +62,63 @@ struct Value {
 std::string enumTextSymbol(const std::string &name, size_t index) {
   return "@enum." + name + ".value." + std::to_string(index);
 }
+// An immortal managed string or name literal (reference count -1) holding
+// text.text, which is UTF-8. string stores UTF-16 code units, name bytes.
+std::string managedTextGlobal(const std::string &symbol, const Token &text, Type type) {
+  std::vector<uint32_t> units;
+  if (type == Type::Name) {
+    for (unsigned char byte : text.text) units.push_back(byte);
+  } else
+    for (auto cp : decodeUTF8(text)) {
+      if (cp < 0x10000) units.push_back(cp);
+      else {
+        cp -= 0x10000;
+        units.push_back(0xD800 | (cp >> 10));
+        units.push_back(0xDC00 | (cp & 1023));
+      }
+    }
+  const std::string unit = type == Type::String ? "i16" : "i8";
+  const auto array = "[" + std::to_string(units.size() + 1) + " x " + unit + "]";
+  std::string ir = symbol + " = private unnamed_addr constant { i64, i64, " + array +
+                   " } { i64 -1, i64 " + std::to_string(units.size()) + ", " + array + " [";
+  for (auto value : units) ir += unit + " " + std::to_string(value) + ", ";
+  return ir + unit + " 0] }, align 8\n";
+}
+// Managed storage is never null. A string, name, or big field or static
+// without an initializer holds an immortal empty value: "" or zero, defined
+// privately in each module that needs it.
+std::string managedZero(const Type &type) {
+  return type == Type::String ? "@duck$empty.string" : type == Type::Name ? "@duck$empty.name"
+                                                                          : "@duck$big.zero";
+}
+// True when any field, nested container, or parent of the record has a
+// default. A managed field always has one.
+bool hasDefaults(const Symbols &symbols, const std::string &record) {
+  for (const auto &field : symbols.records.at(record).fields)
+    if (field.initializer || managedValue(field.type) ||
+        (recordValue(field.type) && hasDefaults(symbols, field.type.record)))
+      return true;
+  return false;
+}
+std::string defaultTextSymbol(const std::string &record, const Parameter &field) {
+  return "@duck$text." + record + "." + field.name.text;
+}
+// A record's default value as an LLVM constant. Its string and name
+// literals are emitted by emitRecords in every module that uses the record.
+std::string recordConstant(const Symbols &symbols, const std::string &record) {
+  if (!hasDefaults(symbols, record)) return "zeroinitializer";
+  std::string value = "{ ";
+  const auto &fields = symbols.records.at(record).fields;
+  for (size_t i = 0; i < fields.size(); ++i) {
+    const auto &field = fields[i];
+    value += (i ? ", " : "") + irType(field.type) + " ";
+    if (recordValue(field.type)) value += recordConstant(symbols, field.type.record);
+    else if (!field.initializer) value += managedValue(field.type) ? managedZero(field.type) : "zeroinitializer";
+    else if (field.initialValue.empty()) value += defaultTextSymbol(record, field);
+    else value += field.initialValue;
+  }
+  return value + " }";
+}
 struct Binding {
   Type type;
   std::string value;
@@ -107,15 +164,39 @@ class Generator {
     startBlock(success);
   }
   static std::string textWidth(Type type) { return type == Type::String ? "2" : "1"; }
+  // Applies `runtime` (retain or release) to each managed value in a record
+  // value, through nested containers and parent state.
+  void eachManaged(Value value, const std::string &runtime) {
+    for (size_t i = 0; i < functions.records.at(value.type.record).fields.size(); ++i) {
+      const auto &field = functions.records.at(value.type.record).fields[i];
+      if (!functions.managed(field.type)) continue;
+      auto part = fresh();
+      emit(part + " = extractvalue " + irType(value.type) + " " + value.value + ", " + std::to_string(i));
+      if (recordValue(field.type)) eachManaged({field.type, part}, runtime);
+      else {
+        usesTextRuntime = true;
+        emit("call void @duck.text." + runtime + "(ptr " + part + ")");
+      }
+    }
+  }
   void retain(Value value) {
+    if (recordValue(value.type) && functions.managed(value.type)) return eachManaged(value, "retain");
     if (!managedValue(value.type)) return;
     usesTextRuntime = true;
     emit("call void @duck.text.retain(ptr " + value.value + ")");
   }
   void release(Value value) {
+    if (recordValue(value.type) && functions.managed(value.type)) return eachManaged(value, "release");
     if (!managedValue(value.type)) return;
     usesTextRuntime = true;
     emit("call void @duck.text.release(ptr " + value.value + ")");
+  }
+  // A record's default value: zero, or its defaults loaded from constant storage.
+  std::string defaultValue(const Type &type) {
+    if (!recordValue(type) || !hasDefaults(functions, type.record)) return "zeroinitializer";
+    auto id = fresh();
+    emit(id + " = load " + irType(type) + ", ptr @duck$default." + type.record);
+    return id;
   }
   static std::string ownerFlag(Type type) { return type.role == Type::Owner ? "true" : "false"; }
   std::string moveOwner(const Token &source) {
@@ -138,9 +219,9 @@ class Generator {
       emit("call void @duck.heap$drop(ptr " + binding.value + ", i1 " + ownerFlag(binding.type) + ")");
       return;
     }
-    if (!managedValue(binding.type)) return;
+    if (!functions.managed(binding.type)) return;
     auto old = fresh();
-    emit(old + " = load ptr, ptr " + binding.value);
+    emit(old + " = load " + irType(binding.type) + ", ptr " + binding.value);
     release({binding.type, old});
   }
   void cleanupScopes(size_t first) {
@@ -464,7 +545,7 @@ class Generator {
     auto address = fresh();
     allocations << "  " << address << " = alloca " << irType(value.type)
                 << '\n';
-    if (recordValue(value.type) && value.value.empty()) value.value = "zeroinitializer";
+    if (recordValue(value.type) && value.value.empty()) value.value = defaultValue(value.type);
     if (managedValue(value.type) && value.value.empty()) value.value = "null";
     if (!value.value.empty())
       emit("store " + irType(value.type) + " " + value.value + ", ptr " +
@@ -485,26 +566,8 @@ class Generator {
     return name;
   }
   Value managedLiteral(const Expr &e, Type type) {
-    std::vector<uint32_t> units;
-    if (type == Type::Name) {
-      for (unsigned char byte : e.token.text) units.push_back(byte);
-    } else {
-      for (auto cp : decodeUTF8(e.token)) {
-        if (cp < 0x10000) units.push_back(cp);
-        else {
-          cp -= 0x10000;
-          units.push_back(0xD800 | (cp >> 10));
-          units.push_back(0xDC00 | (cp & 1023));
-        }
-      }
-    }
     auto symbol = "@str." + symbolPrefix + "." + std::to_string(strings++);
-    auto unit = type == Type::String ? "i16" : "i8";
-    auto array = "[" + std::to_string(units.size() + 1) + " x " + unit + "]";
-    globals << symbol << " = private unnamed_addr constant { i64, i64, " << array
-            << " } { i64 -1, i64 " << units.size() << ", " << array << " [";
-    for (auto value : units) globals << unit << " " << value << ", ";
-    globals << unit << " 0] }, align 8\n";
+    globals << managedTextGlobal(symbol, e.token, type);
     return {type, symbol};
   }
   Value expression(const Expr &e) {
@@ -527,7 +590,16 @@ class Generator {
     }
     return v;
   }
+  // ", i32 a, i32 b" for a field path through parent views.
+  static std::string indexList(const std::vector<size_t> &indices) {
+    std::string list;
+    for (auto index : indices) list += ", i32 " + std::to_string(index);
+    return list;
+  }
   Binding location(const Expr &e) {
+    auto field = analysis.staticFields.find(&e);
+    if (field != analysis.staticFields.end())
+      return {analysis.expressionTypes.at(&e), "@duck$static." + field->second};
     if (e.kind == "name") return variable(e.token);
     auto type = analysis.expressionTypes.at(&e);
     if (e.kind == "unary") return {type, dereference(*e.args[0]).value};
@@ -541,7 +613,7 @@ class Generator {
     }
     auto id = fresh();
     emit(id + " = getelementptr " + irType(record) + ", ptr " + address +
-         ", i32 0, i32 " + std::to_string(analysis.fieldIndices.at(&e)));
+         ", i32 0" + indexList(analysis.fieldIndices.at(&e)));
     return {type, id};
   }
   Value lowerExpression(const Expr &e) {
@@ -559,12 +631,16 @@ class Generator {
               "{ i256 " + decimal->second.first + ", i32 " + decimal->second.second + " }"};
     if (e.kind == "initializer") {
       auto type = analysis.expressionTypes.at(&e);
-      std::string value = "zeroinitializer";
+      // Unnamed fields keep their defaults; a replaced default is a literal,
+      // so overwriting it needs no release.
+      std::string value = defaultValue(type);
       for (const auto &field : e.args) {
         auto v = expression(*field->args.front());
         auto aggregate = fresh();
+        std::string indices; // insertvalue takes plain constant indices.
+        for (auto index : analysis.fieldIndices.at(field.get())) indices += ", " + std::to_string(index);
         emit(aggregate + " = insertvalue " + irType(type) + " " + value + ", " + irType(v.type) +
-             " " + v.value + ", " + std::to_string(analysis.fieldIndices.at(field.get())));
+             " " + v.value + indices);
         value = aggregate;
       }
       return {type, value};
@@ -699,13 +775,14 @@ class Generator {
       if (analysis.calendarCalls.count(&e))
         return calendarCall(e);
       if (!analysis.callTargets.count(&e))
-        return {analysis.expressionTypes.at(&e), "zeroinitializer"};
+        return {analysis.expressionTypes.at(&e), defaultValue(analysis.expressionTypes.at(&e))};
       const auto &target = analysis.callTargets.at(&e);
       auto found = functions.find(target);
 
       const auto &f = found->second;
 
       std::string args;
+      Value temporaryReceiver{Type::Void, ""};
       if (f.method) {
         std::string address;
         if (!e.receiver) {
@@ -719,6 +796,17 @@ class Generator {
           address = fresh();
           allocations << "  " << address << " = alloca " << irType(temporary.type) << '\n';
           emit("store " + irType(temporary.type) + " " + temporary.value + ", ptr " + address);
+          temporaryReceiver = {temporary.type, address};
+        }
+        // An inherited method receives the declaring parent's embedded state.
+        auto inherited = analysis.receiverPaths.find(&e);
+        if (inherited != analysis.receiverPaths.end()) {
+          Type self = Type::Record;
+          self.record = inherited->second.first;
+          auto adjusted = fresh();
+          emit(adjusted + " = getelementptr " + irType(self) + ", ptr " + address + ", i32 0" +
+               indexList(inherited->second.second));
+          address = adjusted;
         }
         args = "ptr " + address;
       }
@@ -748,6 +836,8 @@ class Generator {
       emit((id.empty() ? "" : id + " = ") + "call " + irType(f.result) +
            " @" + (f.nativeSymbol.empty() ? "duck." + target : f.nativeSymbol) + "(" + args + ")");
       for (auto argument : arguments) release(argument);
+      // A temporary receiver dies after the call, holding whatever the method left in it.
+      if (!temporaryReceiver.value.empty()) releaseBinding({temporaryReceiver.type, temporaryReceiver.value});
       return {f.result, id};
     }
     auto a = expression(*e.args[0]);
@@ -1108,7 +1198,7 @@ class Generator {
           word = s.expr->kind == "call" ? expression(*s.expr).value : moveOwner(s.expr->token);
         } else {
           auto payload = irType(type.pointee());
-          auto value = s.expr ? expression(*s.expr).value : "zeroinitializer";
+          auto value = s.expr ? expression(*s.expr).value : defaultValue(type.pointee());
           word = fresh();
           emit(word + " = call ptr @duck.heap$alloc(i64 ptrtoint (ptr getelementptr (" +
                payload + ", ptr null, i32 1) to i64))");
@@ -1166,11 +1256,10 @@ public:
     scopes.emplace_back();
     if (f.method) {
       const auto &self = f.params.front().type;
-      const auto &fields = functions.records.at(self.record).fields;
-      for (size_t i = 0; i < fields.size(); ++i) {
+      for (const auto &path : functions.visibleFields(self.record)) {
         auto address = fresh();
-        emit(address + " = getelementptr " + irType(self) + ", ptr %arg0, i32 0, i32 " + std::to_string(i));
-        bind(fields[i].name, {fields[i].type, address});
+        emit(address + " = getelementptr " + irType(self) + ", ptr %arg0, i32 0" + indexList(path.indices));
+        bind(path.field->name, {path.field->type, address});
       }
       scopes.emplace_back();
     }
@@ -1217,6 +1306,28 @@ std::string emitRecords(const Symbols &symbols) {
     }
     ir += " }\n";
   }
+  // Each module keeps private copies of the defaults it may construct.
+  std::set<std::string> zeros;
+  for (const auto &[name, record] : symbols.records)
+    for (const auto &field : record.fields)
+      if (managedValue(field.type) && !field.initializer) zeros.insert(managedZero(field.type));
+  for (const auto &[name, info] : symbols.statics)
+    if (managedValue(info.type) && !info.initializer && !info.imported) zeros.insert(managedZero(info.type));
+  for (const auto &zero : zeros) {
+    if (zero == "@duck$big.zero")
+      ir += zero + " = private unnamed_addr constant { i64, i64, i64, [0 x i32] } "
+                   "{ i64 -1, i64 0, i64 0, [0 x i32] zeroinitializer }, align 8\n";
+    else
+      ir += managedTextGlobal(zero, Token{}, zero == "@duck$empty.string" ? Type::String : Type::Name);
+  }
+  for (const auto &[name, record] : symbols.records) {
+    for (const auto &field : record.fields)
+      if (field.initializer && field.initialValue.empty())
+        ir += managedTextGlobal(defaultTextSymbol(name, field), field.initializer->token, field.type);
+    if (hasDefaults(symbols, name))
+      ir += "@duck$default." + name + " = private unnamed_addr constant %struct." + name + " " +
+            recordConstant(symbols, name) + "\n";
+  }
   return ir;
 }
 // Per-module private tables: member names for Print, underlying values for
@@ -1231,26 +1342,9 @@ std::string emitEnums(const Symbols &symbols) {
       ir << "@enum." << name << ".name." << i << " = private unnamed_addr constant ["
          << label.size() + 1 << " x i8] c\"" << label << "\\00\"\n";
       if (!managedText(info.type)) continue;
-      std::vector<uint32_t> units;
       Token text = info.members[i];
       text.text = info.values[i];
-      if (info.type == Type::Name) {
-        for (unsigned char byte : text.text) units.push_back(byte);
-      } else
-        for (auto cp : decodeUTF8(text)) {
-          if (cp < 0x10000) units.push_back(cp);
-          else {
-            cp -= 0x10000;
-            units.push_back(0xD800 | (cp >> 10));
-            units.push_back(0xDC00 | (cp & 1023));
-          }
-        }
-      const auto unit = info.type == Type::String ? "i16" : "i8";
-      const auto array = "[" + std::to_string(units.size() + 1) + " x " + unit + "]";
-      ir << enumTextSymbol(name, i) << " = private unnamed_addr constant { i64, i64, " << array
-         << " } { i64 -1, i64 " << units.size() << ", " << array << " [";
-      for (auto value : units) ir << unit << " " << value << ", ";
-      ir << unit << " 0] }, align 8\n";
+      ir << managedTextGlobal(enumTextSymbol(name, i), text, info.type);
     }
     ir << "@enum." << name << ".names = private unnamed_addr constant [" << count << " x ptr] [";
     for (size_t i = 0; i < info.members.size(); ++i)
@@ -1263,6 +1357,26 @@ std::string emitEnums(const Symbols &symbols) {
     ir << "]\n";
   }
   return ir.str();
+}
+std::string emitStatics(const Symbols &symbols) {
+  std::string ir;
+  for (const auto &[name, info] : symbols.statics) {
+    ir += "@duck$static." + name + " = ";
+    if (info.imported) {
+      ir += "external global " + irType(info.type) + "\n";
+      continue;
+    }
+    auto value = info.value;
+    std::string literal;
+    if (recordValue(info.type)) value = recordConstant(symbols, info.type.record);
+    else if (managedValue(info.type) && !info.initializer) value = managedZero(info.type);
+    else if (info.initializer && value.empty()) {
+      value = "@duck$static." + name + "$text";
+      literal = managedTextGlobal(value, info.initializer->token, info.type);
+    }
+    ir += std::string(info.constant ? "constant " : "global ") + irType(info.type) + " " + value + "\n" + literal;
+  }
+  return ir;
 }
 std::string emitDeclarations(const Symbols &symbols) {
   std::string declarations;

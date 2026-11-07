@@ -23,6 +23,7 @@ struct Signature {
   Token declaration;
   std::set<size_t> nonescapingParameters;
   bool method = false;
+  bool protectedAccess = false;
 };
 // A merged enum. Values are in member order: signed decimal integers, LLVM
 // hexadecimal floating constants, or UTF-8 text, depending on the type.
@@ -37,9 +38,42 @@ struct EnumInfo {
     return i;
   }
 };
+// Where an instance member lives: field indices from the searched container
+// down through parent views, and the container that declares the member.
+struct MemberPath {
+  std::vector<size_t> indices;
+  std::string declaring;
+  const Parameter *field = nullptr; // Null for a method.
+};
+// A static field's single storage location, keyed by its qualified name.
+struct StaticInfo {
+  Token declaration;
+  Type type;
+  bool constant = false;
+  bool protectedAccess = false;
+  const Expr *initializer = nullptr; // Refers to the input AST.
+  bool imported = false;             // Storage is defined by another module.
+  std::string value;                 // LLVM constant, set by resolveStaticInitializers.
+};
 struct Symbols : std::map<std::string, Signature> {
   std::map<std::string, Record> records;
   std::map<std::string, EnumInfo> enums;
+  std::map<std::string, StaticInfo> statics;
+  // Member lookup searches the container itself, then each parent left to
+  // right, depth first, so the leftmost parent wins an overlap.
+  bool findField(const std::string &record, const std::string &name, MemberPath &path) const;
+  const_iterator findMethod(const std::string &record, const std::string &name,
+                            MemberPath &path) const;
+  bool derivesFrom(const std::string &record, const std::string &ancestor) const;
+  // Fields an instance method may name directly, inherited ones included,
+  // with each name bound to its highest-priority declaration.
+  std::vector<MemberPath> visibleFields(const std::string &record) const;
+  // A container holding string, name, or big storage anywhere in its layout,
+  // nested containers and parents included. Copies retain and cleanup releases.
+  bool managedRecord(const std::string &record) const;
+  bool managed(const Type &type) const {
+    return managedValue(type) || (recordValue(type) && managedRecord(type.record));
+  }
   void validateType(const Type &type, const Token &token) const {
     if (type.base == Type::Record && !records.count(type.record))
       fail(token, "unknown container '" + type.record + "'");
@@ -52,7 +86,17 @@ std::string typeName(Type type);
 std::map<std::string, EnumInfo> resolveEnums(const std::vector<EnumFragment> &fragments);
 bool borrowsOnly(const Stmt &statement, const std::string &name);
 Symbols collectSymbols(const Program &program, bool requireEntry = true);
+// Checks parent lists, rejects inheritance cycles and redeclared inherited
+// members, and embeds each parent as a leading field. Runs once all
+// containers, imported ones included, are known.
+void resolveInheritance(Symbols &symbols);
 void validateLayouts(const Symbols &symbols);
+// Static storage is initialized before Main from compile-time constants
+// only, so no initialization order exists to observe. Fills each value.
+void resolveStaticInitializers(Symbols &symbols);
+// Evaluates container field defaults with the same constant rules as static
+// initializers, plus string and name literals.
+void resolveFieldDefaults(Symbols &symbols);
 void validateNativeSymbols(const Symbols &symbols);
 
 // Expression pointers refer to the input AST, which must outlive this artifact.
@@ -60,12 +104,18 @@ void validateNativeSymbols(const Symbols &symbols);
 struct FunctionAnalysis {
   std::map<const Expr *, Type> expressionTypes;
   std::map<const Expr *, Type> conversions;
-  std::map<const Expr *, size_t> fieldIndices;
+  // Field position, through parent views for an inherited field.
+  std::map<const Expr *, std::vector<size_t>> fieldIndices;
+  // An inherited method call: the receiver's container and the parent-view
+  // indices that reach the declaring parent's state.
+  std::map<const Expr *, std::pair<std::string, std::vector<size_t>>> receiverPaths;
   std::map<const Expr *, std::string> integerConstants;
   std::map<const Expr *, std::string> floatingConstants;
   // tiny/utiny literals, already rounded: {signed coefficient, exponent}.
   std::map<const Expr *, std::pair<std::string, std::string>> decimalConstants;
   std::map<const Expr *, std::string> callTargets;
+  // Names and paths that denote static field storage: the qualified name.
+  std::map<const Expr *, std::string> staticFields;
   // Enum member constants such as Day.Monday: the member's index.
   std::map<const Expr *, size_t> enumMembers;
   // Calls resolved to a calendar built-in such as Year or AddDays.
@@ -119,6 +169,8 @@ std::string taskRuntimeIR(const std::set<std::string> &nativeSymbols);
 std::string emitRecords(const Symbols &symbols);
 std::string emitEnums(const Symbols &symbols);
 std::string emitDeclarations(const Symbols &symbols);
+// Defines this module's static storage and declares imported storage.
+std::string emitStatics(const Symbols &symbols);
 
 // Sequential orchestration. Analysis finishes before lowering begins.
 // parallel = false keeps every call on the calling thread.

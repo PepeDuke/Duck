@@ -289,8 +289,61 @@ Declare an instance container as `Example { ... }`. Fields and instance methods
 share the body. Each member and each statement starts on its own line when
 there is more than one. Instance methods can use field names directly or access
 them through `this`. Declare and use the type by its name alone, such as `Example` or `Example*`.
-Static function groups continue to use `#{}`. Custom constructors, field
-defaults, properties, and inheritance remain future work.
+Static function groups continue to use `#{}`. Custom constructors,
+properties, overrides, and virtual dispatch remain future work.
+
+Fields can declare defaults, as in `int Count = 3` or `string Title = "Duck"`.
+A default must be a compile-time constant of the field's type: a literal, a
+negated literal, `null`, a type limit such as `int.Max`, an enum member, or a
+`string`/`name` literal. Default construction (`Named n()`, `Named()`) and the
+fields a `{ Field: value }` initializer leaves out take these defaults, as do
+inherited and nested container fields; other fields start at zero. Each module
+keeps a private constant copy of the defaults it uses.
+
+Fields of type `string`, `name`, and `big` make a container managed. Managed
+storage is never null: such a field without a default starts as `""` or zero.
+Copying a managed container retains its text and big values, assigning one
+releases the values it replaces, and parameters, temporaries, and locals
+release theirs when they go out of scope, through nested containers and
+parents. A managed container's layout is compiler-private, so it cannot be
+passed to native code by reference, allocated on the heap, or reached through
+a raw pointer cast. A `big` field takes no default other than zero yet.
+
+A `#{}` block can also hold static data fields, such as `int Score = 10`,
+`#int Max = 100` for a constant, or `-int Secret` for a protected field. Each
+field has one storage location, defined in the module that declares it and
+declared `external` in modules that import it. Read and write a field by its
+qualified name (`Game.Score`, `Game.Level.Number`); functions in the block and
+in blocks nested inside it can also use the bare name, which locals shadow.
+Fields hold numbers, `bool`, enums, `string`, `name`, `big`, `void*`, or
+containers. Initializers follow the field default rules above. Storage is
+initialized before `Main` runs, so no initialization order is observable;
+initializers that read other static fields are rejected until an order is
+specified. Container-typed static fields start from the container's defaults
+and take no initializer. `tiny` fields and pointer fields other than `void*`
+are not supported yet. A function that touches static storage is never run as
+a worker task, because the storage is shared between threads.
+
+Declare parents after a colon, as in `Cat : Animal, Human { ... }`. Each
+parent's state is embedded at the front of the derived layout in list order,
+so a derived value starts with its first parent exactly as a C struct whose
+first member is that parent. Fields and methods are found in the container
+itself, then in each parent left to right, depth first, so the leftmost parent
+wins an overlap. Inherited fields can be named directly inside methods and in
+`{ Field: value }` initializers; an inherited method receives the embedded
+parent state as its receiver. `this.Human.Walk()` reaches a lower-priority
+parent explicitly; that parent view is protected, so outside code cannot use
+it. Unknown or repeated parents and inheritance cycles are rejected, as is a
+member that redeclares an inherited one, until overrides are implemented. A
+derived value does not yet convert to a parent parameter.
+
+Prefix a field, instance method, or static-container function with `-` to make
+it protected or `+` to state the default public access. The sign must touch the
+declaration (`-int Cash`, not `- int Cash`). Protected members can be read,
+written, called, named in a `{ Field: value }` initializer, or taken as a
+callback only from inside their declaring container, static containers
+nested in it, and containers that derive from it. File-scope functions and
+nested containers take no prefix.
 
 ## String and name values
 

@@ -10,6 +10,7 @@ Program combineUnits(std::vector<Program> units) {
   for (auto &unit : units) {
     for (auto &record : unit.records) program.records.push_back(std::move(record));
     for (auto &fragment : unit.enums) program.enums.push_back(std::move(fragment));
+    for (auto &field : unit.statics) program.statics.push_back(std::move(field));
     for (auto &function : unit)
       program.push_back(std::move(function));
   }
@@ -82,7 +83,16 @@ std::string compileModule(const Program &program, const Program &imports,
   for (const auto &[name, info] : imported.enums)
     if (symbols.records.count(name) || !symbols.enums.emplace(name, info).second)
       fail(info.declaration, "duplicate type name '" + name + "'");
+  for (auto [name, info] : imported.statics) {
+    info.imported = true;
+    if (symbols.count(name) || !symbols.statics.emplace(name, info).second)
+      fail(info.declaration, "duplicate static field '" + name + "'");
+  }
+  resolveInheritance(symbols);
   validateLayouts(symbols);
+  for (const auto &[name, info] : symbols.statics) symbols.validateType(info.type, info.declaration);
+  resolveFieldDefaults(symbols);
+  resolveStaticInitializers(symbols);
   for (const auto &[name, signature] : imported) {
     symbols.validateType(signature.result, signature.declaration);
     for (const auto &parameter : signature.parameters)
@@ -109,6 +119,7 @@ std::string compileModule(const Program &program, const Program &imports,
   std::vector<FunctionIR> fragments;
   for (size_t i = 0; i < program.size(); ++i)
     fragments.push_back(lowerFunction(program[i], symbols, analyses[i]));
-  return emitRecords(symbols) + emitEnums(symbols) + emitDeclarations(declarations) + assembleModule(fragments, entry, nativeSymbols);
+  return emitRecords(symbols) + emitEnums(symbols) + emitStatics(symbols) +
+         emitDeclarations(declarations) + assembleModule(fragments, entry, nativeSymbols);
 }
 } // namespace duck

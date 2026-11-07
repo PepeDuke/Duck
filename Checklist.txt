@@ -26,12 +26,14 @@ Ownership and null safety
    Proposal: Proposed rule for review: a fresh inferred local consumes an owning result and preserves a borrowed result as an alias. Specify how explicit :: handles a borrowed result before enabling mixed factories; cover both return paths in the factory tutorial.
 
 Containers and namespaces
-[] Parse + and - member access modifiers and enforce protected access.
+[x] Parse + and - member access modifiers and enforce protected access.
    Proposal: Store visibility on each member declaration. Use lexer locations to enforce adjacency of the prefix and member declaration, then check the declaring and accessing container during lookup, including inherited protected access.
-[] Support static data fields.
+[x] Support static data fields.
    Proposal: Collect static fields as qualified symbols and emit storage once in the defining module. Route qualified reads and writes to that storage and specify initialization order before allowing initializers that read other static fields.
-[] Support field initializers and managed string/name fields.
-   Proposal: Keep initializer expressions on field declarations and type-check them against the field type. Generate initialization, copy, assignment, and cleanup for managed records using the text runtime; keep their managed layout out of raw native struct bindings.
+[x] Support field initializers and managed string/name fields.
+   Proposal: Keep initializer expressions on field declarations and type-check them against the field type. Static fields already accept constant initializers; extend them to managed types and, once an order is specified, to initializers that read other static fields. Generate initialization, copy, assignment, and cleanup for managed records using the text runtime; keep their managed layout out of raw native struct bindings.
+[] Allow non-constant field and static initializers.
+   Proposal: Specify static initialization order (declaration order within a module, imported modules first) and run it from a per-module initializer before Main. Evaluate non-constant instance defaults in a generated per-container construction routine shared by default construction and partial initializers. Then lift the restrictions on reading other statics, big defaults other than zero, and container-typed initializers, and decide whether managed containers may live on the heap.
 [] Allow a container to chain static and instance blocks.
    Proposal: Parse a named container followed by a sequence of adjacent bodies, tagging each body as static or instance. Preserve the existing adjacency rule and resolve member calls using the receiver kind.
 [] Merge instance container extensions across declarations and files.
@@ -48,10 +50,10 @@ Construction and object model
    Proposal: Track completed constructor parts in definite-initialization analysis. Compose parent and child parts in a declared order, merge completion facts at branches, and diagnose a method call if any required part may still be missing.
 [] Allow an existing object to be reinitialized by calling its constructor again.
    Proposal: Resolve a call on an existing mutable object as reinitialization. Define cleanup of its previous field values and preserve receiver identity so aliases still refer to the same object after construction completes.
-[] Implement inheritance, multiple parents, and left-to-right parent priority.
-   Proposal: Store ordered parent lists, reject inheritance cycles, and compute each base's field layout and offset. Search inherited members left to right and retain the declaring parent for explicitly qualified access.
+[x] Implement inheritance, multiple parents, and left-to-right parent priority.
+   Proposal: Store ordered parent lists, reject inheritance cycles, and compute each base's field layout and offset. Search inherited members left to right and retain the declaring parent for explicitly qualified access. Extend Analyzer::requireAccess so a derived container can use its parents' protected members.
 [] Implement method overrides, virtual dispatch, and base member calls.
-   Proposal: Identify overridden signatures after the inheritance graph is complete. Emit dispatch slots for overrides and adjust the receiver to the declaring base; lower base calls directly so they bypass the overriding method.
+   Proposal: Identify overridden signatures after the inheritance graph is complete. Emit dispatch slots for overrides and adjust the receiver to the declaring base; lower base calls directly so they bypass the overriding method. Replace the redeclared-member rejection in resolveInheritance with signature matching.
 [] Allow a derived container to satisfy an interface-style parameter.
    Proposal: Use the declared parent relationship to check interface arguments. Pass a reference to the compatible base view and dispatch to the concrete implementation so a call through the parameter preserves overrides.
 [] Implement getter and setter blocks.

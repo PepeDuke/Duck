@@ -227,6 +227,31 @@ class Projects(unittest.TestCase):
         exe = output / ("Demo.exe" if os.name == "nt" else "Demo")
         self.assertEqual(subprocess.check_output([str(exe)], text=True).strip(), "42")
 
+    def test_static_field_storage_is_shared(self):
+        (self.root / "core.dk").write_text(
+            "Stats #{\n int Hits = 40\n Hit() { Hits++ }\n}", encoding="utf-8")
+        (self.root / "app.dk").write_text(
+            "Main() { Stats.Hit()\nStats.Hits += 1\nPrint(Stats.Hits) }", encoding="utf-8")
+        self.invoke()
+        output = self.root / ".duck/build/debug"
+        self.assertIn("@duck$static.Stats.Hits = global i32 40", (output / "core.ll").read_text())
+        self.assertIn("@duck$static.Stats.Hits = external global i32", (output / "app.ll").read_text())
+        exe = output / ("Demo.exe" if os.name == "nt" else "Demo")
+        self.assertEqual(subprocess.check_output([str(exe)], text=True).strip(), "42")
+
+    def test_imported_field_defaults_and_managed_statics(self):
+        (self.root / "core.dk").write_text(
+            "Badge\n{\n string Label = \"core\"\n int Level = 2\n}\n"
+            "Shop #{\n Badge Featured\n name Owner = \"ann\"\n}", encoding="utf-8")
+        (self.root / "app.dk").write_text(
+            "Main() { Badge b()\nPrint(b.Label)\nPrint(Shop.Featured.Label + \"/\" + (string)Shop.Owner)\n"
+            "Shop.Featured.Label = \"app\" + \"!\"\nPrint(Shop.Featured.Level)\nPrint(Shop.Featured.Label) }",
+            encoding="utf-8")
+        self.invoke()
+        exe = self.root / ".duck/build/debug" / ("Demo.exe" if os.name == "nt" else "Demo")
+        self.assertEqual(subprocess.check_output([str(exe)], text=True).splitlines(),
+                         ["core", "core/ann", "2", "app!"])
+
     def test_long_interface(self):
         (self.root / "core.dk").write_text(
             "Bump(int64& n) { n++ }\nlong Twice(long n) { return n * 2 }", encoding="utf-8")

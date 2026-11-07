@@ -206,7 +206,7 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
       }
     }
     if (f.name.text == "Print" || f.name.text == "Length" || f.name.text == "CodeUnitAt" ||
-        !symbols.emplace(f.name.text, Signature{f.result, f.params, f.nativeSymbol, f.name, {}, f.method}).second)
+        !symbols.emplace(f.name.text, Signature{f.result, f.params, f.nativeSymbol, f.name, {}, f.method, f.protectedAccess}).second)
       fail(f.name, "duplicate or reserved function '" + f.name.text + "'");
     if (f.nativeSymbol.empty()) {
       auto &safe = symbols.at(f.name.text).nonescapingParameters;
@@ -218,6 +218,32 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
         if (borrow) safe.insert(i);
       }
     }
+  }
+  for (const auto &field : program.statics) {
+    const auto &name = field.name.text;
+    const auto dot = name.rfind('.');
+    const auto owner = symbols.records.find(name.substr(0, dot));
+    bool clash = symbols.count(name) || symbols.records.count(name);
+    for (const auto &[function, signature] : symbols) {
+      (void)signature;
+      clash = clash || function.rfind(name + ".", 0) == 0;
+    }
+    if (owner != symbols.records.end())
+      for (const auto &instance : owner->second.fields)
+        clash = clash || instance.name.text == name.substr(dot + 1);
+    if (clash || !symbols.statics.emplace(name, StaticInfo{field.name, field.type, field.constant,
+                                                           field.protectedAccess,
+                                                           field.initializer.get()}).second)
+      fail(field.name, "duplicate static field or member '" + name + "'");
+    const auto &t = field.type;
+    if (!(numeric(t) || t == Type::Bool || enumValue(t) || t == Type::Pointer || recordValue(t) ||
+          managedValue(t)))
+      fail(field.name, "static fields of type " + typeName(t) +
+                           " are not supported yet; use a number, bool, enum, string, name, big, "
+                           "void*, or container");
+    if (recordValue(t) && field.initializer)
+      fail(field.name, "container static fields start from the container's defaults; "
+                       "initializers are not supported yet");
   }
   auto main = symbols.find("Main");
   if (requireEntry && main == symbols.end())
@@ -231,6 +257,133 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
   }
   validateNativeSymbols(symbols);
   return symbols;
+}
+bool Symbols::findField(const std::string &record, const std::string &name,
+                        MemberPath &path) const {
+  const auto &fields = records.at(record).fields;
+  for (size_t i = 0; i < fields.size(); ++i)
+    if (fields[i].name.text == name) {
+      path = {{i}, record, &fields[i]};
+      return true;
+    }
+  for (size_t i = 0; i < fields.size(); ++i)
+    if (fields[i].parentView && findField(fields[i].type.record, name, path)) {
+      path.indices.insert(path.indices.begin(), i);
+      return true;
+    }
+  return false;
+}
+Symbols::const_iterator Symbols::findMethod(const std::string &record, const std::string &name,
+                                            MemberPath &path) const {
+  auto found = find(record + "." + name);
+  if (found != end() && found->second.method) {
+    path = {{}, record, nullptr};
+    return found;
+  }
+  const auto &fields = records.at(record).fields;
+  for (size_t i = 0; i < fields.size(); ++i) {
+    if (!fields[i].parentView) continue;
+    auto inherited = findMethod(fields[i].type.record, name, path);
+    if (inherited != end()) {
+      path.indices.insert(path.indices.begin(), i);
+      return inherited;
+    }
+  }
+  return end();
+}
+bool Symbols::managedRecord(const std::string &record) const {
+  for (const auto &field : records.at(record).fields)
+    if (managed(field.type)) return true;
+  return false;
+}
+bool Symbols::derivesFrom(const std::string &record, const std::string &ancestor) const {
+  auto found = records.find(record);
+  if (found == records.end()) return false;
+  for (const auto &parent : found->second.parents)
+    if (parent.text == ancestor || derivesFrom(parent.text, ancestor)) return true;
+  return false;
+}
+namespace {
+void collectVisible(const Symbols &symbols, const std::string &record, std::vector<size_t> prefix,
+                    std::set<std::string> &seen, std::vector<MemberPath> &result) {
+  const auto &fields = symbols.records.at(record).fields;
+  for (size_t i = 0; i < fields.size(); ++i)
+    if (!fields[i].parentView && seen.insert(fields[i].name.text).second) {
+      auto indices = prefix;
+      indices.push_back(i);
+      result.push_back({indices, record, &fields[i]});
+    }
+  for (size_t i = 0; i < fields.size(); ++i)
+    if (fields[i].parentView) {
+      auto indices = prefix;
+      indices.push_back(i);
+      collectVisible(symbols, fields[i].type.record, indices, seen, result);
+    }
+}
+void checkParents(const Symbols &symbols, const std::string &name,
+                  std::set<std::string> &active, std::set<std::string> &complete) {
+  if (complete.count(name)) return;
+  active.insert(name);
+  for (const auto &parent : symbols.records.at(name).parents) {
+    if (!symbols.records.count(parent.text))
+      fail(parent, "unknown parent container '" + parent.text + "'");
+    if (active.count(parent.text))
+      fail(parent, "inheritance cycle through '" + parent.text + "'");
+    checkParents(symbols, parent.text, active, complete);
+  }
+  active.erase(name);
+  complete.insert(name);
+}
+} // namespace
+std::vector<MemberPath> Symbols::visibleFields(const std::string &record) const {
+  std::vector<MemberPath> result;
+  std::set<std::string> seen;
+  collectVisible(*this, record, {}, seen, result);
+  return result;
+}
+void resolveInheritance(Symbols &symbols) {
+  std::set<std::string> active, complete;
+  for (const auto &[name, record] : symbols.records) {
+    std::set<std::string> listed;
+    for (const auto &parent : record.parents)
+      if (!listed.insert(parent.text).second)
+        fail(parent, "duplicate parent '" + parent.text + "'");
+    checkParents(symbols, name, active, complete);
+  }
+  // Each parent's state leads the layout, in priority order, so a pointer
+  // to the derived value reaches its first parent without adjustment.
+  for (auto &[name, record] : symbols.records) {
+    if (record.parents.empty() || (!record.fields.empty() && record.fields.front().parentView))
+      continue;
+    std::vector<Parameter> views;
+    for (const auto &parent : record.parents) {
+      Type type = Type::Record;
+      type.record = parent.text;
+      views.push_back({parent, type, false, true, true});
+    }
+    record.fields.insert(record.fields.begin(), views.begin(), views.end());
+  }
+  // A container may not redeclare an inherited member. Overrides need
+  // virtual dispatch, which is not implemented yet.
+  auto requireNew = [&](const Record &record, const std::string &member, const Token &token) {
+    for (const auto &parent : record.parents) {
+      if (parent.text == member)
+        fail(token, "member '" + member + "' has the name of parent container '" + member + "'");
+      MemberPath path;
+      if (symbols.findField(parent.text, member, path) ||
+          symbols.findMethod(parent.text, member, path) != symbols.end())
+        fail(token, "'" + member + "' is already inherited from '" + path.declaring +
+                        "'; overriding inherited members is not implemented yet");
+    }
+  };
+  for (const auto &[name, record] : symbols.records)
+    for (const auto &field : record.fields)
+      if (!field.parentView) requireNew(record, field.name.text, field.name);
+  for (const auto &[name, signature] : symbols) {
+    if (!signature.method) continue;
+    const auto dot = name.rfind('.');
+    requireNew(symbols.records.at(name.substr(0, dot)), name.substr(dot + 1), signature.declaration);
+  }
 }
 namespace {
 void validateLayout(const Symbols &symbols, const Record &record,
@@ -252,6 +405,15 @@ void validateLayouts(const Symbols &symbols) {
   std::set<std::string> active, complete;
   for (const auto &[name, record] : symbols.records)
     validateLayout(symbols, record, active, complete);
+  // Managed storage has a compiler-private layout and reference counts that
+  // native code would bypass, so it never crosses a native boundary.
+  for (const auto &[name, signature] : symbols) {
+    (void)name;
+    if (signature.nativeSymbol.empty()) continue;
+    for (const auto &p : signature.parameters)
+      if (recordValue(p.type) && symbols.managedRecord(p.type.record))
+        fail(p.name, "native parameters cannot reference a container with string, name, or big fields");
+  }
 }
 void validateNativeSymbols(const Symbols &symbols) {
   std::map<std::string, const Signature *> native;

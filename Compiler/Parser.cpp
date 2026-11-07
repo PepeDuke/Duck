@@ -475,12 +475,25 @@ class Parser {
     }
     return f;
   }
-  void containerBody(Program &program, Token tag) {
+  // A '+' (public, the default) or '-' (protected) prefix must touch the
+  // member it modifies, as in -int Cash or -Helper().
+  bool accessModifier() {
+    if (!at("+") && !at("-")) return false;
+    const auto sign = pop();
+    const auto &next = peek();
+    if (next.string || next.text == "\n" || next.text == "<eof>" ||
+        next.source != sign.source || next.line != sign.line || next.column != sign.column + 1)
+      fail(sign, "access modifier '" + sign.text +
+                     "' must be written directly before the member, without spaces");
+    return sign.text == "-";
+  }
+  void containerBody(Program &program, Token tag, std::vector<Token> parents) {
     expect("{");
-    Record record{tag, {}};
+    Record record{tag, {}, std::move(parents)};
     std::set<std::string> members;
     lines();
     while (!accept("}")) {
+      const bool isProtected = accessModifier();
       bool typed = declarationType();
       Type t = typed ? type() : Type(Type::Void);
       auto name = identifier();
@@ -490,11 +503,13 @@ class Parser {
         if (name.text == tag.text) fail(name, "custom constructors are not implemented");
         name.text = tag.text + "." + name.text;
         program.push_back(function(std::move(name), t, false, "", tag.text));
+        program.back().protectedAccess = isProtected;
       } else {
-        if (!typed || t == Type::Void || managedValue(t))
-          fail(name, "container fields require an unmanaged value type");
-        if (at("=")) fail(name, "container field defaults are not implemented");
-        record.fields.push_back({name, t});
+        if (!typed || t == Type::Void)
+          fail(name, "container fields require a known value type");
+        std::shared_ptr<Expr> initializer;
+        if (accept("=")) initializer = expression();
+        record.fields.push_back({name, t, false, isProtected, false, std::move(initializer)});
       }
       if (!at("}") && !at("\n")) fail(peek(), "expected member terminator");
       lines();
@@ -502,6 +517,19 @@ class Parser {
     program.records.push_back(std::move(record));
   }
 
+  // After a file-scope name, ':' starts either an enum (`Name : type #@{`)
+  // or a parent list (`Name : Parent, Other {`). Whichever of '#' or '{'
+  // comes first decides.
+  bool parentList() const {
+    if (!at(":")) return false;
+    for (size_t i = pos + 1; i < tokens.size(); ++i) {
+      const auto &t = tokens[i];
+      if (t.string) continue;
+      if (t.text == "{") return true;
+      if (t.text == "#" || t.text == "<eof>") return false;
+    }
+    return false;
+  }
   bool enumBlock() const {
     return at("#") && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == "@";
   }
@@ -534,6 +562,10 @@ class Parser {
                     bool nested) {
     lines();
     while (!at("<eof>") && !(nested && at("}"))) {
+      const auto modifier = peek();
+      const bool modified = at("+") || at("-");
+      if (modified && !nested) fail(modifier, "access modifiers apply only to container members");
+      const bool isProtected = accessModifier();
       bool external = accept("extern");
       if (external) {
         if (!peek().string || peek().character || peek().text != "C")
@@ -544,6 +576,20 @@ class Parser {
         auto saved = pos;
         auto tag = identifier();
         lines();
+        if (parentList() || at("{")) {
+          if (nested) fail(tag, "container definitions must be at file scope");
+          std::vector<Token> parents;
+          if (accept(":"))
+            do {
+              lines();
+              parents.push_back(identifier());
+              lines();
+            } while (accept(","));
+          containerBody(functions, tag, std::move(parents));
+          if (!at("<eof>") && !at("\n")) fail(peek(), "expected container terminator");
+          lines();
+          continue;
+        }
         if (at(":") || enumBlock()) {
           if (nested) fail(tag, "enum declarations must be at file scope");
           enumFragment(functions, tag);
@@ -551,23 +597,37 @@ class Parser {
           lines();
           continue;
         }
-        if (at("{")) {
-          if (nested) fail(tag, "container definitions must be at file scope");
-          containerBody(functions, tag);
-          if (!at("<eof>") && !at("\n")) fail(peek(), "expected container terminator");
-          lines();
-          continue;
-        }
         pos = saved;
       }
+      // In a static block, `#int Max = 10` declares a constant static field.
+      const auto constantToken = peek();
+      const bool constant = nested && !external && accept("#");
+      if (constant && !declarationType())
+        fail(peek(), "constant static field requires an explicit type");
       bool typed = declarationType();
       Type result = typed ? type() : Type::Void;
       Token name = identifier();
+      if (nested && !external && typed && !at("(")) {
+        if (result == Type::Void) fail(name, "static field cannot have void type");
+        name.text = prefix + name.text;
+        StaticField field{name, result, constant, isProtected, nullptr};
+        if (accept("="))
+          field.initializer = expression();
+        else if (constant)
+          fail(peek(), "constant '" + name.text + "' requires an initializer, as in #int Max = 10");
+        functions.statics.push_back(std::move(field));
+        if (!at("\n") && !at("}")) fail(peek(), "expected newline after static field");
+        lines();
+        continue;
+      }
+      if (constant) fail(constantToken, "'#' before a member declares a constant static field");
       if (!external && !typed && (at(":") || enumBlock()))
         fail(name, "enum declarations must be at file scope");
       if (!external && !typed && !at("(")) {
         lines();
         if (accept("#")) {
+          if (modified)
+            fail(modifier, "access modifiers on nested containers are not supported");
           const auto container = prefix + name.text + ".";
           do {
             lines();
@@ -589,6 +649,7 @@ class Parser {
       name.text = prefix + name.text;
       auto nativeName = name.text.substr(prefix.size());
       functions.push_back(function(std::move(name), result, external, nativeName));
+      functions.back().protectedAccess = isProtected;
       if (!at("<eof>") && !at("\n") && !(nested && at("}")))
         fail(peek(), "expected newline between functions");
       lines();
@@ -623,16 +684,20 @@ void collectContainerNames(const std::vector<Token> &tokens, std::set<std::strin
       const auto &after = tokens[next].text;
       if (after == "{")
         names.insert(t.text);
-      // Only an enum puts ':' after a file-scope name; an extension may omit
-      // it. Skip the underlying type so a type word is never taken as a name.
+      // ':' after a file-scope name starts an enum's underlying type or a
+      // container's parent list; an enum extension may omit it. A parent list
+      // reaches '{' before any '#'. Skip the list or type so its words are
+      // never taken as declared names.
       else if (after == ":" || (after == "#" && next + 1 < tokens.size() &&
                                 !tokens[next + 1].string && tokens[next + 1].text == "@")) {
+        size_t end = next;
+        while (end < tokens.size() && (tokens[end].string || (tokens[end].text != "#" &&
+               tokens[end].text != "{" && tokens[end].text != "<eof>")))
+          ++end;
         names.insert(t.text);
-        names.insert("#@" + t.text);
-        while (i + 1 < tokens.size() && !tokens[i + 1].string &&
-               tokens[i + 1].text != "#" && tokens[i + 1].text != "{" &&
-               tokens[i + 1].text != "<eof>")
-          ++i;
+        if (!(after == ":" && end < tokens.size() && tokens[end].text == "{"))
+          names.insert("#@" + t.text);
+        i = end - 1;
       }
     }
   }

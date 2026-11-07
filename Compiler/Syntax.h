@@ -162,6 +162,15 @@ struct Parameter {
   Token name;
   Type type;
   bool reference = false;
+  bool protectedAccess = false; // A container field declared with '-'.
+  // A synthesized leading field holding a parent's state, named after the
+  // parent. Protected, so `this.Parent` is reachable only from derived code.
+  bool parentView = false;
+  // A container field's default, a compile-time constant. Shared so field
+  // lists stay copyable; initialValue is its LLVM constant once resolved,
+  // or empty for a string/name literal emitted from the expression.
+  std::shared_ptr<Expr> initializer;
+  std::string initialValue;
 };
 struct Function {
   Token name;
@@ -170,10 +179,12 @@ struct Function {
   std::vector<std::unique_ptr<Stmt>> body;
   bool method = false;
   std::string nativeSymbol; // Nonempty for a bodyless extern "C" declaration.
+  bool protectedAccess = false; // A container member declared with '-'.
 };
 struct Record {
   Token name;
   std::vector<Parameter> fields;
+  std::vector<Token> parents; // In priority order, leftmost first.
 };
 struct EnumMember {
   Token name;
@@ -186,8 +197,18 @@ struct EnumFragment {
   Type type = Type::Void; // Void when this fragment omits the underlying type.
   std::vector<EnumMember> members;
 };
+// A field declared in a static block, as in `Math #{ int Count = 0 }`. The
+// name is qualified by its enclosing containers, like a static function.
+struct StaticField {
+  Token name;
+  Type type;
+  bool constant = false;
+  bool protectedAccess = false;
+  std::unique_ptr<Expr> initializer; // Null for zero initialization.
+};
 struct Program : std::vector<Function> {
   std::vector<Record> records;
   std::vector<EnumFragment> enums;
+  std::vector<StaticField> statics;
 };
 } // namespace duck

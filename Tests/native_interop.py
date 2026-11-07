@@ -223,7 +223,7 @@ class NativeInterop(unittest.TestCase):
             ('S { int x }\nMain() { S s\nS* p = &s\np->x = 1 }', "expected identifier"),
             ('S { int x }\nMain() { S* p = null\nS** pp = &p\npp.x = 1 }', "pointer to a container"),
             ('S { S child }', "recursive container"),
-            ('S { T* other }', "container fields require an unmanaged value type"),
+            ('S { T* other }', "container fields require a known value type"),
             ('Main() { int n = 1\ndouble* p = &n }', "type mismatch"),
             ('Main() { int n\nint* p = &n }', "before assignment"),
             ('Main() { #int n = 1\nint* p = &n }', "constant"),

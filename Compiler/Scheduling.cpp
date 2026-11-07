@@ -104,7 +104,8 @@ std::set<std::string> isolatedFunctions(const Program &program,
     const auto &f = program[i];
     if (!candidate(f)) continue;
     const auto &a = analyses[i];
-    bool known = true;
+    // Static storage is shared by every thread.
+    bool known = a.staticFields.empty();
     for (const auto &[expr, type] : a.expressionTypes)
       // Builtins and construction have no call target; Print is an external effect.
       known = known && plainValue(type) && (expr->kind != "call" || a.callTargets.count(expr));

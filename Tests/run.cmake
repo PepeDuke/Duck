@@ -646,11 +646,268 @@ reject(container_duplicate "Math #{ F() {} }\nMath #{ F() {} }\nMain() {}" "dupl
 reject(container_missing "Math #{ F() {} }\nMain() { Math.Missing() }" "unknown function")
 reject(container_no_global_entry "Math #{ Main() {} }" "program requires Main")
 reject(container_private_lookup "Math #{ F() {} }\nMain() { F() }" "unknown function")
-reject(container_instance "Math { int n = 1 }\nMain() {}" "field defaults")
-reject(container_field "Math #{ int n = 1 }\nMain() {}" "expected '\\('")
+reject(container_instance "Math { int n = 1 + 1 }\nMain() {}" "field initializer must be a literal")
+reject(container_field "Math #{ #F() {} }\nMain() {}" "constant static field requires an explicit type")
+run_program(static_fields [=[
+Point
+{
+    int X
+    int Y
+    Move(int d) { X += d }
+}
+Size : int #@{ Small, Large }
+Game #{
+    int Score = 10
+    #int Max = 100
+    long Big = int.Max
+    double Speed = 2
+    float Gravity = -9.5
+    bool Running = true
+    Size Mode = Size.Large
+    Point Origin
+    int Zero
+    -int Secret = 7
+    void* Handle = null
+    Add(int n) { Score += n }
+    int Reveal() { return Secret }
+    Level #{
+        int Number = 3
+        int Twice() { return Number * 2 + Score }
+    }
+}
+Main()
+{
+    Game.Add(5)
+    Print(Game.Score)
+    Print(Game.Max)
+    Print(Game.Big)
+    Print(Game.Speed)
+    Print(Game.Gravity)
+    Print(Game.Running)
+    Print(Game.Mode)
+    Game.Origin.Move(4)
+    Game.Origin.Y = 2
+    Print(Game.Origin.X + Game.Origin.Y + Game.Zero)
+    Print(Game.Reveal())
+    Game.Level.Number++
+    Print(Game.Level.Twice())
+    Print(Game.Handle == null)
+    int Score = 1
+    Print(Score)
+}
+]=] "15\n100\n2147483647\n2\n-9.5\n1\nLarge\n6\n7\n23\n1\n1\n")
+reject(static_constant_write "Game #{ #int Max = 1 }\nMain() { Game.Max = 2 }" "cannot modify constant")
+reject(static_constant_missing "Game #{ #int Max }\nMain() {}" "requires an initializer")
+reject(static_protected "Game #{ -int Secret }\nMain() { Print(Game.Secret) }" "'Secret' is a protected member of 'Game'")
+reject(static_reads_static "Game #{ int A = 1\nint B = A }\nMain() {}" "field initializers cannot read static fields")
+reject(static_nonconstant "Game #{ int A = 1 + 2 }\nMain() {}" "field initializer must be a literal, type limit, or enum member")
+reject(static_out_of_range "Game #{ byte A = 300 }\nMain() {}" "out of range")
+reject(static_managed "Game #{ cstring Title }\nMain() {}" "static fields of type cstring are not supported yet")
+run_program(field_defaults [=[
+Named
+{
+    string Title = "Duck"
+    name Tag = "tag"
+    int Count = 3
+    big Total
+    string Note
+    Rename(string s) { Title = s }
+}
+Pair
+{
+    Named Left
+    Named Right
+    double Weight = 1.5
+}
+Hero : Named
+{
+    string Motto = "quack"
+}
+Registry #{
+    string Banner = "Welcome"
+    name Code
+    Named Last
+}
+Named Make(string s)
+{
+    Named n()
+    n.Title = s + "!"
+    return n
+}
+string Describe(Named n)
+{
+    return n.Title + "/" + (string)n.Tag
+}
+Main()
+{
+    Named a()
+    Print(a.Title)
+    Print(a.Count)
+    Named b = a
+    b.Rename("Goose" + "!")
+    Print(a.Title)
+    a = b
+    b.Title = "Swan"
+    Print(a.Title)
+    Print(Describe(a))
+    Named c = Make("Made")
+    Print(c.Title)
+    Make("Gone").Rename("x")
+    Named d = {Count: 9}
+    Print(d.Title)
+    Print(d.Count)
+    Print(Length(d.Note))
+    Print(d.Total + 1)
+    Pair p()
+    p.Left.Title = "L" + "eft"
+    p.Right = p.Left
+    Print(p.Right.Title)
+    Print(p.Weight)
+    Hero h()
+    Print(h.Title + " " + h.Motto)
+    Registry.Banner = Registry.Banner + "!"
+    Registry.Last = c
+    Print(Registry.Banner + " " + Registry.Last.Title)
+    Print(Length(Registry.Code))
+    for i : 0; i < 1000; i++ {
+        Named t = Make("loop")
+        Pair q()
+        q.Left = t
+        q.Right = q.Left
+        t = q.Right
+    }
+}
+]=] "Duck\n3\nDuck\nGoose!\nGoose!/tag\nMade!\nDuck\n9\n0\n1\nLeft\n1.5\nDuck quack\nWelcome! Made!\n0\n")
+reject(field_default_type "A { int n = \"x\" }\nMain() {}" "type mismatch")
+reject(field_default_reads_static "G #{ int S = 1 }\nA { int n = G.S }\nMain() {}" "field initializers cannot read static fields")
+reject(field_default_reads_field "A { int m = 1\nint n = m }\nMain() {}" "unknown variable 'm'")
+reject(field_default_container "P { int x }\nA { P p = {x: 1} }\nMain() {}" "container-typed fields start from that container's defaults")
+reject(static_container_initializer "P { int x }\nG #{ P p = {x: 1} }\nMain() {}" "container static fields start from the container's defaults")
+reject(managed_heap_container "A { string s }\nMain() { A* p() }" "heap containers with string, name, or big fields")
+reject(managed_heap_copy "A { string s }\nMain() { A a()\nA* p = a }" "heap containers with string, name, or big fields")
+reject(managed_pointer_cast "A { string s }\nMain() { void* v = null\nA* p = (A*)v }" "cannot cast to a pointer to a container with string, name, or big fields")
+reject(managed_inherited_cast "A { name s }\nB : A { int x }\nMain() { void* v = null\nB* p = (B*)v }" "cannot cast to a pointer")
+reject(managed_native_reference "A { string s }\nextern \"C\" F(A& a)\nMain() {}" "native parameters cannot reference a container with string, name, or big fields")
+reject(managed_native_nested "A { string s }\nB { A a }\nextern \"C\" F(B& b)\nMain() {}" "native parameters cannot reference")
+reject(static_duplicate "Game #{ int A\nint A }\nMain() {}" "duplicate static field or member 'Game.A'")
+reject(static_function_clash "Game #{ int A\nA() {} }\nMain() {}" "duplicate static field or member 'Game.A'")
+reject(static_void "Game #{ void A }\nMain() {}" "static field cannot have void type")
+reject(static_file_scope "int Count = 1\nMain() {}" "expected '\\('")
 reject(container_separated_chain "Math #{}\n\n#{}\nMain() {}" "expected identifier")
 reject(container_unclosed "Math #{ F() {}" "expected '}'")
 reject(container_reference "Math #{ F(int& n) {} }\nMain() { Math.F(1) }" "must be a mutable variable")
+run_program(protected_members [=[
+Account
+{
+    -int Cash
+    +int Limit
+    -int Bonus()
+    {
+        return 5
+    }
+    Fill(int amount)
+    {
+        Cash = amount
+        Limit = Bonus()
+    }
+    int Total()
+    {
+        return Cash + Bonus()
+    }
+}
+Vault #{
+    -int Secret()
+    {
+        return 41
+    }
+    +int Open()
+    {
+        return Secret() + 1
+    }
+    Inner #{
+        int Peek()
+        {
+            return Secret()
+        }
+    }
+}
+Main()
+{
+    Account account()
+    account.Fill(10)
+    Print(account.Total())
+    Print(account.Limit)
+    Print(Vault.Open())
+    Print(Vault.Inner.Peek())
+}
+]=] "15\n5\n42\n41\n")
+reject(protected_field_read "Account { -int Cash }\nMain() { Account a()\nPrint(a.Cash) }" "'Cash' is a protected member of 'Account'")
+reject(protected_field_write "Account { -int Cash }\nMain() { Account a()\na.Cash = 1 }" "'Cash' is a protected member of 'Account'")
+reject(protected_field_initializer "Account { -int Cash }\nMain() { Account a = {Cash: 1} }" "'Cash' is a protected member of 'Account'")
+reject(protected_method "Account { -int Bonus() { return 5 } }\nMain() { Account a()\nPrint(a.Bonus()) }" "'Bonus' is a protected member of 'Account'")
+reject(protected_static "Vault #{ -int Secret() { return 1 } }\nMain() { Print(Vault.Secret()) }" "'Secret' is a protected member of 'Vault'")
+reject(protected_static_sibling "A #{ -int S() { return 1 } }\nB #{ int T() { return A.S() } }\nMain() {}" "'S' is a protected member of 'A'")
+reject(protected_callback "Vault #{ -int Secret() { return 1 } }\nMain() { void* p = &Vault.Secret }" "'Secret' is a protected member of 'Vault'")
+reject(access_modifier_space "Account { - int Cash }\nMain() {}" "access modifier '-' must be written directly before the member")
+reject(access_modifier_newline "Vault #{ +\nF() {} }\nMain() {}" "access modifier '\\+' must be written directly before the member")
+reject(access_modifier_file_scope "-F() {}\nMain() {}" "access modifiers apply only to container members")
+reject(access_modifier_nested_container "Vault #{ -Inner #{} }\nMain() {}" "access modifiers on nested containers")
+run_program(inheritance [=[
+Animal
+{
+    -int Legs
+    Walk() { Print("animal") }
+    SetLegs(int n) { Legs = n }
+}
+Human
+{
+    int Height
+    Walk() { Print("human") }
+    Eat() { Print("eat") }
+}
+Cat : Animal,
+      Human
+{
+    int Lives
+    Demonstrate()
+    {
+        Walk()
+        Eat()
+        this.Human.Walk()
+        Legs = 4
+        Lives = 9
+        Print(Legs + Height + Lives)
+    }
+}
+Kitten : Cat
+{
+    int ReadLegs() { return Legs }
+}
+Size : int #@{ Small }
+Main()
+{
+    Cat cat = {Lives: 1, Height: 30}
+    cat.Demonstrate()
+    cat.Walk()
+    Kitten kitten()
+    kitten.SetLegs(3)
+    kitten.Height = 7
+    Print(kitten.ReadLegs())
+    Print(kitten.Height)
+    Print(Size.Small)
+}
+]=] "animal\neat\nhuman\n43\nanimal\n3\n7\nSmall\n")
+reject(inheritance_cycle "A : B { int x }\nB : A { int y }\nMain() {}" "inheritance cycle through")
+reject(inheritance_self "A : A { int x }\nMain() {}" "inheritance cycle through 'A'")
+reject(inheritance_unknown_parent "A : Missing { int x }\nMain() {}" "unknown parent container 'Missing'")
+reject(inheritance_enum_parent "E : int #@{ V }\nA : E { int x }\nMain() {}" "unknown parent container 'E'")
+reject(inheritance_duplicate_parent "A { int x }\nB : A, A { int y }\nMain() {}" "duplicate parent 'A'")
+reject(inheritance_override "A { F() {} }\nB : A { F() {} }\nMain() {}" "'F' is already inherited from 'A'")
+reject(inheritance_field_redeclared "A { int x }\nB : A { int x }\nMain() {}" "'x' is already inherited from 'A'")
+reject(inheritance_parent_name_member "A { int x }\nB : A { int A }\nMain() {}" "has the name of parent container 'A'")
+reject(inheritance_protected_outside "A { -int x }\nB : A { int y }\nMain() { B b()\nPrint(b.x) }" "'x' is a protected member of 'A'")
+reject(inheritance_parent_view_outside "A { F() {} }\nB : A { int y }\nMain() { B b()\nb.A.F() }" "'A' is a protected member of 'B'")
+reject(inheritance_view_initializer "A { int x }\nB : A { int y\nF() { B b = {A: {x: 1}} } }\nMain() {}" "initialize inherited fields by name")
 file(READ "${SOURCE}/Examples/Bootstrap/08_LongIntegers.dk" long_integers)
 run_program(long_integers "${long_integers}" "5000000001\n10000000002\n-9223372036854775808\n")
 run_program(long_arithmetic [=[
