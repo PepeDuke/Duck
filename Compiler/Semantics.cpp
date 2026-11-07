@@ -254,8 +254,7 @@ class Analyzer {
     const auto &name = function->first;
     const auto dot = name.rfind('.');
     if (dot != std::string::npos)
-      requireAccess(function->second.protectedAccess, name.substr(0, dot),
-                    name.substr(dot + 1), token);
+      requireAccess(function->second.protectedAccess, name.substr(0, dot), memberName(name), token);
   }
   Symbols::const_iterator resolve(const std::string &op) const {
     auto found = symbols.end();
@@ -648,8 +647,15 @@ class Analyzer {
         t.record = op;
         return t;
       }
-      if (found == symbols.end())
+      if (found == symbols.end()) {
+        // Meter.Read() or a bare Read() in a static body naming an instance method.
+        const auto dot = op.rfind('.');
+        const auto owner = dot == std::string::npos ? container : op.substr(0, dot);
+        if (!instance && symbols.records.count(owner) &&
+            symbols.count(methodKey(owner, op.substr(dot == std::string::npos ? 0 : dot + 1))))
+          fail(e.token, "'" + op + "' is an instance method; call it on a '" + owner + "' object");
         fail(e.token, "unknown function '" + op + "'");
+      }
       requireAccess(found, e.token);
       analysis.callTargets[&e] = found->first;
       const auto &signature = found->second;

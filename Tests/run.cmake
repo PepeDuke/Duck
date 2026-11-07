@@ -793,7 +793,61 @@ reject(static_duplicate "Game #{ int A\nint A }\nMain() {}" "duplicate static fi
 reject(static_function_clash "Game #{ int A\nA() {} }\nMain() {}" "duplicate static field or member 'Game.A'")
 reject(static_void "Game #{ void A }\nMain() {}" "static field cannot have void type")
 reject(static_file_scope "int Count = 1\nMain() {}" "expected '\\('")
-reject(container_separated_chain "Math #{}\n\n#{}\nMain() {}" "expected identifier")
+reject(container_separated_chain "Math #{}\n\n#{}\nMain() {}" "chained container bodies must be adjacent")
+reject(container_separated_instance "Math #{}\n\n{ int x }\nMain() {}" "chained container bodies must be adjacent")
+file(READ "${SOURCE}/Examples/Tutorial/04_ContainersAndStaticBlocks.dk" containers_tutorial)
+run_program(containers_tutorial "${containers_tutorial}" "7\n14\n")
+run_program(container_chain [=[
+Animal
+{
+    Walk() { Print("walk") }
+}
+Example : Animal
+#{
+    int Created
+    Foo() { Print("static foo") }
+    Example Make()
+    {
+        Created++
+        Foo()
+        Example e()
+        return e
+    }
+}
+{
+    int Value = 7
+    Foo()
+    {
+        Print("instance foo")
+        Walk()
+    }
+    int Read() { return Value + Created }
+}
+#{
+    int Twice(int n) { return n * 2 }
+}
+#{}
+{
+    Bump() { Value++ }
+}
+Main()
+{
+    Example.Foo()
+    Example e = Example.Make()
+    e.Foo()
+    e.Bump()
+    Print(e.Read())
+    Print(Example.Twice(e.Value))
+}
+]=] "static foo\nstatic foo\ninstance foo\nwalk\n9\n16\n")
+reject(chain_static_calls_instance "A\n#{\n int S() { return Read() }\n}\n{\n int Read() { return 1 }\n}\nMain() {}" "'Read' is an instance method; call it on a 'A' object")
+reject(chain_type_calls_instance "A { int Read() { return 1 } }\nMain() { Print(A.Read()) }" "'A.Read' is an instance method")
+reject(chain_instance_calls_static "A\n#{\n int S() { return 1 }\n}\n{\n int x\n}\nMain() { A a()\nPrint(a.S()) }" "unknown instance method")
+reject(chain_duplicate_instance_member "A { int x }\n{ int x }\nMain() {}" "duplicate container member")
+reject(chain_duplicate_static_member "A #{ F() {} }\n#{ F() {} }\nMain() {}" "duplicate or reserved function")
+reject(chain_parents_without_instance "A : B #{}\nB { int x }\nMain() {}" "a parent list requires an instance body")
+reject(chain_nested_instance "Outer #{\n Inner #{}\n {}\n}\nMain() {}" "instance containers must be declared at file scope")
+run_program(chain_constant_after_nested "Outer #{\n Inner #{}\n #int Max = 1\n}\nMain() { Print(Outer.Max) }" "1\n")
 reject(container_unclosed "Math #{ F() {}" "expected '}'")
 reject(container_reference "Math #{ F(int& n) {} }\nMain() { Math.F(1) }" "must be a mutable variable")
 run_program(protected_members [=[

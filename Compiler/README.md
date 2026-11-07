@@ -292,6 +292,19 @@ them through `this`. Declare and use the type by its name alone, such as `Exampl
 Static function groups continue to use `#{}`. Custom constructors,
 properties, overrides, and virtual dispatch remain future work.
 
+A container name can be followed by a chain of bodies in any order: `{ ... }`
+for instance members and `#{ ... }` for static ones, as in
+`Meter { ... }` then `#{ ... }` on the next line. Bodies must be adjacent,
+separated by at most one newline; a blank line between them is an error. A
+parent list goes before the first body, and a chain that has a parent list
+needs at least one instance body. Instance bodies are allowed only at file
+scope. Static and instance members are separate namespaces, so both kinds can
+declare `Foo()`: `meter.Foo()` and a bare `Foo()` in an instance method call the
+instance one, while `Meter.Foo()` and a bare `Foo()` in a static body call the
+static one. Instance methods can also use the chain's static fields by their
+bare names. Merging separate declarations of the same container is not
+supported yet.
+
 Fields can declare defaults, as in `int Count = 3` or `string Title = "Duck"`.
 A default must be a compile-time constant of the field's type: a literal, a
 negated literal, `null`, a type limit such as `int.Max`, an enum member, or a

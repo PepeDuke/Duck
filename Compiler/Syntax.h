@@ -172,6 +172,17 @@ struct Parameter {
   std::shared_ptr<Expr> initializer;
   std::string initialValue;
 };
+// Instance methods live in their own namespace, so a chained static block
+// can declare a function with the same name: Meter.Read is static and
+// Meter.$Read is the instance method, chosen by the receiver's kind.
+inline std::string methodKey(const std::string &record, const std::string &member) {
+  return record + ".$" + member;
+}
+// The member name of a qualified function key, without the method marker.
+inline std::string memberName(const std::string &key) {
+  auto member = key.substr(key.rfind('.') + 1);
+  return !member.empty() && member[0] == '$' ? member.substr(1) : member;
+}
 struct Function {
   Token name;
   Type result;

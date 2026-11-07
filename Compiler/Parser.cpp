@@ -487,10 +487,10 @@ class Parser {
                      "' must be written directly before the member, without spaces");
     return sign.text == "-";
   }
-  void containerBody(Program &program, Token tag, std::vector<Token> parents) {
+  // One instance body. Members accumulate across the chain's instance bodies.
+  void containerBody(Program &program, Record &record, std::set<std::string> &members) {
+    const auto &tag = record.name;
     expect("{");
-    Record record{tag, {}, std::move(parents)};
-    std::set<std::string> members;
     lines();
     while (!accept("}")) {
       const bool isProtected = accessModifier();
@@ -501,7 +501,7 @@ class Parser {
       if (name.text == "this") fail(name, "this is reserved for the receiver");
       if (at("(")) {
         if (name.text == tag.text) fail(name, "custom constructors are not implemented");
-        name.text = tag.text + "." + name.text;
+        name.text = methodKey(tag.text, name.text);
         program.push_back(function(std::move(name), t, false, "", tag.text));
         program.back().protectedAccess = isProtected;
       } else {
@@ -514,7 +514,47 @@ class Parser {
       if (!at("}") && !at("\n")) fail(peek(), "expected member terminator");
       lines();
     }
-    program.records.push_back(std::move(record));
+  }
+  // `#{` starts a static body.
+  bool staticBody() const {
+    return at("#") && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == "{";
+  }
+  // A container name followed by adjacent bodies in any order: `{ ... }`
+  // holds instance members and `#{ ... }` static ones. Bodies are separated
+  // by at most one newline; a blank line ends the chain and is rejected.
+  void containerChain(Program &program, const Token &tag, std::vector<Token> parents,
+                      const std::string &prefix, bool nested) {
+    Record record{tag, {}, std::move(parents)};
+    std::set<std::string> members;
+    bool instance = false;
+    for (bool first = true;; first = false) {
+      if (!first) {
+        auto saved = pos;
+        accept("\n");
+        if (at("\n")) {
+          lines();
+          if (at("{") || staticBody())
+            fail(peek(), "chained container bodies must be adjacent, without a blank line");
+        }
+        if (!at("{") && !staticBody()) {
+          pos = saved;
+          break;
+        }
+      }
+      if (accept("#")) {
+        declarations(program, prefix + tag.text + ".", true, true);
+        continue;
+      }
+      if (nested) fail(tag, "instance containers must be declared at file scope");
+      containerBody(program, record, members);
+      instance = true;
+    }
+    if (instance) program.records.push_back(std::move(record));
+    else if (!record.parents.empty())
+      fail(record.parents.front(), "a parent list requires an instance body");
+    if (!at("<eof>") && !at("\n") && !(nested && at("}")))
+      fail(peek(), "expected newline after container");
+    lines();
   }
 
   // After a file-scope name, ':' starts either an enum (`Name : type #@{`)
@@ -526,7 +566,10 @@ class Parser {
       const auto &t = tokens[i];
       if (t.string) continue;
       if (t.text == "{") return true;
-      if (t.text == "#" || t.text == "<eof>") return false;
+      // An enum continues with `#@{`; a parent list may start with a static body.
+      if (t.text == "#")
+        return i + 1 < tokens.size() && !tokens[i + 1].string && tokens[i + 1].text == "{";
+      if (t.text == "<eof>") return false;
     }
     return false;
   }
@@ -558,8 +601,10 @@ class Parser {
     program.enums.push_back(std::move(fragment));
   }
 
+  // With braced, reads one `{ ... }` static body; otherwise reads to <eof>.
   void declarations(Program &functions, const std::string &prefix,
-                    bool nested) {
+                    bool nested, bool braced = false) {
+    if (braced) expect("{");
     lines();
     while (!at("<eof>") && !(nested && at("}"))) {
       const auto modifier = peek();
@@ -576,18 +621,18 @@ class Parser {
         auto saved = pos;
         auto tag = identifier();
         lines();
-        if (parentList() || at("{")) {
-          if (nested) fail(tag, "container definitions must be at file scope");
+        if (parentList() || at("{") || staticBody()) {
+          if (modified) fail(modifier, "access modifiers on nested containers are not supported");
           std::vector<Token> parents;
-          if (accept(":"))
+          if (accept(":")) {
+            if (nested) fail(tag, "instance containers must be declared at file scope");
             do {
               lines();
               parents.push_back(identifier());
               lines();
             } while (accept(","));
-          containerBody(functions, tag, std::move(parents));
-          if (!at("<eof>") && !at("\n")) fail(peek(), "expected container terminator");
-          lines();
+          }
+          containerChain(functions, tag, std::move(parents), prefix, nested);
           continue;
         }
         if (at(":") || enumBlock()) {
@@ -625,24 +670,10 @@ class Parser {
         fail(name, "enum declarations must be at file scope");
       if (!external && !typed && !at("(")) {
         lines();
-        if (accept("#")) {
+        if (staticBody() || at("{")) {
           if (modified)
             fail(modifier, "access modifiers on nested containers are not supported");
-          const auto container = prefix + name.text + ".";
-          do {
-            lines();
-            expect("{");
-            declarations(functions, container, true);
-            expect("}");
-            // Chained blocks must be adjacent, with at most one newline.
-            auto saved = pos;
-            accept("\n");
-            if (!at("#"))
-              pos = saved;
-          } while (accept("#"));
-          if (!at("<eof>") && !at("\n") && !(nested && at("}")))
-            fail(peek(), "expected newline after static container");
-          lines();
+          containerChain(functions, name, {}, prefix, nested);
           continue;
         }
       }
@@ -654,6 +685,7 @@ class Parser {
         fail(peek(), "expected newline between functions");
       lines();
     }
+    if (braced) expect("}");
   }
 
 public:
@@ -682,7 +714,32 @@ void collectContainerNames(const std::vector<Token> &tokens, std::set<std::strin
       while (next < tokens.size() && tokens[next].text == "\n" && !tokens[next].string) ++next;
       if (next >= tokens.size() || tokens[next].string) continue;
       const auto &after = tokens[next].text;
-      if (after == "{")
+      // A chain of `#{...}` bodies names a type once it reaches a `{...}` body.
+      auto body = [&](size_t k) {
+        if (k >= tokens.size() || tokens[k].string) return std::string::npos;
+        if (tokens[k].text == "{") return k;
+        if (tokens[k].text == "#" && k + 1 < tokens.size() && !tokens[k + 1].string &&
+            tokens[k + 1].text == "{")
+          return k + 1;
+        return std::string::npos;
+      };
+      bool chainedInstance = false;
+      for (size_t k = next, open; !chainedInstance && (open = body(k)) != std::string::npos;) {
+        if (open == k) {
+          chainedInstance = true;
+          break;
+        }
+        int nesting = 0;
+        size_t close = open;
+        for (; close < tokens.size(); ++close) {
+          if (tokens[close].string) continue;
+          if (tokens[close].text == "{") ++nesting;
+          else if (tokens[close].text == "}" && --nesting == 0) break;
+        }
+        k = close + 1;
+        if (k < tokens.size() && !tokens[k].string && tokens[k].text == "\n") ++k;
+      }
+      if (chainedInstance)
         names.insert(t.text);
       // ':' after a file-scope name starts an enum's underlying type or a
       // container's parent list; an enum extension may omit it. A parent list
@@ -695,7 +752,10 @@ void collectContainerNames(const std::vector<Token> &tokens, std::set<std::strin
                tokens[end].text != "{" && tokens[end].text != "<eof>")))
           ++end;
         names.insert(t.text);
-        if (!(after == ":" && end < tokens.size() && tokens[end].text == "{"))
+        const bool parents = after == ":" && end < tokens.size() &&
+            (tokens[end].text == "{" || (tokens[end].text == "#" && end + 1 < tokens.size() &&
+                                         !tokens[end + 1].string && tokens[end + 1].text == "{"));
+        if (!parents)
           names.insert("#@" + t.text);
         i = end - 1;
       }

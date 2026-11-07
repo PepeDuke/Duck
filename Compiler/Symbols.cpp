@@ -221,16 +221,12 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
   }
   for (const auto &field : program.statics) {
     const auto &name = field.name.text;
-    const auto dot = name.rfind('.');
-    const auto owner = symbols.records.find(name.substr(0, dot));
+    // Instance fields and methods are a separate namespace from statics.
     bool clash = symbols.count(name) || symbols.records.count(name);
     for (const auto &[function, signature] : symbols) {
       (void)signature;
       clash = clash || function.rfind(name + ".", 0) == 0;
     }
-    if (owner != symbols.records.end())
-      for (const auto &instance : owner->second.fields)
-        clash = clash || instance.name.text == name.substr(dot + 1);
     if (clash || !symbols.statics.emplace(name, StaticInfo{field.name, field.type, field.constant,
                                                            field.protectedAccess,
                                                            field.initializer.get()}).second)
@@ -275,8 +271,8 @@ bool Symbols::findField(const std::string &record, const std::string &name,
 }
 Symbols::const_iterator Symbols::findMethod(const std::string &record, const std::string &name,
                                             MemberPath &path) const {
-  auto found = find(record + "." + name);
-  if (found != end() && found->second.method) {
+  auto found = find(methodKey(record, name));
+  if (found != end()) {
     path = {{}, record, nullptr};
     return found;
   }
@@ -381,8 +377,8 @@ void resolveInheritance(Symbols &symbols) {
       if (!field.parentView) requireNew(record, field.name.text, field.name);
   for (const auto &[name, signature] : symbols) {
     if (!signature.method) continue;
-    const auto dot = name.rfind('.');
-    requireNew(symbols.records.at(name.substr(0, dot)), name.substr(dot + 1), signature.declaration);
+    requireNew(symbols.records.at(name.substr(0, name.rfind('.'))), memberName(name),
+               signature.declaration);
   }
 }
 namespace {
