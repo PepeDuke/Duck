@@ -9,23 +9,40 @@ Program combineUnits(std::vector<Program> units) {
   program.reserve(size);
   for (auto &unit : units) {
     for (auto &record : unit.records) program.records.push_back(std::move(record));
+    for (auto &fragment : unit.enums) program.enums.push_back(std::move(fragment));
     for (auto &function : unit)
       program.push_back(std::move(function));
   }
   return program;
 }
 std::string assembleModule(const std::vector<FunctionIR> &functions,
-                           bool entry) {
+                           bool entry, const std::set<std::string> &nativeSymbols) {
   std::string module =
       "; Duck bootstrap LLVM IR\ndeclare i32 @printf(ptr, ...)\n"
       "declare double @llvm.floor.f64(double)\ndeclare void @llvm.trap()\n";
-  bool needsText = false;
-  for (const auto &f : functions) needsText = needsText || f.usesTextRuntime;
+  bool needsText = false, needsBig = false, needsDecimal = false;
+  for (const auto &f : functions) {
+    needsBig = needsBig || f.usesBigRuntime;
+    needsDecimal = needsDecimal || f.usesDecimalRuntime;
+  }
+  // big storage shares the text reference count and the wide digit printer.
+  for (const auto &f : functions) needsText = needsText || f.usesTextRuntime || needsBig;
   bool needsHeap = false;
   for (const auto &f : functions) needsHeap = needsHeap || f.usesHeapRuntime;
   if (needsText || needsHeap) module += "declare ptr @malloc(i64)\ndeclare void @free(ptr)\n";
   if (needsHeap) module += heapRuntimeIR();
+  bool needsTasks = false;
+  for (const auto &f : functions) needsTasks = needsTasks || f.usesTaskRuntime;
+  if (needsTasks) module += taskRuntimeIR(nativeSymbols);
   if (needsText) module += textRuntimeIR();
+  bool needsCalendar = false;
+  for (const auto &f : functions) needsCalendar = needsCalendar || f.usesCalendarRuntime;
+  if (needsCalendar) module += calendarRuntimeIR();
+  bool needsWide = needsBig;
+  for (const auto &f : functions) needsWide = needsWide || f.usesWideRuntime;
+  if (needsWide) module += wideRuntimeIR();
+  if (needsBig) module += bigRuntimeIR();
+  if (needsDecimal) module += decimalRuntimeIR();
   for (const auto &f : functions)
     module += f.globals;
   module += '\n';
@@ -36,11 +53,18 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
   return module + "define i32 @main() {\nentry:\n  call void @duck.Main()\n  "
                   "ret i32 0\n}\n";
 }
-std::string compile(const Program &program) {
-  return compileModule(program, {}, true);
+std::string compile(const Program &program, bool parallel) {
+  return compileModule(program, {}, true, parallel);
 }
 std::string compileModule(const Program &program, const Program &imports,
-                          bool entry) {
+                          bool entry, bool parallel) {
+  // Each module emits its own member tables, so only the defining module may
+  // add members; otherwise indices from the two modules would disagree.
+  for (const auto &fragment : program.enums)
+    for (const auto &imported : imports.enums)
+      if (fragment.name.text == imported.name.text)
+        fail(fragment.name, "cannot extend imported enum '" + fragment.name.text +
+                                "'; add members in its defining module");
   auto symbols = collectSymbols(program, entry);
   if (!entry && symbols.count("Main"))
     for (const auto &f : program)
@@ -55,6 +79,9 @@ std::string compileModule(const Program &program, const Program &imports,
     if (!symbols.emplace(f.name.text, imported.at(f.name.text)).second)
       fail(f.name, "duplicate imported function '" + f.name.text + "'");
   }
+  for (const auto &[name, info] : imported.enums)
+    if (symbols.records.count(name) || !symbols.enums.emplace(name, info).second)
+      fail(info.declaration, "duplicate type name '" + name + "'");
   validateLayouts(symbols);
   for (const auto &[name, signature] : imported) {
     symbols.validateType(signature.result, signature.declaration);
@@ -68,9 +95,20 @@ std::string compileModule(const Program &program, const Program &imports,
   std::vector<FunctionAnalysis> analyses;
   for (const auto &function : program)
     analyses.push_back(analyzeFunction(function, symbols));
+  if (parallel) {
+    // Imported bodies are not visible, so their effects stay unknown.
+    const auto isolated = isolatedFunctions(program, analyses);
+    for (size_t i = 0; i < program.size(); ++i)
+      scheduleTasks(program[i], isolated, analyses[i]);
+  }
+  std::set<std::string> nativeSymbols;
+  for (const auto &[name, signature] : declarations) {
+    (void)name;
+    if (!signature.nativeSymbol.empty()) nativeSymbols.insert(signature.nativeSymbol);
+  }
   std::vector<FunctionIR> fragments;
   for (size_t i = 0; i < program.size(); ++i)
     fragments.push_back(lowerFunction(program[i], symbols, analyses[i]));
-  return emitRecords(symbols) + emitDeclarations(declarations) + assembleModule(fragments, entry);
+  return emitRecords(symbols) + emitEnums(symbols) + emitDeclarations(declarations) + assembleModule(fragments, entry, nativeSymbols);
 }
 } // namespace duck

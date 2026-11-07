@@ -261,7 +261,7 @@ Example
 reject(separator "Main() { Print(1) Print(2) }" "expected newline")
 reject(entry "main() {}" "program requires Main")
 reject(entry_signature "int Main() { return 0 }" "bootstrap entry point")
-reject(unsupported "Main() { big n = 1 }" "syntax may not be supported")
+reject(unsupported "Main() { element n = 1 }" "syntax may not be supported")
 reject(void_value "F() {}\nMain() { n : F() }" "locals currently support")
 reject(break_outside "Main() { break }" "requires an enclosing loop")
 reject(continue_outside "Main() { continue }" "requires an enclosing loop")
@@ -1249,6 +1249,83 @@ foreach(op IN ITEMS "<<" ">>")
   trap_program(shift_long_${operator_id} "Main() { Print((long)1 ${op} 64) }")
   trap_program(shift_assign_${operator_id} "Main() { byte n = 1\nn ${op}= -1\nPrint(n) }")
 endforeach()
+file(READ "${SOURCE}/Examples/Bootstrap/19_Enums.dk" enums)
+run_program(enum_example "${enums}"
+  "Sunday\n1\n10\nMonday\n1\n3\n1\nTom\nBob and Thomas\nDaniel\n")
+# Runtime member indices decay through the value tables.
+run_program(enum_runtime "Color : string #@{ Red, Green: \"verde\" }
+Tag : name #@{ A: \"alpha\" }
+Level : i3 #@{ Low: -5, Mid, High: 8388607 }
+Holder { Level level }
+Level Pick(int n) { return n == 0 ? Level.Low | Level.High }
+Main() {
+  Color c = Color.Green
+  Print(c)
+  string s = c
+  Print(s)
+  Print(c + \"!\")
+  name n = Tag.A
+  Print(n)
+  Holder h
+  h.level = Pick(1)
+  Print(h.level)
+  Print(h.level == 8388607)
+  Print(Level.Mid)
+  Print(Level.Mid + 0)
+  long total = Pick(0)
+  Print(total)
+  int i = 0
+  while i < 2 {
+    Print(Pick(i))
+    i++
+  }
+  Print((int)Pick(1) / 2)
+}" "Green\nverde\nverde!\nalpha\nHigh\n1\nMid\n-4\n-5\nLow\nHigh\n4194303\n")
+# Fragments merge in input order before implicit values are assigned, so the
+# untyped extension may come first.
+file(WRITE "${WORK}/enum_typed.dk" "Shade : int #@{ Dark }\n")
+file(WRITE "${WORK}/enum_extension.dk" "Shade #@{ Light }\nMain() {\n  Print(Shade.Dark + 0)\n  Print(Shade.Light)\n}\n")
+run_files(enum_fragments "0\nLight\n" "${WORK}/enum_typed.dk" "${WORK}/enum_extension.dk")
+run_files(enum_fragments_reversed "1\nLight\n" "${WORK}/enum_extension.dk" "${WORK}/enum_typed.dk")
+# An imported enum is usable, including as a parameter, but not extensible.
+file(WRITE "${WORK}/enum_library.dk" "Shade : int #@{ Dark, Light }\nint Code(Shade s) { return s * 10 }\n")
+file(WRITE "${WORK}/enum_client.dk" "Main() {\n  Print(Shade.Light)\n  Print(Code(Shade.Light))\n}\n")
+execute_process(COMMAND "${COMPILER}" --library "${WORK}/enum_library.dk" -o "${WORK}/enum_library.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "enum_library: compilation failed: ${errors}")
+endif()
+execute_process(COMMAND "${COMPILER}" --dependency "${WORK}/enum_library.dk" "${WORK}/enum_client.dk" -o "${WORK}/enum_client.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "enum_client: compilation failed: ${errors}")
+endif()
+execute_process(COMMAND "${CLANG}" "${WORK}/enum_library.ll" "${WORK}/enum_client.ll" -o "${WORK}/enum_client.exe" RESULT_VARIABLE status ERROR_VARIABLE errors)
+execute_process(COMMAND "${WORK}/enum_client.exe" RESULT_VARIABLE status OUTPUT_VARIABLE actual)
+string(REPLACE "\r\n" "\n" actual "${actual}")
+if(NOT status EQUAL 0 OR NOT actual STREQUAL "Light\n10\n")
+  message(FATAL_ERROR "enum_client: exit=${status}, actual=[${actual}]")
+endif()
+file(WRITE "${WORK}/enum_import_extension.dk" "Shade #@{ Dim }\nMain() {}\n")
+execute_process(COMMAND "${COMPILER}" --dependency "${WORK}/enum_library.dk" "${WORK}/enum_import_extension.dk" -o "${WORK}/enum_import_extension.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(status EQUAL 0 OR NOT errors MATCHES "cannot extend imported enum")
+  message(FATAL_ERROR "enum_import_extension: expected rejection, got ${status}: ${errors}")
+endif()
+reject(enum_untyped "E #@{ A }\nMain() {}" "requires an underlying type")
+reject(enum_type_conflict "E : int #@{ A }\nE : byte #@{ B }\nMain() {}" "declared as int")
+reject(enum_duplicate "E : int #@{ A }\nE #@{ A }\nMain() {}" "duplicate member 'A'")
+reject(enum_unknown_member "E : int #@{ A }\nMain() { Print(E.B) }" "unknown member 'B'")
+reject(enum_implicit_range "E : byte #@{ A: 255, B }\nMain() {}" "implicit value 256")
+reject(enum_explicit_range "E : int8 #@{ A: -129 }\nMain() {}" "out of range")
+reject(enum_assign_member "E : int #@{ A }\nMain() { E.A = 1 }" "is a constant")
+reject(enum_from_integer "E : int #@{ A }\nMain() { E e = 0 }" "type mismatch")
+reject(enum_compound "E : int #@{ A }\nMain() { E e = E.A\ne += 1 }" "type mismatch")
+reject(enum_text_value "E : string #@{ A: 1 }\nMain() {}" "string literal")
+reject(enum_integer_value "E : int #@{ A: \"x\" }\nMain() {}" "integer literal")
+reject(enum_float_value "E : float #@{ A: 0x10 }\nMain() {}" "decimal number literal")
+reject(enum_bool "E : bool #@{ A }\nMain() {}" "underlying type must be")
+reject(enum_nested "S #{ E : int #@{ A } }\nMain() {}" "file scope")
+reject(enum_container_clash "E { int x }\nE : int #@{ A }\nMain() {}" "duplicate type name")
+reject(enum_separator "E : int #@{ A B }\nMain() {}" "between enum members")
+reject(enum_native "E : int #@{ A }\nextern \"C\" F(E e)\nMain() {}" "native parameter")
 message(STATUS "Duck integration tests passed")
 
 trap_program(expired_heap_alias "Main() { int* value = 5\nalias : value\nvalue = null\nPrint(*alias) }")

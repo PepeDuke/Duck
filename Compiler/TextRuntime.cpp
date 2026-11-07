@@ -307,6 +307,14 @@ fail:
   call void @llvm.trap()
   unreachable
 }
+; One-character text from a validated char (Unicode scalar).
+define internal ptr @duck.char.text(i32 %cp, i64 %width) {
+entry:
+  %p = call ptr @duck.text.alloc(i64 4, i64 %width)
+  %length = call i64 @duck.text.encode(ptr %p, i64 0, i32 %cp, i64 %width)
+  call void @duck.text.finish(ptr %p, i64 %length, i64 %width)
+  ret ptr %p
+}
 define internal void @duck.text.print(ptr %p, i64 %width) {
 entry:
   %wide = icmp eq i64 %width, 2

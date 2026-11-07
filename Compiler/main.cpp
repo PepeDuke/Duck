@@ -5,10 +5,13 @@
 #include <sstream>
 int main(int argc, char **argv) {
   if (argc == 2 && std::string(argv[1]) == "--help") {
-    std::cout << "Usage: duckc [--library] [--dependency file.dk] <source.dk> "
+    std::cout << "Usage: duckc [--library] [--sequential] [--dependency file.dk] <source.dk> "
                  "[more.dk ...] -o <output.ll>\nEmits "
                  "LLVM IR; "
-                 "compile and link with clang output.ll -o program\n";
+                 "compile and link with clang output.ll -o program\n"
+                 "--sequential keeps every call on the calling thread. At run "
+                 "time,\nDUCK_WORKERS=n limits threads running Duck code "
+                 "(default: CPU count).\n";
     return 0;
   }
   if (argc < 4 || std::string(argv[argc - 2]) != "-o") {
@@ -20,11 +23,15 @@ int main(int argc, char **argv) {
     std::vector<duck::Program> units, importedUnits;
     std::vector<std::pair<bool, std::vector<duck::Token>>> sources;
     std::set<std::string> containerNames;
-    bool entry = true;
+    bool entry = true, parallel = true;
     for (int i = 1; i < argc - 2; ++i) {
       std::string path = argv[i];
       if (path == "--library") {
         entry = false;
+        continue;
+      }
+      if (path == "--sequential") {
+        parallel = false;
         continue;
       }
       bool dependency = path == "--dependency";
@@ -62,7 +69,7 @@ int main(int argc, char **argv) {
       throw std::runtime_error("at least one source file is required");
     auto program = duck::combineUnits(std::move(units));
     auto imports = duck::combineUnits(std::move(importedUnits));
-    auto ir = duck::compileModule(program, imports, entry);
+    auto ir = duck::compileModule(program, imports, entry, parallel);
     std::ofstream output(outputPath, std::ios::binary);
     if (!output || !(output << ir) || !output.flush())
       throw std::runtime_error(outputPath.string() +

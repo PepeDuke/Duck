@@ -1,0 +1,30 @@
+// iN and uN are N-byte integers for N = 1..64 (8 to 512 bits).
+// i1/i2/i4/i8 and u1/u2/u4/u8 are the host types int8/short/int/long and
+// uint8/uint16/uint32/uint64; other widths are new types. Note that i8 is
+// eight BYTES (64 bits), whereas int8 is eight bits.
+u64 Factorial(int n) {
+    u64 result = 1
+    for int i = 2; i <= n; i++ { result *= (u64)i }
+    return result
+}
+
+Main()
+{
+    i3 small = -8388608              // 24-bit signed minimum
+    Print(small)
+    u3 color = 0xFFFFFF
+    Print(color)
+    i16 large = 170141183460469231731687303715884105727
+    Print(large)
+    Print(large + 1)                   // wraps at 128 bits
+    Print(Factorial(50))             // exact in 512 bits
+    u32 one = 1
+    Print(one << 255)
+    u64 all = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+    Print(all)
+    Print((i9)all)                   // keeps the low 72 bits: -1
+    i4 same = 1
+    int alias = same                 // i4 is int
+    Print(alias)
+    Print(large > (i16)small)
+}

@@ -1,0 +1,55 @@
+// Extensible #@ enums with integer, floating, and text values.
+// Printing a member prints its name. Operators, conversions, and
+// concatenation use its underlying value.
+
+Day : byte
+#@{
+    Sunday, Monday, Tuesday
+}
+
+// A later fragment extends Day. Implicit values continue from the last
+// member of the merged enum, so Thursday is 10 and Friday is 11.
+Day #@{
+    Wednesday: 9
+    Thursday, Friday
+}
+
+Increments : float
+#@{
+    I1, I2, I3, I4 // 0, 0.5, 1, 1.5
+}
+
+IrrationalNumbers : double
+#@{
+    Pi: 3.141592653589,
+    SqRoot2: 1.4142135623,
+}
+
+CommonNames : string
+#@{
+    Bob, // A text member defaults to its own name.
+    Tom: "Thomas",
+    Dan: "Daniel"
+}
+
+Day Next(Day day)
+{
+    return day == Day.Sunday ? Day.Monday | Day.Tuesday
+}
+
+Main()
+{
+    Print(Day.Sunday)                         // Sunday
+    Print(Day.Sunday == 0)                    // 1
+    Print(Day.Thursday + 0)                   // 10
+    Day today = Next(Day.Sunday)
+    Print(today)                              // Monday
+    int number = today
+    Print(number)                             // 1
+    Print(Increments.I4 * 2)                  // 3
+    Print(IrrationalNumbers.Pi > 3.0)         // 1
+    Print(CommonNames.Tom)                    // Tom
+    Print(CommonNames.Bob + " and " + CommonNames.Tom) // Bob and Thomas
+    string friend = CommonNames.Dan
+    Print(friend)                             // Daniel
+}

@@ -1,0 +1,29 @@
+// char is one Unicode scalar value, never a UTF-16 or UTF-8 code unit.
+// date/time/datetime are civil values with no timezone, proleptic Gregorian
+// calendar, years 1..9999, and nanosecond precision.
+date NextDay(date d) { return AddDays(d, 1) }
+
+Main()
+{
+    char duck = '🦆'
+    Print(duck)
+    Print((uint32)duck)              // 129414 = U+1F986
+    Print(Length((string)duck))      // 2 UTF-16 code units (a surrogate pair)
+    Print(Length((name)duck))        // 4 UTF-8 bytes
+    Print(char(65) == 'A')
+    Print('a' < 'b')
+
+    leap : date(2024, 2, 28)
+    Print(NextDay(leap))             // 2024-02-29
+    Print(NextDay(date(2023, 2, 28))) // 2023-03-01
+    Print(DayOfWeek(date(2024, 2, 29))) // 4 = Thursday
+    Print(DaysBetween(date(2024, 1, 1), date(2025, 1, 1)))
+
+    time lunch = time(12, 30, 0)
+    Print(lunch)
+    Print(time(23, 59, 59, 999999999))
+    datetime meeting = datetime(leap, lunch)
+    Print(AddDays(meeting, 1))
+    Print(Hour(meeting))
+    Print(meeting < datetime(2024, 2, 28, 12, 30, 0, 1))
+}

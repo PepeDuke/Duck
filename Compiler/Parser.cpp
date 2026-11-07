@@ -1,4 +1,5 @@
 #include "Pipeline.h"
+#include <algorithm>
 #include <cctype>
 namespace duck {
 namespace {
@@ -50,26 +51,50 @@ class Parser {
     return !next.string && (next.text == "*" || next.text == "&" ||
            std::isalpha(static_cast<unsigned char>(next.text[0])) || next.text[0] == '_');
   }
+  // iN and uN name an N-byte integer. Every i/u + digits word is reserved so
+  // that out-of-range widths get a precise diagnostic.
+  bool byteWidthType() const {
+    const auto &t = peek().text;
+    return !peek().string && t.size() >= 2 && (t[0] == 'i' || t[0] == 'u') &&
+           std::all_of(t.begin() + 1, t.end(),
+                       [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
+  }
   bool isType() const {
-    return at("byte") || at("uint") || at("uint8") || at("uint16") ||
+    return byteWidthType() || at("byte") || at("uint") || at("uint8") || at("uint16") ||
            at("uint32") || at("uint64") ||
            at("int8") || at("short") || at("int16") ||
            at("int") || at("int32") || at("long") || at("int64") ||
            at("float") || at("double") || at("bool") || at("void") || at("cstring") ||
-           at("string") || at("name");
+           at("string") || at("name") || at("char") || at("date") ||
+           at("time") || at("datetime") || at("big") || at("ubig") || at("tiny") ||
+           at("utiny");
+  }
+  // char(...), date(...), time(...), and datetime(...) construct validated values.
+  bool constructorType() const {
+    const auto &next = tokens.at(pos + 1);
+    return (at("char") || at("date") || at("time") || at("datetime")) &&
+           !next.string && next.text == "(";
   }
   Type type() {
     Type t = baseType();
     while (accept("*")) t = t.pointerTo();
-    if (t.depth && (t.base == Type::String || t.base == Type::Name))
-      fail(peek(), "pointers to managed text are unsupported");
+    if (t.depth && (t.base == Type::String || t.base == Type::Name ||
+                    t.base == Type::Big || t.base == Type::UBig))
+      fail(peek(), "pointers to managed text or big integers are unsupported");
     return t;
   }
   Type baseType() {
     if (namedType()) {
-      Type t = Type::Record;
+      Type t = containerNames.count("#@" + peek().text) ? Type::Enum : Type::Record;
       t.record = identifier().text;
       return t;
+    }
+    if (byteWidthType()) {
+      const auto token = pop();
+      const auto digits = token.text.substr(1);
+      if (digits[0] == '0' || digits.size() > 2 || std::stoi(digits) > 64)
+        fail(token, "integer byte width must be 1 to 64: '" + token.text + "'");
+      return Type::integer(8 * unsigned(std::stoi(digits)), token.text[0] == 'u');
     }
     if (accept("byte") || accept("uint8"))
       return Type::UInt8;
@@ -95,6 +120,14 @@ class Parser {
       return Type::Bool;
     if (accept("string")) return Type::String;
     if (accept("name")) return Type::Name;
+    if (accept("char")) return Type::Char;
+    if (accept("date")) return Type::Date;
+    if (accept("time")) return Type::Time;
+    if (accept("datetime")) return Type::DateTime;
+    if (accept("big")) return Type::Big;
+    if (accept("ubig")) return Type::UBig;
+    if (accept("tiny")) return Type::Tiny;
+    if (accept("utiny")) return Type::UTiny;
     if (accept("cstring"))
       return Type::Text;
     expect("void");
@@ -134,7 +167,8 @@ class Parser {
       e->args.push_back(expression(11, stopAtPipe));
     } else if (accept("(")) {
       lines();
-      if (isType() || (namedType() && tokens[pos + 1].text == "*")) {
+      if ((isType() && !constructorType()) ||
+          (namedType() && tokens[pos + 1].text == "*")) {
         e->kind = "cast";
         e->castType = type();
         lines();
@@ -160,9 +194,24 @@ class Parser {
         lines();
       }
       expect("}");
+    } else if (peek().character) {
+      e->kind = "char";
+      pop();
     } else if (peek().string) {
       e->kind = "text";
       pop();
+    } else if (constructorType()) {
+      e->kind = "construct";
+      e->castType = baseType();
+      expect("(");
+      lines();
+      if (!at(")"))
+        do {
+          lines();
+          e->args.push_back(expression());
+          lines();
+        } while (accept(","));
+      expect(")");
     } else if (accept("null")) {
       e->kind = "null";
     } else if (at("true") || at("false")) {
@@ -384,7 +433,9 @@ class Parser {
           fail(peek(),
                "parameter requires a supported explicit type (int8, short, "
                "int16, int, int32, long, int64, byte, uint, uint8, uint16, "
-               "uint32, uint64, float, double, bool, string, name, cstring, or void*)");
+               "uint32, uint64, i1-i64, u1-u64, big, ubig, tiny, utiny, float, double, bool, "
+               "string, name, char, date, time, "
+               "datetime, cstring, or void*)");
         Type t = type();
         if (t == Type::Void)
           fail(peek(), "parameter cannot have void type");
@@ -396,7 +447,7 @@ class Parser {
     if (external) {
       f.nativeSymbol = nativeName;
       if (accept("=")) {
-        if (!peek().string || peek().text.empty())
+        if (!peek().string || peek().character || peek().text.empty())
           fail(peek(), "native symbol must be a nonempty string literal");
         f.nativeSymbol = pop().text;
       }
@@ -429,7 +480,7 @@ class Parser {
         name.text = tag.text + "." + name.text;
         program.push_back(function(std::move(name), t, false, "", tag.text));
       } else {
-        if (!typed || t == Type::Void || managedText(t))
+        if (!typed || t == Type::Void || managedValue(t))
           fail(name, "container fields require an unmanaged value type");
         if (at("=")) fail(name, "container field defaults are not implemented");
         record.fields.push_back({name, t});
@@ -440,13 +491,41 @@ class Parser {
     program.records.push_back(std::move(record));
   }
 
+  bool enumBlock() const {
+    return at("#") && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == "@";
+  }
+  // Name [: type] #@{ Member[: literal], ... } with members separated by
+  // commas or newlines. The type may be omitted on an extension fragment.
+  void enumFragment(Program &program, Token tag) {
+    EnumFragment fragment{tag, Type::Void, {}};
+    if (accept(":")) {
+      fragment.type = type();
+      lines();
+    }
+    if (!enumBlock()) fail(peek(), "expected '#@{' after enum declaration");
+    pop();
+    pop();
+    lines();
+    expect("{");
+    lines();
+    while (!accept("}")) {
+      EnumMember member{identifier(), nullptr};
+      if (accept(":")) member.value = expression();
+      fragment.members.push_back(std::move(member));
+      if (!at("}") && !at("\n") && !at(",")) fail(peek(), "expected ',' or newline between enum members");
+      accept(",");
+      lines();
+    }
+    program.enums.push_back(std::move(fragment));
+  }
+
   void declarations(Program &functions, const std::string &prefix,
                     bool nested) {
     lines();
     while (!at("<eof>") && !(nested && at("}"))) {
       bool external = accept("extern");
       if (external) {
-        if (!peek().string || peek().text != "C")
+        if (!peek().string || peek().character || peek().text != "C")
           fail(peek(), "native declarations require extern \"C\"");
         pop();
       }
@@ -454,6 +533,13 @@ class Parser {
         auto saved = pos;
         auto tag = identifier();
         lines();
+        if (at(":") || enumBlock()) {
+          if (nested) fail(tag, "enum declarations must be at file scope");
+          enumFragment(functions, tag);
+          if (!at("<eof>") && !at("\n")) fail(peek(), "expected newline after enum");
+          lines();
+          continue;
+        }
         if (at("{")) {
           if (nested) fail(tag, "container definitions must be at file scope");
           containerBody(functions, tag);
@@ -466,6 +552,8 @@ class Parser {
       bool typed = declarationType();
       Type result = typed ? type() : Type::Void;
       Token name = identifier();
+      if (!external && !typed && (at(":") || enumBlock()))
+        fail(name, "enum declarations must be at file scope");
       if (!external && !typed && !at("(")) {
         lines();
         if (accept("#")) {
@@ -520,8 +608,21 @@ void collectContainerNames(const std::vector<Token> &tokens, std::set<std::strin
     else if (depth == 0 && (std::isalpha(static_cast<unsigned char>(t.text[0])) || t.text[0] == '_')) {
       size_t next = i + 1;
       while (next < tokens.size() && tokens[next].text == "\n" && !tokens[next].string) ++next;
-      if (next < tokens.size() && !tokens[next].string && tokens[next].text == "{")
+      if (next >= tokens.size() || tokens[next].string) continue;
+      const auto &after = tokens[next].text;
+      if (after == "{")
         names.insert(t.text);
+      // Only an enum puts ':' after a file-scope name; an extension may omit
+      // it. Skip the underlying type so a type word is never taken as a name.
+      else if (after == ":" || (after == "#" && next + 1 < tokens.size() &&
+                                !tokens[next + 1].string && tokens[next + 1].text == "@")) {
+        names.insert(t.text);
+        names.insert("#@" + t.text);
+        while (i + 1 < tokens.size() && !tokens[i + 1].string &&
+               tokens[i + 1].text != "#" && tokens[i + 1].text != "{" &&
+               tokens[i + 1].text != "<eof>")
+          ++i;
+      }
     }
   }
 }

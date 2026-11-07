@@ -2,7 +2,7 @@ Duck compiler checklist
 Language design: README.md | Bootstrap implementation: Compiler
 
 Concurrency and locking
-[] Schedule independent work for parallel execution.
+[x] Schedule independent work for parallel execution.
    Proposal: Start with calls whose effects are known. Lower independent calls to worker tasks, join at the first dependent use or scope exit, and compare output against sequential execution with one and several workers.
 [] Track resource reads and writes across calls and wait for conflicting earlier work.
    Proposal: Add read/write summaries to function signatures. Propagate effects through recursive call groups, map parameters back to caller resources, and treat unknown native effects as a synchronization barrier.
@@ -84,13 +84,13 @@ Loops and ranges
    Proposal: Allow a missing while clause after a do body and lower that form to an unconditional back edge. Reuse loop-exit analysis so break establishes the facts available after the loop and continue starts the next iteration.
 
 Types, enums, and constants
-[] Implement char, date, time, and datetime.
+[x] Implement char, date, time, and datetime.
    Proposal: Specify whether char represents a Unicode scalar or a code unit, plus date/time ranges, precision, and timezone semantics. Add distinct types with validated constructors and test supplementary characters, leap days, and invalid values.
-[] Implement the custom byte-width integer families iN and uN.
+[x] Implement the custom byte-width integer families iN and uN.
    Proposal: Parse N as a byte count, validate the documented range, and lower integer arithmetic to LLVM integers of 8*N bits. Extend literal bounds, shifts, casts, and printing beyond host integer widths.
-[] Implement big, ubig, tiny, and utiny.
+[x] Implement big, ubig, tiny, and utiny.
    Proposal: Choose an arbitrary-precision integer representation for big/ubig and a decimal implementation supporting the promised precision for tiny/utiny. Specify rounding and unsigned subtraction behavior before adding literal parsing and runtime arithmetic.
-[] Implement extensible #@ enums with integer, float, and string values.
+[x] Implement extensible #@ enums with integer, float, and string values.
    Proposal: Collect enum fragments before assigning implicit values. Store each member's name and underlying value so printing a member preserves its name while arithmetic or concatenation can use its value.
 [] Expose built-in type limits such as int.Max.
    Proposal: Recognize qualified numeric type members during expression analysis. Derive Min and Max from the compiler's width and signedness information and emit typed constants, including for non-host widths.

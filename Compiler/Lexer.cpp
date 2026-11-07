@@ -43,13 +43,16 @@ std::vector<Token> lex(const std::string &source,
       take();
       continue;
     }
-    if (c == '"') {
+    if (c == '"' || c == '\'') {
+      // A character literal shares string escapes but must hold one scalar.
+      const char quote = c;
       t.string = true;
+      t.character = quote == '\'';
       take();
-      while (i < source.size() && source[i] != '"') {
+      while (i < source.size() && source[i] != quote) {
         char ch = take();
         if (ch == '\n' || ch == '\r')
-          fail(t, "newline in string literal");
+          fail(t, t.character ? "newline in character literal" : "newline in string literal");
         if (ch == '\\') {
           if (i == source.size())
             fail(t, "unterminated string literal");
@@ -85,6 +88,7 @@ std::vector<Token> lex(const std::string &source,
             break;
           case '\\':
           case '"':
+          case '\'':
             break;
           default:
             fail(t, "unsupported escape sequence");
@@ -93,9 +97,10 @@ std::vector<Token> lex(const std::string &source,
         t.text += ch;
       }
       if (i == source.size())
-        fail(t, "unterminated string literal");
+        fail(t, t.character ? "unterminated character literal" : "unterminated string literal");
       take();
-      decodeUTF8(t);
+      if (decodeUTF8(t).size() != 1 && t.character)
+        fail(t, "character literal must contain exactly one Unicode scalar");
       out.push_back(t);
       continue;
     }

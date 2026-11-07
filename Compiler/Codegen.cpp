@@ -1,5 +1,7 @@
 #include "Pipeline.h"
 #include "Unicode.h"
+#include "WideInteger.h"
+#include <cctype>
 #include <cstdint>
 #include <sstream>
 namespace duck {
@@ -9,6 +11,7 @@ std::string irType(Type t) {
     return "i" + std::to_string(integerWidth(t));
   if (t.depth) return "ptr";
   if (recordValue(t)) return "%struct." + t.record;
+  if (enumValue(t)) return "i32"; // Member index.
   switch (t.base) {
   case Type::Float:
     return "float";
@@ -20,6 +23,19 @@ std::string irType(Type t) {
   case Type::Name:
   case Type::Text:
     return "ptr";
+  case Type::Char:
+  case Type::Date:
+    return "i32";
+  case Type::Time:
+    return "i64";
+  case Type::DateTime:
+    return "{ i32, i64 }";
+  case Type::Big:
+  case Type::UBig:
+    return "ptr";
+  case Type::Tiny:
+  case Type::UTiny:
+    return "{ i256, i32 }";
   default:
     return "void";
   }
@@ -32,10 +48,20 @@ std::string powerOfTwo(int exponent, bool negative = false) {
   encoded << "0x" << std::hex << bits;
   return encoded.str();
 }
+// LLVM lowers 65..128-bit division and floating conversions to compiler-rt
+// calls that the MSVC-target link does not provide, but expands wider types
+// inline. Those operations therefore run at 256 bits and truncate the result.
+bool needsWideOperation(const Type &t) {
+  return integerWidth(t) > 64 && integerWidth(t) <= 128;
+}
+Type wideOperationType(const Type &t) { return Type::integer(256, unsignedInteger(t)); }
 struct Value {
   Type type;
   std::string value;
 };
+std::string enumTextSymbol(const std::string &name, size_t index) {
+  return "@enum." + name + ".value." + std::to_string(index);
+}
 struct Binding {
   Type type;
   std::string value;
@@ -54,9 +80,21 @@ class Generator {
     size_t scopeDepth;
   };
   std::vector<Loop> loops;
+  // A task record is {handle, arguments..., result} in the caller's frame.
+  struct PendingTask {
+    std::string name, record, layout;
+    size_t result;
+    Type resultType;
+    const Expr *call;
+    Binding destination;
+  };
+  std::vector<std::vector<PendingTask>> pending;
+  std::ostringstream thunks;
   std::string currentBlock = "entry";
-  int next = 0, strings = 0;
-  bool usesTextRuntime = false, usesHeapRuntime = false;
+  int next = 0, strings = 0, tasks = 0;
+  bool usesTextRuntime = false, usesHeapRuntime = false, usesTaskRuntime = false;
+  bool usesCalendarRuntime = false, usesWideRuntime = false;
+  bool usesBigRuntime = false, usesDecimalRuntime = false;
   std::string fresh() { return "%v" + std::to_string(next++); }
   std::string label() { return "b" + std::to_string(next++); }
   void emit(const std::string &s) { code << "  " << s << '\n'; }
@@ -70,12 +108,12 @@ class Generator {
   }
   static std::string textWidth(Type type) { return type == Type::String ? "2" : "1"; }
   void retain(Value value) {
-    if (!managedText(value.type)) return;
+    if (!managedValue(value.type)) return;
     usesTextRuntime = true;
     emit("call void @duck.text.retain(ptr " + value.value + ")");
   }
   void release(Value value) {
-    if (!managedText(value.type)) return;
+    if (!managedValue(value.type)) return;
     usesTextRuntime = true;
     emit("call void @duck.text.release(ptr " + value.value + ")");
   }
@@ -100,7 +138,7 @@ class Generator {
       emit("call void @duck.heap$drop(ptr " + binding.value + ", i1 " + ownerFlag(binding.type) + ")");
       return;
     }
-    if (!managedText(binding.type)) return;
+    if (!managedValue(binding.type)) return;
     auto old = fresh();
     emit(old + " = load ptr, ptr " + binding.value);
     release({binding.type, old});
@@ -112,9 +150,40 @@ class Generator {
         if (binding.owned) releaseBinding(binding);
       }
   }
+  // Loads the underlying value of an enum member index. A constant index
+  // selects the constant directly.
+  Value enumUnderlying(Value value) {
+    const auto &info = functions.enums.at(value.type.record);
+    const auto type = irType(info.type);
+    if (!value.value.empty() && std::isdigit(static_cast<unsigned char>(value.value[0]))) {
+      const auto index = std::stoul(value.value);
+      return {info.type, managedText(info.type) ? enumTextSymbol(value.type.record, index)
+                                                : info.values.at(index)};
+    }
+    auto slot = fresh(), loaded = fresh();
+    emit(slot + " = getelementptr [" + std::to_string(info.members.size()) + " x " + type +
+         "], ptr @enum." + value.type.record + ".values, i32 0, i32 " + value.value);
+    emit(loaded + " = load " + type + ", ptr " + slot);
+    return {info.type, loaded};
+  }
   Value convert(Value value, Type target) {
     if (value.type == target)
       return value;
+    if (enumValue(value.type))
+      return convert(enumUnderlying(value), target);
+    if (arbitraryNumber(value.type) || arbitraryNumber(target))
+      return convertArbitrary(value, target);
+    if (value.type == Type::Char && managedText(target)) {
+      usesTextRuntime = true;
+      auto text = fresh();
+      emit(text + " = call ptr @duck.char.text(i32 " + value.value + ", i64 " +
+           textWidth(target) + ")");
+      return {target, text};
+    }
+    if (value.type == Type::Char)
+      value.type = Type::UInt32; // A scalar value is a nonnegative 21-bit integer.
+    if (floating(target) && needsWideOperation(value.type))
+      value = convert(value, wideOperationType(value.type));
     if (value.type.depth && target.depth) {
       if (value.type.role != Type::Raw && target.role == Type::Raw) {
         auto valid = fresh();
@@ -153,9 +222,10 @@ class Generator {
       emit(upper + " = fcmp olt double " + rounded + ", " + high);
       emit(valid + " = and i1 " + lower + ", " + upper);
       require(valid);
+      const auto direct = needsWideOperation(target) ? wideOperationType(target) : target;
       emit(id + (unsignedInteger(target) ? " = fptoui double " : " = fptosi double ") +
-           rounded + " to " + irType(target));
-      return {target, id};
+           rounded + " to " + irType(direct));
+      return convert({direct, id}, target);
     }
     if (target == Type::Bool) {
       emit(id + " = " + (floating(value.type) ? "fcmp une " : "icmp ne ") +
@@ -174,7 +244,106 @@ class Generator {
          irType(value.type) + " " + value.value + " to " + irType(target));
     return {target, id};
   }
+  Value convertArbitrary(Value value, Type target) {
+    const auto source = value.type;
+    auto id = fresh();
+    if (bigInteger(source) && bigInteger(target)) {
+      if (target == Type::Big) return {target, value.value}; // Storage is shared, not copied.
+      usesBigRuntime = true;
+      emit(id + " = call ptr @duck.big.requireUnsigned(ptr " + value.value + ")");
+      return {target, id};
+    }
+    if (decimalValue(source) && decimalValue(target)) {
+      if (target == Type::Tiny) return {target, value.value};
+      usesDecimalRuntime = true;
+      emit(id + " = call { i256, i32 } @duck.tiny.requireUnsigned({ i256, i32 } " + value.value + ")");
+      return {target, id};
+    }
+    if (bigInteger(source)) {
+      // Like other narrowing integer casts, keep the low two's-complement bits.
+      usesBigRuntime = true;
+      emit(id + " = call i64 @duck.big.low64(ptr " + value.value + ")");
+      release(value);
+      return convert({Type::Long, id}, target);
+    }
+    const bool isUnsigned = unsignedInteger(source);
+    const auto word = convert(value, isUnsigned ? Type::UInt64 : Type::Long).value;
+    Value result;
+    if (bigInteger(target)) {
+      usesBigRuntime = true;
+      emit(id + (isUnsigned ? " = call ptr @duck.big.fromUnsigned(i64 " + word + ", i1 false)"
+                            : " = call ptr @duck.big.fromSigned(i64 " + word + ")"));
+      result = {Type::Big, id};
+    } else {
+      usesDecimalRuntime = true;
+      auto wide = fresh();
+      emit(wide + (isUnsigned ? " = zext i64 " : " = sext i64 ") + word + " to i256");
+      emit(id + " = insertvalue { i256, i32 } zeroinitializer, i256 " + wide + ", 0");
+      result = {Type::Tiny, id};
+    }
+    return convert(result, target); // Checks a signed source converted to ubig/utiny.
+  }
+  // Operands already have the common big/ubig type. Unsigned results that
+  // would be negative trap.
+  Value bigBinary(const std::string &op, Value a, Value b) {
+    auto id = fresh();
+    const std::map<std::string, std::string> predicates{
+        {"<", "slt"}, {">", "sgt"}, {"<=", "sle"}, {">=", "sge"}, {"==", "eq"}, {"!=", "ne"}};
+    auto predicate = predicates.find(op);
+    const bool big = bigInteger(a.type);
+    (big ? usesBigRuntime : usesDecimalRuntime) = true;
+    const auto type = big ? std::string("ptr") : irType(a.type);
+    const auto prefix = std::string(big ? "@duck.big." : "@duck.tiny.");
+    const auto operands = type + " " + a.value + ", " + type + " " + b.value;
+    if (predicate != predicates.end()) {
+      auto order = fresh();
+      emit(order + " = call i32 " + prefix + "compare(" + operands + ")");
+      emit(id + " = icmp " + predicate->second + " i32 " + order + ", 0");
+      release(a);
+      release(b);
+      return {Type::Bool, id};
+    }
+    if (op == "+" || op == "-")
+      emit(id + " = call " + type + " " + prefix + "add(" + operands + ", i1 " +
+           (op == "-" ? "true" : "false") + ")");
+    else if (op == "*")
+      emit(id + " = call " + type + " " + prefix + "multiply(" + operands + ")");
+    else if (big)
+      emit(id + " = call ptr @duck.big.divide(" + operands + ", i1 " + (op == "%" ? "true" : "false") + ")");
+    else
+      emit(id + " = call " + type + " @duck.tiny.divide(" + operands + ")");
+    if (op == "-" && (a.type == Type::UBig || a.type == Type::UTiny)) {
+      auto checked = fresh();
+      emit(checked + " = call " + type + " " + prefix + "requireUnsigned(" + type + " " + id + ")");
+      id = checked;
+    }
+    release(a);
+    release(b);
+    return {a.type, id};
+  }
+  // A big literal is immutable constant storage with the literal reference count.
+  Value bigLiteral(const std::string &decimal, Type type) {
+    usesBigRuntime = true;
+    const bool negative = decimal[0] == '-';
+    auto limbs = Magnitude::parse(negative ? decimal.substr(1) : decimal, 10).limbs;
+    while (!limbs.empty() && !limbs.back()) limbs.pop_back();
+    const auto count = std::to_string(limbs.size());
+    const auto symbol = "@big." + symbolPrefix + "." + std::to_string(strings++);
+    const auto array = "[" + count + " x i32]";
+    globals << symbol << " = private unnamed_addr constant { i64, i64, i64, " << array
+            << " } { i64 -1, i64 " << count << ", i64 " << (negative && !limbs.empty() ? 1 : 0)
+            << ", " << array << " ";
+    if (limbs.empty()) globals << "zeroinitializer";
+    else {
+      globals << "[";
+      for (size_t i = 0; i < limbs.size(); ++i) globals << (i ? ", " : "") << "i32 " << limbs[i];
+      globals << "]";
+    }
+    globals << " }, align 8\n";
+    return {type, symbol};
+  }
   Value binary(const std::string &op, Value a, Value b) {
+    if (arbitraryNumber(a.type)) return bigBinary(op, a, b);
     if (managedText(a.type)) {
       usesTextRuntime = true;
       auto id = fresh();
@@ -193,8 +362,13 @@ class Generator {
     if (op == "<<" || op == ">>") {
       // Check at the original count width before any truncation. Comparing
       // as unsigned rejects negative signed counts as well.
+      // A narrow count type may not hold a custom width such as 512; widening
+      // first keeps a negative signed count out of range.
+      auto count = integerWidth(a.type) > 64 && integerWidth(b.type) < 64
+                       ? convert(b, unsignedInteger(b.type) ? Type::UInt64 : Type::Long)
+                       : b;
       auto valid = fresh();
-      emit(valid + " = icmp ult " + irType(b.type) + " " + b.value + ", " +
+      emit(valid + " = icmp ult " + irType(count.type) + " " + count.value + ", " +
            std::to_string(integerWidth(a.type)));
       require(valid);
       b = convert(b, a.type);
@@ -210,7 +384,7 @@ class Generator {
         auto minimum = fresh(), negativeOne = fresh(), overflow = fresh(), safe = fresh();
         valid = fresh();
         emit(minimum + " = icmp eq " + type + " " + a.value + ", -" +
-             std::to_string(uint64_t{1} << (integerWidth(a.type) - 1)));
+             Magnitude::powerOfTwo(unsigned(integerWidth(a.type) - 1)).decimal());
         emit(negativeOne + " = icmp eq " + type + " " + b.value + ", -1");
         emit(overflow + " = and i1 " + minimum + ", " + negativeOne);
         emit(safe + " = xor i1 " + overflow + ", true");
@@ -231,6 +405,20 @@ class Generator {
         {"/", "fdiv"},      {"<", "fcmp olt"},  {">", "fcmp ogt"},
         {"<=", "fcmp ole"}, {">=", "fcmp oge"}, {"==", "fcmp oeq"},
         {"!=", "fcmp une"}};
+    if (a.type == Type::DateTime) {
+      // Compare dates first and use the time of day only for equal dates.
+      auto ad = fresh(), at = fresh(), bd = fresh(), bt = fresh();
+      auto sameDay = fresh(), dayOrder = fresh(), timeOrder = fresh();
+      emit(ad + " = extractvalue { i32, i64 } " + a.value + ", 0");
+      emit(at + " = extractvalue { i32, i64 } " + a.value + ", 1");
+      emit(bd + " = extractvalue { i32, i64 } " + b.value + ", 0");
+      emit(bt + " = extractvalue { i32, i64 } " + b.value + ", 1");
+      emit(sameDay + " = icmp eq i32 " + ad + ", " + bd);
+      emit(dayOrder + " = " + ints.at(op) + " i32 " + ad + ", " + bd);
+      emit(timeOrder + " = " + ints.at(op) + " i64 " + at + ", " + bt);
+      emit(id + " = select i1 " + sameDay + ", i1 " + timeOrder + ", i1 " + dayOrder);
+      return {Type::Bool, id};
+    }
     auto instruction = (floating(a.type) ? reals : ints).at(op);
     if (unsignedInteger(a.type)) {
       if (op == "/") instruction = "udiv";
@@ -240,6 +428,12 @@ class Generator {
       else if (op == "<=") instruction = "icmp ule";
       else if (op == ">=") instruction = "icmp uge";
       else if (op == ">>") instruction = "lshr";
+    }
+    if ((op == "/" || op == "%") && needsWideOperation(a.type)) {
+      const auto wide = wideOperationType(a.type);
+      auto x = convert(a, wide), y = convert(b, wide);
+      emit(id + " = " + instruction + " " + irType(wide) + " " + x.value + ", " + y.value);
+      return convert({wide, id}, a.type);
     }
     emit(id + " = " + instruction + " " +
          irType(a.type) + " " + a.value + ", " + b.value);
@@ -271,7 +465,7 @@ class Generator {
     allocations << "  " << address << " = alloca " << irType(value.type)
                 << '\n';
     if (recordValue(value.type) && value.value.empty()) value.value = "zeroinitializer";
-    if (managedText(value.type) && value.value.empty()) value.value = "null";
+    if (managedValue(value.type) && value.value.empty()) value.value = "null";
     if (!value.value.empty())
       emit("store " + irType(value.type) + " " + value.value + ", ptr " +
            address);
@@ -354,7 +548,15 @@ class Generator {
     const auto &op = e.token.text;
     auto integer = analysis.integerConstants.find(&e);
     if (integer != analysis.integerConstants.end())
-      return {analysis.expressionTypes.at(&e), integer->second};
+    {
+      const auto type = analysis.expressionTypes.at(&e);
+      if (bigInteger(type)) return bigLiteral(integer->second, type);
+      return {type, integer->second};
+    }
+    auto decimal = analysis.decimalConstants.find(&e);
+    if (decimal != analysis.decimalConstants.end())
+      return {analysis.expressionTypes.at(&e),
+              "{ i256 " + decimal->second.first + ", i32 " + decimal->second.second + " }"};
     if (e.kind == "initializer") {
       auto type = analysis.expressionTypes.at(&e);
       std::string value = "zeroinitializer";
@@ -369,6 +571,13 @@ class Generator {
     }
     if (e.kind == "cast")
       return convert(expression(*e.args[0]), e.castType);
+    auto member = analysis.enumMembers.find(&e);
+    if (member != analysis.enumMembers.end())
+      return {analysis.expressionTypes.at(&e), std::to_string(member->second)};
+    if (e.kind == "char")
+      return {Type::Char, std::to_string(decodeUTF8(e.token).front())};
+    if (e.kind == "construct")
+      return construct(e);
     if (e.kind == "real")
       return {analysis.expressionTypes.at(&e),
               analysis.floatingConstants.at(&e)};
@@ -420,10 +629,44 @@ class Generator {
 
         auto v = expression(*e.args[0]);
 
+        if (bigInteger(v.type)) {
+          usesBigRuntime = true;
+          emit("call void @duck.big.print(ptr " + v.value + ")");
+          release(v);
+          return {Type::Void, ""};
+        }
+        if (decimalValue(v.type)) {
+          usesDecimalRuntime = true;
+          emit("call void @duck.tiny.print({ i256, i32 } " + v.value + ")");
+          return {Type::Void, ""};
+        }
+        if (enumValue(v.type)) {
+          const auto count = functions.enums.at(v.type.record).members.size();
+          auto slot = fresh(), label = fresh();
+          emit(slot + " = getelementptr [" + std::to_string(count) + " x ptr], ptr @enum." +
+               v.type.record + ".names, i32 0, i32 " + v.value);
+          emit(label + " = load ptr, ptr " + slot);
+          emit("call i32 (ptr, ...) @printf(ptr " + textConstant("%s\n") + ", ptr " + label + ")");
+          return {Type::Void, ""};
+        }
+        if (v.type == Type::Char) v = convert(v, Type::Name);
         if (managedText(v.type)) {
           usesTextRuntime = true;
           emit("call void @duck.text.print(ptr " + v.value + ", i64 " + textWidth(v.type) + ")");
           release(v);
+          return {Type::Void, ""};
+        }
+        if (calendarValue(v.type)) {
+          usesCalendarRuntime = true;
+          auto days = v.type == Type::Date ? v.value : "0";
+          auto nanos = v.type == Type::Time ? v.value : "0";
+          if (v.type == Type::DateTime) {
+            days = part(v, 0);
+            nanos = part(v, 1);
+          }
+          const auto mode = v.type == Type::Date ? "1" : v.type == Type::Time ? "2" : "3";
+          emit("call void @duck.calendar.print(i32 " + days + ", i64 " + nanos + ", i32 " +
+               mode + ")");
           return {Type::Void, ""};
         }
         if (v.type == Type::Bool) {
@@ -433,9 +676,16 @@ class Generator {
         }
         if (v.type == Type::Float)
           v = convert(v, Type::Double);
-        // All 8/16-bit values fit C's int varargs promotion.
+        if (integral(v.type) && integerWidth(v.type) > 64) {
+          printWide(v);
+          return {Type::Void, ""};
+        }
+        // All 8/16/24-bit values fit C's int varargs promotion; 40..56-bit
+        // values print through the 64-bit formats.
         if (integral(v.type) && integerWidth(v.type) < 32)
           v = convert(v, Type::Int);
+        else if (integral(v.type) && integerWidth(v.type) < 64)
+          v = convert(v, unsignedInteger(v.type) ? Type::UInt64 : Type::Long);
         auto fmt = textConstant(v.type == Type::Text     ? "%s\n"
                                 : v.type == Type::Double ? "%g\n"
                                 : v.type == Type::Long   ? "%lld\n"
@@ -446,6 +696,8 @@ class Generator {
              " " + v.value + ")");
         return {Type::Void, ""};
       }
+      if (analysis.calendarCalls.count(&e))
+        return calendarCall(e);
       if (!analysis.callTargets.count(&e))
         return {analysis.expressionTypes.at(&e), "zeroinitializer"};
       const auto &target = analysis.callTargets.at(&e);
@@ -532,6 +784,19 @@ class Generator {
            " ], [ " + b.value + ", %" + rightEnd + " ]");
       return {Type::Bool, id};
     }
+    if (e.kind == "unary" && bigInteger(a.type)) {
+      usesBigRuntime = true;
+      emit(id + " = call ptr @duck.big.negate(ptr " + a.value + ")");
+      release(a);
+      return {a.type, id};
+    }
+    if (e.kind == "unary" && decimalValue(a.type)) {
+      auto coefficient = fresh(), negated = fresh();
+      emit(coefficient + " = extractvalue { i256, i32 } " + a.value + ", 0");
+      emit(negated + " = sub i256 0, " + coefficient);
+      emit(id + " = insertvalue { i256, i32 } " + a.value + ", i256 " + negated + ", 0");
+      return {a.type, id};
+    }
     if (e.kind == "unary") {
       if (floating(a.type)) {
         emit(id + " = fneg " + irType(a.type) + " " + a.value);
@@ -545,13 +810,206 @@ class Generator {
     auto b = expression(*e.args[1]);
     return binary(op, a, b);
   }
-  bool block(const std::vector<std::unique_ptr<Stmt>> &body) {
-    scopes.emplace_back();
+  // Store the magnitude as little-endian 32-bit limbs for @duck.wide.print.
+  void printWide(Value v) {
+    usesWideRuntime = true;
+    const auto width = integerWidth(v.type);
+    const auto type = irType(v.type);
+    std::string magnitude = v.value, negative = "false";
+    if (!unsignedInteger(v.type)) {
+      negative = fresh();
+      auto flipped = fresh();
+      magnitude = fresh();
+      emit(negative + " = icmp slt " + type + " " + v.value + ", 0");
+      emit(flipped + " = sub " + type + " 0, " + v.value);
+      // The minimum's negation wraps to itself, which is its unsigned magnitude.
+      emit(magnitude + " = select i1 " + negative + ", " + type + " " + flipped + ", " +
+           type + " " + v.value);
+    }
+    const auto rounded = (width + 31) / 32 * 32;
+    const auto limbs = "i" + std::to_string(rounded);
+    if (rounded != width) {
+      auto extended = fresh();
+      emit(extended + " = zext " + type + " " + magnitude + " to " + limbs);
+      magnitude = extended;
+    }
+    auto buffer = fresh();
+    allocations << "  " << buffer << " = alloca " << limbs << '\n';
+    emit("store " + limbs + " " + magnitude + ", ptr " + buffer);
+    emit("call void @duck.wide.print(ptr " + buffer + ", i64 " + std::to_string(rounded / 32) +
+         ", i1 " + negative + ")");
+  }
+  // Field 0 (date) or 1 (time) of a datetime.
+  std::string part(Value datetime, int field) {
+    auto id = fresh();
+    emit(id + " = extractvalue { i32, i64 } " + datetime.value + ", " + std::to_string(field));
+    return id;
+  }
+  Value pack(const std::string &days, const std::string &nanos) {
+    auto first = fresh(), second = fresh();
+    emit(first + " = insertvalue { i32, i64 } poison, i32 " + days + ", 0");
+    emit(second + " = insertvalue { i32, i64 } " + first + ", i64 " + nanos + ", 1");
+    return {Type::DateTime, second};
+  }
+  // Every field is evaluated, left to right, before validation can trap.
+  Value construct(const Expr &e) {
+    usesCalendarRuntime = true;
+    const auto type = e.castType;
+    std::vector<std::string> fields;
+    for (const auto &argument : e.args) fields.push_back(expression(*argument).value);
+    if (type == Type::DateTime && fields.size() == 2) return pack(fields[0], fields[1]);
+    auto id = fresh();
+    if (type == Type::Char) {
+      emit(id + " = call i32 @duck.char.make(i64 " + fields[0] + ")");
+      return {type, id};
+    }
+    std::string days, nanos;
+    size_t time = 0;
+    if (type == Type::Date || type == Type::DateTime) {
+      days = type == Type::Date ? id : fresh();
+      emit(days + " = call i32 @duck.date.make(i64 " + fields[0] + ", i64 " + fields[1] +
+           ", i64 " + fields[2] + ")");
+      if (type == Type::Date) return {type, days};
+      time = 3;
+    }
+    nanos = type == Type::Time ? id : fresh();
+    emit(nanos + " = call i64 @duck.time.make(i64 " + fields[time] + ", i64 " +
+         fields[time + 1] + ", i64 " + fields[time + 2] + ", i64 " +
+         (fields.size() > time + 3 ? fields[time + 3] : "0") + ")");
+    if (type == Type::Time) return {type, nanos};
+    return pack(days, nanos);
+  }
+  Value calendarCall(const Expr &e) {
+    usesCalendarRuntime = true;
+    const auto &op = e.token.text;
+    auto value = expression(*e.args[0]);
+    auto days = [&] { return value.type == Type::DateTime ? part(value, 0) : value.value; };
+    auto nanos = [&] { return value.type == Type::DateTime ? part(value, 1) : value.value; };
+    auto id = fresh();
+    if (op == "Year" || op == "Month" || op == "Day") {
+      auto civil = fresh();
+      emit(civil + " = call {i32, i32, i32} @duck.date.civil(i32 " + days() + ")");
+      emit(id + " = extractvalue {i32, i32, i32} " + civil + ", " +
+           (op == "Year" ? "0" : op == "Month" ? "1" : "2"));
+      return {Type::Int, id};
+    }
+    if (op == "DayOfWeek") {
+      emit(id + " = call i32 @duck.date.weekday(i32 " + days() + ")");
+      return {Type::Int, id};
+    }
+    const std::map<std::string, std::pair<std::string, std::string>> timeParts{
+        {"Hour", {"3600000000000", "24"}},
+        {"Minute", {"60000000000", "60"}},
+        {"Second", {"1000000000", "60"}},
+        {"Nanosecond", {"1", "1000000000"}}};
+    auto timePart = timeParts.find(op);
+    if (timePart != timeParts.end()) {
+      emit(id + " = call i32 @duck.time.part(i64 " + nanos() + ", i64 " +
+           timePart->second.first + ", i64 " + timePart->second.second + ")");
+      return {Type::Int, id};
+    }
+    if (op == "DateOf") return {Type::Date, days()};
+    if (op == "TimeOf") return {Type::Time, nanos()};
+    auto other = expression(*e.args[1]);
+    if (op == "AddDays") {
+      emit(id + " = call i32 @duck.date.add(i32 " + days() + ", i64 " + other.value + ")");
+      if (value.type == Type::Date) return {Type::Date, id};
+      auto moved = fresh();
+      emit(moved + " = insertvalue { i32, i64 } " + value.value + ", i32 " + id + ", 0");
+      return {Type::DateTime, moved};
+    }
+    // DaysBetween(a, b) = b - a, exact for every pair of valid dates.
+    auto from = fresh(), to = fresh();
+    emit(from + " = sext i32 " + value.value + " to i64");
+    emit(to + " = sext i32 " + other.value + " to i64");
+    emit(id + " = sub i64 " + to + ", " + from);
+    return {Type::Long, id};
+  }
+  void join(const PendingTask &task) {
+    auto slot = fresh(), handle = fresh(), resultSlot = fresh(), result = fresh();
+    emit(slot + " = getelementptr " + task.layout + ", ptr " + task.record + ", i32 0, i32 0");
+    emit(handle + " = load ptr, ptr " + slot);
+    emit("call void @duck.task$join(ptr " + handle + ")");
+    emit(resultSlot + " = getelementptr " + task.layout + ", ptr " + task.record + ", i32 0, i32 " +
+         std::to_string(task.result));
+    emit(result + " = load " + irType(task.resultType) + ", ptr " + resultSlot);
+    Value value{task.resultType, result};
+    auto conversion = analysis.conversions.find(task.call);
+    if (conversion != analysis.conversions.end()) value = convert(value, conversion->second);
+    emit("store " + irType(value.type) + " " + value.value + ", ptr " + task.destination.value);
+  }
+  void joinAll() {
+    for (const auto &task : pending.back()) join(task);
+    pending.back().clear();
+  }
+  void joinBefore(const Stmt &s) {
+    if (pending.back().empty()) return;
+    if (analysis.taskBarriers.count(&s)) return joinAll();
+    const auto &used = analysis.taskUses.at(&s);
+    std::vector<PendingTask> remaining;
+    for (const auto &task : pending.back()) {
+      if (used.count(task.name)) join(task);
+      else remaining.push_back(task);
+    }
+    pending.back() = std::move(remaining);
+  }
+  // Arguments are evaluated here, in source order, before the task starts.
+  void spawn(const Stmt &s) {
+    usesTaskRuntime = true;
+    const auto &call = *s.expr;
+    const auto &target = analysis.callTargets.at(&call);
+    const auto &f = functions.at(target);
+    std::vector<Value> arguments;
+    for (const auto &argument : call.args) arguments.push_back(expression(*argument));
+    std::string layout = "{ ptr";
+    for (const auto &argument : arguments) layout += ", " + irType(argument.type);
+    layout += ", " + irType(f.result) + " }";
+    const auto result = arguments.size() + 1;
+    auto record = fresh();
+    allocations << "  " << record << " = alloca " << layout << '\n';
+    for (size_t i = 0; i < arguments.size(); ++i) {
+      auto field = fresh();
+      emit(field + " = getelementptr " + layout + ", ptr " + record + ", i32 0, i32 " +
+           std::to_string(i + 1));
+      emit("store " + irType(arguments[i].type) + " " + arguments[i].value + ", ptr " + field);
+    }
+    auto entry = "@duck.task." + symbolPrefix + "." + std::to_string(tasks++);
+    thunks << "define internal i32 " << entry << "(ptr %task) {\nentry:\n";
+    std::string args;
+    for (size_t i = 0; i < arguments.size(); ++i) {
+      const auto type = irType(arguments[i].type), n = std::to_string(i + 1);
+      thunks << "  %p" << n << " = getelementptr " << layout << ", ptr %task, i32 0, i32 " << n
+             << "\n  %a" << n << " = load " << type << ", ptr %p" << n << '\n';
+      args += (i ? ", " : "") + type + " %a" + n;
+    }
+    thunks << "  %r = call " << irType(f.result) << " @duck." << target << "(" << args << ")\n"
+           << "  %p0 = getelementptr " << layout << ", ptr %task, i32 0, i32 " << result << '\n'
+           << "  store " << irType(f.result) << " %r, ptr %p0\n  ret i32 0\n}\n\n";
+    auto handle = fresh(), slot = fresh();
+    emit(handle + " = call ptr @duck.task$spawn(ptr " + entry + ", ptr " + record + ")");
+    emit(slot + " = getelementptr " + layout + ", ptr " + record + ", i32 0, i32 0");
+    emit("store ptr " + handle + ", ptr " + slot);
+    auto name = s.token;
+    name.text = s.name;
+    declare(name, {analysis.localTypes.at(&s), ""}, s.constant);
+    pending.back().push_back({s.name, record, layout, result, f.result, &call, variable(name)});
+  }
+  bool sequence(const std::vector<std::unique_ptr<Stmt>> &body) {
+    pending.emplace_back();
     bool terminated = false;
     for (const auto &s : body) {
-
-      terminated = statement(*s);
+      joinBefore(*s);
+      if (analysis.taskSpawns.count(s.get())) spawn(*s);
+      else terminated = statement(*s);
     }
+    // Barriers precede every exit statement, so a terminated list has no tasks.
+    if (!terminated) joinAll();
+    pending.pop_back();
+    return terminated;
+  }
+  bool block(const std::vector<std::unique_ptr<Stmt>> &body) {
+    scopes.emplace_back();
+    bool terminated = sequence(body);
     if (!terminated) cleanupScopes(scopes.size() - 1);
     scopes.pop_back();
     return terminated;
@@ -732,15 +1190,14 @@ public:
         declare(parameter.name, {parameter.type, arg});
       }
     }
-    bool terminated = false;
-    for (const auto &s : f.body)
-      terminated = statement(*s);
+    bool terminated = sequence(f.body);
     if (!terminated) {
       cleanupScopes(0);
       emit("ret void");
     }
-    output << ") {\nentry:\n" << allocations.str() << code.str() << "}\n\n";
-    return {globals.str(), output.str(), usesTextRuntime, usesHeapRuntime};
+    output << ") {\nentry:\n" << allocations.str() << code.str() << "}\n\n" << thunks.str();
+    return {globals.str(), output.str(), usesTextRuntime, usesHeapRuntime, usesTaskRuntime,
+            usesCalendarRuntime, usesWideRuntime, usesBigRuntime, usesDecimalRuntime};
   }
 };
 } // namespace
@@ -761,6 +1218,51 @@ std::string emitRecords(const Symbols &symbols) {
     ir += " }\n";
   }
   return ir;
+}
+// Per-module private tables: member names for Print, underlying values for
+// decay. Text values are immortal managed literals, like string constants.
+std::string emitEnums(const Symbols &symbols) {
+  std::ostringstream ir;
+  for (const auto &[name, info] : symbols.enums) {
+    const auto count = std::to_string(info.members.size());
+    const auto type = irType(info.type);
+    for (size_t i = 0; i < info.members.size(); ++i) {
+      const auto &label = info.members[i].text;
+      ir << "@enum." << name << ".name." << i << " = private unnamed_addr constant ["
+         << label.size() + 1 << " x i8] c\"" << label << "\\00\"\n";
+      if (!managedText(info.type)) continue;
+      std::vector<uint32_t> units;
+      Token text = info.members[i];
+      text.text = info.values[i];
+      if (info.type == Type::Name) {
+        for (unsigned char byte : text.text) units.push_back(byte);
+      } else
+        for (auto cp : decodeUTF8(text)) {
+          if (cp < 0x10000) units.push_back(cp);
+          else {
+            cp -= 0x10000;
+            units.push_back(0xD800 | (cp >> 10));
+            units.push_back(0xDC00 | (cp & 1023));
+          }
+        }
+      const auto unit = info.type == Type::String ? "i16" : "i8";
+      const auto array = "[" + std::to_string(units.size() + 1) + " x " + unit + "]";
+      ir << enumTextSymbol(name, i) << " = private unnamed_addr constant { i64, i64, " << array
+         << " } { i64 -1, i64 " << units.size() << ", " << array << " [";
+      for (auto value : units) ir << unit << " " << value << ", ";
+      ir << unit << " 0] }, align 8\n";
+    }
+    ir << "@enum." << name << ".names = private unnamed_addr constant [" << count << " x ptr] [";
+    for (size_t i = 0; i < info.members.size(); ++i)
+      ir << (i ? ", " : "") << "ptr @enum." << name << ".name." << i;
+    ir << "]\n@enum." << name << ".values = private unnamed_addr constant [" << count << " x "
+       << type << "] [";
+    for (size_t i = 0; i < info.members.size(); ++i)
+      ir << (i ? ", " : "") << type << " "
+         << (managedText(info.type) ? enumTextSymbol(name, i) : info.values[i]);
+    ir << "]\n";
+  }
+  return ir.str();
 }
 std::string emitDeclarations(const Symbols &symbols) {
   std::string declarations;

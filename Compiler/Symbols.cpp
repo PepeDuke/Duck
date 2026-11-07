@@ -1,7 +1,156 @@
 #include "Pipeline.h"
+#include "WideInteger.h"
+#include <cmath>
+#include <cstring>
+#include <iomanip>
+#include <locale>
 #include <regex>
+#include <sstream>
 
 namespace duck {
+namespace {
+// Signed decimal text + 1, for implicit values of any integer width.
+std::string successor(std::string value) {
+  const bool negative = value[0] == '-';
+  std::string digits = negative ? value.substr(1) : value;
+  size_t i = digits.size();
+  if (negative) {
+    while (digits[i - 1] == '0') digits[--i] = '9';
+    --digits[i - 1];
+    const auto first = digits.find_first_not_of('0');
+    digits = first == std::string::npos ? "0" : digits.substr(first);
+    return digits == "0" ? digits : "-" + digits;
+  }
+  while (i > 0 && digits[i - 1] == '9') digits[--i] = '0';
+  if (i == 0) return "1" + digits;
+  ++digits[i - 1];
+  return digits;
+}
+bool fitsInteger(const std::string &value, const Type &type) {
+  const bool negative = value[0] == '-';
+  const auto magnitude = Magnitude::parse(negative ? value.substr(1) : value, 10);
+  const int bits = int(magnitude.bits()), width = integerWidth(type);
+  if (unsignedInteger(type)) return !negative && bits <= width;
+  return bits <= width - 1 || (negative && bits == width && magnitude.powerOfTwo());
+}
+// An explicit value is a literal of the enum's kind, optionally negated.
+std::string integerValue(const Expr &e, const Type &type, const std::string &member) {
+  const bool negative = e.kind == "unary" && e.token.text == "-";
+  const auto &literal = negative ? *e.args[0] : e;
+  if (literal.kind != "int")
+    fail(e.token, "enum member '" + member + "' requires an integer literal value");
+  const auto &text = literal.token.text;
+  const int base = integerLiteralBase(text);
+  const auto digits = base == 10 ? text : text.substr(2);
+  if (digits.empty()) fail(e.token, "integer literal requires digits after its prefix");
+  for (char c : digits) {
+    const int digit = c >= '0' && c <= '9' ? c - '0'
+                    : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                    : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+    if (digit < 0 || digit >= base) fail(e.token, "invalid integer literal");
+  }
+  const auto decimal = Magnitude::parse(digits, base).decimal();
+  const auto value = negative && decimal != "0" ? "-" + decimal : decimal;
+  if (!fitsInteger(value, type))
+    fail(e.token, "enum value out of range for " + typeName(type));
+  return value;
+}
+double floatingValue(const Expr &e, const Type &type, const std::string &member) {
+  const bool negative = e.kind == "unary" && e.token.text == "-";
+  const auto &literal = negative ? *e.args[0] : e;
+  if ((literal.kind != "real" && literal.kind != "int") ||
+      integerLiteralBase(literal.token.text) != 10)
+    fail(e.token, "enum member '" + member + "' requires a decimal number literal value");
+  std::istringstream input(literal.token.text);
+  input.imbue(std::locale::classic());
+  double value = 0;
+  if (type == Type::Float) {
+    float single = 0;
+    input >> single;
+    value = single;
+  } else
+    input >> value;
+  if (!input || input.peek() != std::char_traits<char>::eof() || !std::isfinite(value))
+    fail(e.token, "invalid or out-of-range floating literal");
+  return negative ? -value : value;
+}
+std::string floatingConstant(double value) {
+  uint64_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  std::ostringstream encoded;
+  encoded << "0x" << std::hex << std::uppercase << std::setfill('0') << std::setw(16) << bits;
+  return encoded.str();
+}
+} // namespace
+std::map<std::string, EnumInfo> resolveEnums(const std::vector<EnumFragment> &fragments) {
+  std::map<std::string, EnumInfo> enums;
+  std::map<std::string, std::vector<const EnumFragment *>> groups;
+  std::vector<std::string> order;
+  for (const auto &fragment : fragments) {
+    auto &group = groups[fragment.name.text];
+    if (group.empty()) order.push_back(fragment.name.text);
+    group.push_back(&fragment);
+  }
+  for (const auto &name : order) {
+    const auto &group = groups.at(name);
+    // The underlying type may appear on any fragment; all stated types agree.
+    const EnumFragment *typed = nullptr;
+    for (const auto *fragment : group) {
+      if (fragment->type == Type::Void) continue;
+      if (!typed) typed = fragment;
+      else if (fragment->type != typed->type)
+        fail(fragment->name, "enum '" + name + "' is declared as " + typeName(typed->type) +
+                                 " in an earlier fragment, not " + typeName(fragment->type));
+    }
+    if (!typed)
+      fail(group.front()->name, "enum '" + name + "' requires an underlying type, as in " + name +
+                                    " : int #@{ ... }");
+    const auto type = typed->type;
+    if (!integral(type) && !floating(type) && !managedText(type))
+      fail(typed->name, "enum underlying type must be an integer, float, double, string, or name; got " +
+                            typeName(type));
+    EnumInfo info{group.front()->name, type, {}, {}};
+    // Integers count up by 1 and floating values by 0.5, both from 0 or from
+    // the previous member. Text defaults to the member name.
+    std::string integer = "-1";
+    double real = -0.5;
+    for (const auto *fragment : group)
+      for (const auto &member : fragment->members) {
+        const auto &label = member.name.text;
+        if (info.find(label) != info.members.size())
+          fail(member.name, "duplicate member '" + label + "' in enum '" + name + "'");
+        std::string value;
+        if (integral(type)) {
+          if (member.value) integer = integerValue(*member.value, type, label);
+          else {
+            integer = successor(integer);
+            if (!fitsInteger(integer, type))
+              fail(member.name, "implicit value " + integer + " of '" + label +
+                                    "' is out of range for " + typeName(type));
+          }
+          value = integer;
+        } else if (floating(type)) {
+          if (member.value) real = floatingValue(*member.value, type, label);
+          else {
+            real += 0.5;
+            if (type == Type::Float) real = double(float(real));
+            if (!std::isfinite(real))
+              fail(member.name, "implicit value of '" + label + "' is out of range");
+          }
+          value = floatingConstant(real);
+        } else if (member.value) {
+          if (member.value->kind != "text" || member.value->token.character)
+            fail(member.value->token, "enum member '" + label + "' requires a string literal value");
+          value = member.value->token.text;
+        } else
+          value = label;
+        info.members.push_back(member.name);
+        info.values.push_back(value);
+      }
+    enums.emplace(name, std::move(info));
+  }
+  return enums;
+}
 namespace {
 // Conservative proof for a direct borrow: every use of the parameter must
 // access its pointee. Unknown calls and address-taking can export that storage.
@@ -32,6 +181,10 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
   for (const auto &record : program.records)
     if (!symbols.records.emplace(record.name.text, record).second)
       fail(record.name, "duplicate container '" + record.name.text + "'");
+  symbols.enums = resolveEnums(program.enums);
+  for (const auto &[name, info] : symbols.enums)
+    if (symbols.records.count(name))
+      fail(info.declaration, "duplicate type name '" + name + "'");
   for (const auto &f : program) {
     if (!f.nativeSymbol.empty()) {
       if (f.name.text == "Main")
@@ -45,7 +198,10 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
       for (const auto &p : f.params) {
         if (p.type == Type::Bool ||
             (!p.reference && !textType(p.type) && !nativeScalar(p.type)) ||
-            (p.reference && textType(p.type)))
+            // References follow the C layout of numeric values up to 64 bits,
+            // pointers, and containers; other Duck types have no native ABI.
+            (p.reference && !((numeric(p.type) && integerWidth(p.type) <= 64) ||
+                              p.type.depth || recordValue(p.type))))
           fail(p.name, "unsupported native parameter ABI; use 32/64-bit values, numeric references, pointers, pointer references, or text by value");
       }
     }

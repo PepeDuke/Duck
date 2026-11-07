@@ -318,7 +318,7 @@ float
 double
 name     // UTF-8 text (8-bit code units)
 string   // UTF-16 text on every platform (16-bit code units)
-char
+char     // one Unicode scalar value, e.g. '🦆' (not a code unit)
 uint
 uint8
 uint16
@@ -328,16 +328,16 @@ int8
 int16
 int32
 int64
-u1-64   // example u2, 2 byte unsigned integer
-i1-64   // example i8, 8 byte signed integer
-date
-time
-datetime
+u1-64   // example u2, 2 byte unsigned integer (u1/u2/u4/u8 = uint8..uint64)
+i1-64   // example i8, 8 byte signed integer (i8 = long; i64 holds 512 bits)
+date     // civil date, proleptic Gregorian, 0001-01-01 .. 9999-12-31
+time     // time of day, 00:00:00 .. 23:59:59.999999999 (nanoseconds)
+datetime // date + time; none of the three carry a timezone
 // special types are
 big   // <-- that holds arbitrary size of int number --- should be used only for working with very large numbers
-ubig
+ubig  // nonnegative big; a subtraction that would go below zero traps
 tiny  // <-- holds floating point number of 69 digits  --- should be used only for working with very small numbers to get precision
-utiny 
+utiny // nonnegative tiny; results are rounded to 69 significant digits, ties to even 
 element // <-- single element of a tags tree
 markup // <-- hold tags tree for Mark Up  
 func // <-- holds function
@@ -349,6 +349,13 @@ follow the host's `wchar_t` or `TCHAR` configuration. A code unit is not
 necessarily one complete Unicode character. Native API adapters own any
 required encoding conversions. The bootstrap compiler's explicit `cstring`
 is a separate native interop type, not an implementation of either language type.
+
+`char` holds one Unicode scalar, so a supplementary character is one `char`
+even though it takes two `string` code units. `date`, `time`, and `datetime`
+are wall-clock values with no timezone. All four are built with validated
+constructors such as `char(65)`, `date(2024, 2, 29)`, and `time(12, 30, 0)`;
+an invalid value such as `date(2023, 2, 29)` is rejected. See the
+[compiler notes](Compiler/README.md#characters-dates-and-times) for details.
 
 Integer literals may use decimal, hexadecimal (`0xFF`), or binary (`0b1010`)
 notation. Prefixes may also be uppercase. Their values use the same type
@@ -402,7 +409,7 @@ explicit cast when conversion is intended.
 ## Constant variables in Duck
 as cont sign we use the same as static
 ``` c++
-#int age  // <- this is constant value, so it can't be changed
+#int age = 5  // <- this is constant value, so it can't be changed
 ```
 
 ## Functions in duck

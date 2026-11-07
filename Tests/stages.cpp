@@ -146,6 +146,63 @@ int BitwiseConditional(bool ready) { return ready ? (1 | 2) | 4 | 8 }
     auto second = std::async(std::launch::async, compileSource);
     check(first.get() == parallel && second.get() == parallel,
           "independent source pipelines changed generated IR");
+    // Effect classification: only value-only call groups with no external
+    // effects may run as tasks; one unknown callee taints its callers.
+    auto effects = duck::parse(duck::lex(R"(
+int Pure(int n) { return Helper(n) * 2 }
+int Helper(int n) { if n < 1 { return 0 }
+    return Pure(n - 1) + 1 }
+int Prints(int n) { Print(n)
+    return n }
+int Tainted(int n) { return Prints(n) }
+extern "C" int Absolute(int value) = "abs"
+int Native(int n) { return Absolute(n) }
+int Pointer(int* p) { return 1 }
+string Text(int n) { return "x" }
+int Local(int n) { string s = "x"
+    return n }
+Counter { int Value
+    int Get() { return Value } }
+Main() {
+    a : Pure(1)
+    b : Pure(2)
+    c : Tainted(3)
+    d : Pure(4)
+    Print(a + b + c + d)
+    e : Pure(5)
+    Print(e)
+    { f : Pure(6)
+      g : Pure(7) }
+}
+)", "effects.dk"));
+    const auto effectSymbols = duck::collectSymbols(effects);
+    std::vector<duck::FunctionAnalysis> effectAnalyses;
+    for (const auto &f : effects) effectAnalyses.push_back(duck::analyzeFunction(f, effectSymbols));
+    const auto isolated = duck::isolatedFunctions(effects, effectAnalyses);
+    check(isolated == std::set<std::string>{"Pure", "Helper"},
+          "unexpected isolated functions");
+    size_t mainIndex = 0;
+    while (effects[mainIndex].name.text != "Main") ++mainIndex;
+    auto &mainAnalysis = effectAnalyses[mainIndex];
+    duck::scheduleTasks(effects[mainIndex], isolated, mainAnalysis);
+    const auto &body = effects[mainIndex].body;
+    // a: next statement is independent. b: next calls Tainted, a barrier.
+    // c: unknown effects. d, e: joined immediately by Print. f: g follows.
+    check(mainAnalysis.taskSpawns.count(body[0].get()) && !mainAnalysis.taskSpawns.count(body[1].get()) &&
+              !mainAnalysis.taskSpawns.count(body[2].get()) && !mainAnalysis.taskSpawns.count(body[3].get()) &&
+              !mainAnalysis.taskSpawns.count(body[5].get()),
+          "unexpected task spawns");
+    check(mainAnalysis.taskBarriers.count(body[2].get()) && mainAnalysis.taskBarriers.count(body[4].get()) &&
+              !mainAnalysis.taskBarriers.count(body[1].get()),
+          "unexpected task barriers");
+    check(mainAnalysis.taskSpawns.count(body[7]->body[0].get()) &&
+              !mainAnalysis.taskSpawns.count(body[7]->body[1].get()),
+          "nested statement lists must schedule their own tasks");
+    const auto effectsIR = duck::compile(effects);
+    check(effectsIR == duck::compile(effects) &&
+              effectsIR.find("@duck.task.Main.0") != std::string::npos &&
+              duck::compile(effects, false).find("duck.task") == std::string::npos,
+          "task lowering must be deterministic and disabled by sequential compilation");
     std::cout << "Compiler stages passed\n";
     return 0;
   } catch (const std::exception &error) {

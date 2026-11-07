@@ -1,0 +1,30 @@
+// big/ubig: arbitrary-precision integers. Values are immutable and their
+// storage is released deterministically, like string and name.
+// tiny/utiny: decimal floating point with 69 significant digits, rounded
+// half to even. Decimal literals such as 0.1 are exact.
+// ubig and utiny never hold negative values: a subtraction that would go
+// below zero traps instead of wrapping.
+big Factorial(int n) {
+    big result = 1
+    for int i = 2; i <= n; i++ { result *= i }
+    return result
+}
+
+Main()
+{
+    Print(Factorial(52))             // the number of orderings of a card deck
+    big power = 1
+    for int i = 0; i < 200; i++ { power *= 2 }
+    Print(power)
+    ubig apples = 8
+    Print(apples - 3)                // apples - 9 would trap
+
+    tiny dime = 0.1
+    Print(dime)
+    Print(dime + 0.2)                // exactly 0.3, unlike float or double
+    Print(dime + 0.2 == 0.3)
+    tiny third = 1.0 / 3
+    Print(third)                     // 69 threes
+    tiny small = 1e-30
+    Print(small * small)
+}

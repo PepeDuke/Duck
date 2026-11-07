@@ -3,7 +3,10 @@ project(Duck VERSION 0.1.0 LANGUAGES CXX)
 
 add_library(duck_compiler
   Compiler/Lexer.cpp Compiler/Parser.cpp Compiler/Symbols.cpp
-  Compiler/Semantics.cpp Compiler/Codegen.cpp Compiler/Pipeline.cpp Compiler/TextRuntime.cpp Compiler/HeapRuntime.cpp)
+  Compiler/Semantics.cpp Compiler/Codegen.cpp Compiler/Pipeline.cpp Compiler/TextRuntime.cpp Compiler/HeapRuntime.cpp
+  Compiler/CalendarRuntime.cpp Compiler/WideRuntime.cpp Compiler/BigRuntime.cpp
+  Compiler/DecimalRuntime.cpp
+  Compiler/Scheduling.cpp Compiler/TaskRuntime.cpp)
 target_compile_features(duck_compiler PUBLIC cxx_std_17)
 target_include_directories(duck_compiler PUBLIC Compiler)
 add_executable(duckc Compiler/main.cpp)
@@ -37,6 +40,15 @@ if(BUILD_TESTING)
     add_test(NAME compiler.text COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/Tests/text.py
       --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
+    add_test(NAME compiler.calendar COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/Tests/calendar.py
+      --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
+    add_test(NAME compiler.wide_integers COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/Tests/wide_integers.py
+      --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
+    add_test(NAME compiler.arbitrary_numbers COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/Tests/arbitrary_numbers.py
+      --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
     add_test(NAME compiler.native COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/Tests/native_interop.py
       --builder $<TARGET_FILE:duck> --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
@@ -45,4 +57,8 @@ if(BUILD_TESTING)
     -DCOMPILER=$<TARGET_FILE:duckc> -DCLANG=${DUCK_CLANG}
     -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR} -DWORK=${CMAKE_CURRENT_BINARY_DIR}/tests
     -P ${CMAKE_CURRENT_SOURCE_DIR}/Tests/run.cmake)
+  add_test(NAME compiler.tasks COMMAND ${CMAKE_COMMAND}
+    -DCOMPILER=$<TARGET_FILE:duckc> -DCLANG=${DUCK_CLANG}
+    -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR} -DWORK=${CMAKE_CURRENT_BINARY_DIR}/task-tests
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/Tests/tasks.cmake)
 endif()

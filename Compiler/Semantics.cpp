@@ -1,4 +1,5 @@
 #include "Pipeline.h"
+#include "WideInteger.h"
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -8,13 +9,14 @@
 #include <sstream>
 
 namespace duck {
-namespace {
 std::string typeName(Type type) {
   if (type.depth) {
     auto prefix = type.role == Type::Owner ? "owning " : type.role == Type::Alias ? "tracked " : "";
     return prefix + typeName(type.pointee()) + "*";
   }
-  if (recordValue(type)) return type.record;
+  if (recordValue(type) || enumValue(type)) return type.record;
+  if (customInteger(type))
+    return (type.base == Type::UIntN ? "u" : "i") + std::to_string(type.bits / 8);
   switch (type.base) {
   case Type::Int8:
     return "int8";
@@ -40,11 +42,95 @@ std::string typeName(Type type) {
     return "bool";
   case Type::String: return "string";
   case Type::Name: return "name";
+  case Type::Char: return "char";
+  case Type::Date: return "date";
+  case Type::Time: return "time";
+  case Type::DateTime: return "datetime";
+  case Type::Big: return "big";
+  case Type::UBig: return "ubig";
+  case Type::Tiny: return "tiny";
+  case Type::UTiny: return "utiny";
   case Type::Text:
     return "cstring";
   default:
     return "void";
   }
+}
+namespace {
+bool leapYear(long long year) {
+  return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+}
+long long daysInMonth(long long year, long long month) {
+  if (month == 2) return leapYear(year) ? 29 : 28;
+  return month == 4 || month == 6 || month == 9 || month == 11 ? 30 : 31;
+}
+// Mirrors the runtime checks in CalendarRuntime.cpp for constructors whose
+// fields are all integer literals, so invalid constants never compile.
+void validateCalendar(Type type, const std::vector<long long> &v, const Token &token) {
+  const auto kind = typeName(type);
+  auto range = [&](long long value, long long low, long long high, const std::string &field) {
+    if (value < low || value > high)
+      fail(token, "invalid " + kind + ": " + field + " " + std::to_string(value) +
+                      " is outside " + std::to_string(low) + ".." + std::to_string(high));
+  };
+  if (type == Type::Char) {
+    range(v[0], 0, 0x10FFFF, "code point");
+    if (v[0] >= 0xD800 && v[0] <= 0xDFFF)
+      fail(token, "invalid char: surrogate code point " + std::to_string(v[0]) +
+                      " is not a Unicode scalar value");
+    return;
+  }
+  size_t time = 0;
+  if (type == Type::Date || type == Type::DateTime) {
+    range(v[0], 1, 9999, "year");
+    range(v[1], 1, 12, "month");
+    const auto limit = daysInMonth(v[0], v[1]);
+    if (v[2] < 1 || v[2] > limit)
+      fail(token, "invalid " + kind + ": day " + std::to_string(v[2]) + " is outside 1.." +
+                      std::to_string(limit) + " for month " + std::to_string(v[1]) +
+                      " of year " + std::to_string(v[0]));
+    time = 3;
+  }
+  if (type == Type::Time || type == Type::DateTime) {
+    range(v[time], 0, 23, "hour");
+    range(v[time + 1], 0, 59, "minute");
+    range(v[time + 2], 0, 59, "second");
+    if (v.size() > time + 3) range(v[time + 3], 0, 999999999, "nanosecond");
+  }
+}
+// Rounds a decimal literal (digits * 10^exponent) to tiny's 69 significant
+// digits, ties to even, exactly like the runtime. Returns the signed
+// coefficient and exponent as LLVM integer constants.
+std::pair<std::string, std::string> decimalLiteral(std::string digits, long long exponent,
+                                                   bool negative, Type type, const Token &token) {
+  const auto first = digits.find_first_not_of('0');
+  if (first == std::string::npos) return {"0", "0"};
+  digits = digits.substr(first);
+  if (digits.size() > 69) {
+    const auto dropped = digits.substr(69);
+    digits.resize(69);
+    exponent += (long long)dropped.size();
+    const bool rest = dropped.find_first_not_of('0', 1) != std::string::npos;
+    const bool odd = (digits.back() - '0') % 2 != 0;
+    if (dropped[0] > '5' || (dropped[0] == '5' && (rest || odd))) {
+      int i = 68;
+      while (i >= 0 && digits[size_t(i)] == '9') digits[size_t(i--)] = '0';
+      if (i < 0) {
+        digits = "1" + std::string(68, '0');
+        ++exponent;
+      } else
+        ++digits[size_t(i)];
+    }
+  }
+  while (digits.size() > 1 && digits.back() == '0') {
+    digits.pop_back();
+    ++exponent;
+  }
+  const long long adjusted = exponent + (long long)digits.size() - 1;
+  if (adjusted < -999999999 || adjusted > 999999999)
+    fail(token, "decimal literal out of range for " + typeName(type) +
+                    ": its leading digit must be within 10^-999999999..10^999999999");
+  return {(negative ? "-" : "") + digits, std::to_string(exponent)};
 }
 struct Local {
   Type type;
@@ -105,11 +191,33 @@ class Analyzer {
     if (!scopes.back().emplace(token.text, local).second)
       fail(token, "duplicate variable '" + token.text + "'");
   }
+  // An enum operand decays to its underlying value; Print alone keeps the name.
+  Type decay(const Expr &e, Type type) {
+    if (!enumValue(type)) return type;
+    const auto underlying = symbols.enums.at(type.record).type;
+    analysis.conversions[&e] = underlying;
+    return underlying;
+  }
+  // Day.Monday, unless Day is a local whose field is being read.
+  const EnumInfo *enumOf(const Expr &e) {
+    if (e.kind != "." || e.args[0]->kind != "name" || findLocal(e.args[0]->token)) return nullptr;
+    auto found = symbols.enums.find(e.args[0]->token.text);
+    return found == symbols.enums.end() ? nullptr : &found->second;
+  }
   void convert(const Expr &e, Type from, Type to) {
     if (from == to)
       return;
+    if (enumValue(from)) {
+      const auto underlying = symbols.enums.at(from.record).type;
+      if (underlying == to || (numeric(underlying) && numeric(to) && commonNumeric(underlying, to) == to) ||
+          (arbitraryNumber(to) && arbitraryCommon(underlying, to) == to)) {
+        analysis.conversions[&e] = to;
+        return;
+      }
+    }
     if ((from.role == Type::Raw && from.depth && to == Type::Pointer) ||
-        (numeric(from) && numeric(to) && commonNumeric(from, to) == to)) {
+        (numeric(from) && numeric(to) && commonNumeric(from, to) == to) ||
+        (arbitraryNumber(to) && arbitraryCommon(from, to) == to)) {
       analysis.conversions[&e] = to;
       return;
     }
@@ -157,6 +265,9 @@ class Analyzer {
       if (!ptr.depth || ptr == Type::Pointer) fail(e.token, "dereference requires a typed pointer");
       local.type = ptr.pointee();
     } else if (e.kind == ".") {
+      if (enumOf(e))
+        fail(e.token, "enum member '" + e.args[0]->token.text + "." + e.token.text +
+                          "' is a constant");
       const auto &base = *e.args[0];
       if (base.addressable()) local = location(base);
       else {
@@ -201,18 +312,92 @@ class Analyzer {
       }
       return expected;
     }
+    if (e.kind == "char")
+      return Type::Char;
+    if (e.kind == "construct") {
+      const auto type = e.castType;
+      const auto count = e.args.size();
+      if (type == Type::DateTime && count == 2) {
+        expression(*e.args[0], Type::Date);
+        expression(*e.args[1], Type::Time);
+        return type;
+      }
+      const bool valid = type == Type::Char ? count == 1
+                       : type == Type::Date ? count == 3
+                       : type == Type::Time ? count == 3 || count == 4
+                                            : count == 6 || count == 7;
+      if (!valid)
+        fail(e.token, "wrong argument count for " + typeName(type) + "(" +
+                          (type == Type::Char ? "code point"
+                           : type == Type::Date ? "year, month, day"
+                           : type == Type::Time ? "hour, minute, second[, nanosecond]"
+                                                : "date, time) or datetime(year, month, day, "
+                                                  "hour, minute, second[, nanosecond]") + ")");
+      // Fields are integers evaluated left to right, then validated together.
+      std::vector<long long> values;
+      bool constant = true;
+      for (const auto &argument : e.args) {
+        expression(*argument, Type::Long);
+        auto literal = analysis.integerConstants.find(argument.get());
+        constant = constant && literal != analysis.integerConstants.end();
+        if (constant) values.push_back(std::stoll(literal->second));
+      }
+      if (constant) validateCalendar(type, values, e.token);
+      return type;
+    }
     if (e.kind == "cast") {
-      auto source = expression(*e.args[0]);
+      auto source = decay(*e.args[0], expression(*e.args[0]));
       if (source.role != Type::Raw) fail(e.token, "cannot cast a tracked heap reference");
       symbols.validateType(e.castType, e.token);
       if ((source.depth && e.castType.depth) ||
           (source.depth && integerWidth(e.castType) == 64) ||
           (integerWidth(source) == 64 && e.castType.depth)) return e.castType;
       if (managedText(source) && managedText(e.castType)) return e.castType;
+      if (source == Type::Char && (integral(e.castType) || managedText(e.castType)))
+        return e.castType;
+      if (calendarValue(e.castType))
+        fail(e.token, "use " + typeName(e.castType) + "(...) to construct a validated " +
+                          typeName(e.castType));
+      if (calendarValue(source))
+        fail(e.token, "only char has explicit conversions: to an integer scalar value or "
+                      "to string/name");
+      if (arbitraryNumber(source) || arbitraryNumber(e.castType)) {
+        const auto &target = e.castType;
+        auto hostInteger = [](const Type &t) { return integral(t) && integerWidth(t) <= 64; };
+        if ((bigInteger(target) && (bigInteger(source) || hostInteger(source))) ||
+            (bigInteger(source) && hostInteger(target)) ||
+            (decimalValue(target) && (decimalValue(source) || hostInteger(source))))
+          return target;
+        fail(e.token, "big/ubig convert only to and from each other and integers up to 64 bits; "
+                      "tiny/utiny accept tiny/utiny and integers up to 64 bits");
+      }
       if ((!numeric(source) && source != Type::Bool) ||
           (!numeric(e.castType) && e.castType != Type::Bool))
         fail(e.token, "casts currently require numeric/bool types or string/name encoding conversions");
       return e.castType;
+    }
+    if (e.kind == "real" && decimalValue(expected)) {
+      // Exact decimal parsing: 0.1 is one tenth, not the nearest binary float.
+      const auto marker = op.find_first_of("eE");
+      const auto mantissa = op.substr(0, marker);
+      long long exponent = 0;
+      if (marker != std::string::npos) {
+        try {
+          exponent = std::stoll(op.substr(marker + 1));
+        } catch (...) {
+          fail(e.token, "decimal literal out of range for " + typeName(expected));
+        }
+        if (exponent < -4000000000LL || exponent > 4000000000LL)
+          fail(e.token, "decimal literal out of range for " + typeName(expected));
+      }
+      const auto point = mantissa.find('.');
+      auto digits = mantissa;
+      if (point != std::string::npos) {
+        digits.erase(point, 1);
+        exponent -= (long long)(mantissa.size() - point - 1);
+      }
+      analysis.decimalConstants[&e] = decimalLiteral(digits, exponent, false, expected, e.token);
+      return expected;
     }
     if (e.kind == "real") {
       Type type = expected == Type::Double ? Type::Double : Type::Float;
@@ -256,39 +441,42 @@ class Analyzer {
         if (value < 0 || value >= base)
           fail(e.token, "invalid integer literal");
       }
-      size_t consumed = 0;
-      uint64_t value = 0;
-      try {
-        value = std::stoull(magnitude, &consumed, base);
-      } catch (...) {
-        fail(e.token, "integer literal out of range");
+      // Magnitudes are arbitrary precision so wide iN/uN destinations can
+      // accept literals beyond uint64. Bounds compare significant bit counts.
+      const auto value = Magnitude::parse(magnitude, base);
+      const auto bits = int(value.bits());
+      // Signed range of a width: up to 2^(w-1)-1, or exactly 2^(w-1) when negated.
+      auto fitsSigned = [&](int width) {
+        return bits <= width - 1 || (negativeLiteral && bits == width && value.powerOfTwo());
+      };
+      Type type = negativeLiteral ? (fitsSigned(32) ? Type::Int : fitsSigned(64) ? Type::Long : Type::Void)
+                : bits <= 31 ? Type::Int : bits <= 63 ? Type::Long : bits <= 64 ? Type::UInt64
+                                                                     : Type::Void;
+      if ((expected == Type::UBig || expected == Type::UTiny) && negativeLiteral && bits)
+        fail(e.token, "integer literal out of range for " + typeName(expected));
+      if (decimalValue(expected)) {
+        analysis.decimalConstants[&e] =
+            decimalLiteral(value.decimal(), 0, negativeLiteral && bits, expected, e.token);
+        if (negativeLiteral) analysis.expressionTypes.emplace(e.args[0].get(), expected);
+        return expected;
       }
-      if (consumed != magnitude.size())
-        fail(e.token, "invalid integer literal");
-      Type type;
-      if (negativeLiteral) {
-        if (value > (uint64_t{1} << 63))
-          fail(e.token, "integer literal out of range");
-        type = value <= (uint64_t{1} << 31) ? Type::Int : Type::Long;
-      } else
-        type = value <= uint64_t(std::numeric_limits<int32_t>::max()) ? Type::Int
-             : value <= uint64_t(std::numeric_limits<int64_t>::max()) ? Type::Long
-                                                            : Type::UInt64;
-      if (integral(expected) && expected != Type::Int) {
-        const auto width = integerWidth(expected);
-        const auto limit = unsignedInteger(expected)
-            ? (width == 64 ? std::numeric_limits<uint64_t>::max()
-                           : (uint64_t{1} << width) - 1)
-            : (uint64_t{1} << (width - 1)) - (negativeLiteral ? 0 : 1);
-        if (value > limit || (unsignedInteger(expected) && negativeLiteral && value != 0))
+      if (bigInteger(expected))
+        type = expected; // Any magnitude; big literals become constant storage.
+      else if (integral(expected) && expected != Type::Int) {
+        const bool fits = unsignedInteger(expected) ? (negativeLiteral ? bits == 0 : bits <= integerWidth(expected))
+                                                    : fitsSigned(integerWidth(expected));
+        if (!fits)
           fail(e.token, "integer literal out of range for " + typeName(expected));
         type = expected;
       }
-      analysis.integerConstants[&e] =
-          (negativeLiteral && value != 0 ? "-" : "") + std::to_string(value);
+      if (type == Type::Void)
+        fail(e.token, "integer literal out of range; a literal beyond the 64-bit types "
+                      "needs a wider iN or uN destination or operand");
+      const auto decimal = value.decimal();
+      analysis.integerConstants[&e] = (negativeLiteral && bits ? "-" : "") + decimal;
       if (negativeLiteral) {
         analysis.expressionTypes.emplace(e.args[0].get(), type);
-        analysis.integerConstants[e.args[0].get()] = std::to_string(value);
+        analysis.integerConstants[e.args[0].get()] = decimal;
       }
       return type;
     }
@@ -298,6 +486,15 @@ class Analyzer {
       return Type::Bool;
     if (e.kind == "text")
       return textType(expected) ? expected : Type::String;
+    if (auto info = enumOf(e)) {
+      const auto index = info->find(e.token.text);
+      if (index == info->members.size())
+        fail(e.token, "unknown member '" + e.token.text + "' in enum '" + e.args[0]->token.text + "'");
+      analysis.enumMembers[&e] = index;
+      Type type = Type::Enum;
+      type.record = e.args[0]->token.text;
+      return type;
+    }
     if (e.addressable())
       return location(e).type;
     if (e.kind == "unary" && op == "&") {
@@ -325,7 +522,7 @@ class Analyzer {
       }
       auto local = location(arg);
       if (heapStorage(arg)) fail(arg.token, "cannot expose the address of tracked heap storage");
-      if (local.constant || managedText(local.type))
+      if (local.constant || managedValue(local.type))
         fail(arg.token, "cannot take the address of constant or managed text storage");
       return local.type.pointerTo();
     }
@@ -369,6 +566,10 @@ class Analyzer {
           if (found == symbols.end() || !found->second.method) fail(e.token, "unknown instance method '" + op + "'");
         }
       }
+      if (found == symbols.end() && !e.receiver && !symbols.records.count(op)) {
+        Type builtin;
+        if (calendarCall(e, builtin)) return builtin;
+      }
       if (found == symbols.end() && !e.receiver && symbols.records.count(op)) {
         if (!e.args.empty()) fail(e.token, "default container construction takes no arguments");
         Type t = Type::Record;
@@ -406,10 +607,14 @@ class Analyzer {
       return signature.result;
     }
     auto first = expression(*e.args[0],
-                            (e.kind == "unary" && op == "-" && numeric(expected)) ||
-                            (e.kind == "binary" && op == "+" && managedText(expected))
+                            (e.kind == "unary" && op == "-" &&
+                             (numeric(expected) || arbitraryNumber(expected))) ||
+                            (e.kind == "binary" && op == "+" && managedText(expected)) ||
+                            leftLiteralAdopts(e, expected)
                                 ? expected
                                 : Type::Void);
+    // Both conditional branches keep their enum type.
+    if (e.kind != "conditional") first = decay(*e.args[0], first);
     if (e.kind == "conditional") {
       require(first, Type::Bool, e.token);
       auto yes = expression(*e.args[1], expected);
@@ -423,6 +628,13 @@ class Analyzer {
       if (expected == Type::Void && e.args[1]->kind == "text" && textType(no)) {
         yes = no;
         analysis.expressionTypes[e.args[1].get()] = no;
+      }
+      if (arbitraryNumber(yes) || arbitraryNumber(no)) {
+        const auto type = arbitraryCommon(yes, no);
+        if (type == Type::Void) require(no, yes, e.token);
+        convert(*e.args[1], yes, type);
+        convert(*e.args[2], no, type);
+        return type;
       }
       if (numeric(yes) && numeric(no)) {
         auto type = common(yes, no, e.token);
@@ -439,6 +651,12 @@ class Analyzer {
       require(no, yes, e.token);
       return yes;
     }
+    if (e.kind == "unary" && arbitraryNumber(first)) {
+      if (op != "-") fail(e.token, typeName(first) + " supports only arithmetic negation");
+      if (first == Type::UBig || first == Type::UTiny)
+        fail(e.token, "cannot negate unsigned " + typeName(first));
+      return first;
+    }
     if (e.kind == "unary") {
       if (op == "!")
         require(first, Type::Bool, e.token);
@@ -450,14 +668,25 @@ class Analyzer {
     }
     if (op == "&&" || op == "||") {
       require(first, Type::Bool, e.token);
-      require(expression(*e.args[1]), Type::Bool, e.token);
+      require(decay(*e.args[1], expression(*e.args[1])), Type::Bool, e.token);
       return Type::Bool;
     }
     Type hint = Type::Void;
     if (op == "+" && managedText(expected)) hint = expected;
+    // Only beyond 64 bits can a literal need its operand's width to be representable.
+    else if (customInteger(first) && integerWidth(first) > 64 && op != "<<" && op != ">>" &&
+             (e.args[1]->kind == "int" ||
+              (e.args[1]->kind == "unary" && e.args[1]->token.text == "-" &&
+               e.args[1]->args[0]->kind == "int")))
+      hint = first;
+    else if (arbitraryNumber(first) && op != "<<" && op != ">>" &&
+             (e.args[1]->kind == "int" || e.args[1]->kind == "real" ||
+              (e.args[1]->kind == "unary" && e.args[1]->token.text == "-" &&
+               (e.args[1]->args[0]->kind == "int" || e.args[1]->args[0]->kind == "real"))))
+      hint = first; // Literals take big/tiny precision from the left operand.
     else if (textType(first) &&
              (e.args[0]->kind != "text" || e.args[1]->kind == "text")) hint = first;
-    auto second = expression(*e.args[1], hint);
+    auto second = decay(*e.args[1], expression(*e.args[1], hint));
     // Literals adopt the other operand's text type; named values never change encoding implicitly.
     if (e.args[0]->kind == "text" && textType(second) && textType(first)) {
       first = second;
@@ -471,6 +700,28 @@ class Analyzer {
       if (op == "+") return first;
       if (op == "==" || op == "!=") return Type::Bool;
       fail(e.token, "text supports only concatenation and equality");
+    }
+    if (arbitraryNumber(first) || arbitraryNumber(second)) {
+      const auto type = arbitraryCommon(first, second);
+      if (type == Type::Void)
+        fail(e.token, "big/ubig and tiny/utiny combine only with their own kind and integers "
+                      "up to 64 bits; got " + typeName(first) + " and " + typeName(second));
+      const bool comparison = op == "==" || op == "!=" || op == "<" || op == ">" ||
+                              op == "<=" || op == ">=";
+      if (!comparison && op != "+" && op != "-" && op != "*" && op != "/" &&
+          !(op == "%" && bigInteger(type)))
+        fail(e.token, typeName(type) + " supports + - * /" +
+                          (bigInteger(type) ? " %" : "") + " and comparisons");
+      convert(*e.args[0], first, type);
+      convert(*e.args[1], second, type);
+      return comparison ? Type::Bool : type;
+    }
+    if (calendarValue(first) || calendarValue(second)) {
+      if (op != "==" && op != "!=" && op != "<" && op != ">" && op != "<=" && op != ">=")
+        fail(e.token, typeName(calendarValue(first) ? first : second) +
+                          " values support only comparison operators");
+      require(second, first, e.token);
+      return Type::Bool;
     }
     if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") {
       if (!integral(first) || !integral(second))
@@ -495,6 +746,57 @@ class Analyzer {
       require(first, Type::Int, e.token);
     return op == "<" || op == ">" || op == "<=" || op == ">=" ? Type::Bool
                                                               : first;
+  }
+  // A left literal operand of big/tiny arithmetic takes the destination type
+  // where it could not convert implicitly anyway: integer literals beyond 64
+  // bits into big, and real literals into tiny. Integer literals into tiny keep
+  // integer arithmetic, so tiny x = 1 / 3 is 0, as for double.
+  static bool leftLiteralAdopts(const Expr &e, Type expected) {
+    const auto &op = e.token.text;
+    if (e.kind != "binary" || e.args.empty() ||
+        (op != "+" && op != "-" && op != "*" && op != "/" && op != "%"))
+      return false;
+    const Expr *literal = e.args[0].get();
+    if (literal->kind == "unary" && literal->token.text == "-") literal = literal->args[0].get();
+    return (bigInteger(expected) && literal->kind == "int") ||
+           (decimalValue(expected) && literal->kind == "real");
+  }
+  // Calendar accessors are built-ins only when no user function or container
+  // has the same name, so existing programs keep their own Day or Second.
+  bool calendarCall(const Expr &e, Type &type) {
+    const auto &op = e.token.text;
+    const bool datePart = op == "Year" || op == "Month" || op == "Day" || op == "DayOfWeek";
+    const bool timePart = op == "Hour" || op == "Minute" || op == "Second" || op == "Nanosecond";
+    if (!datePart && !timePart && op != "DateOf" && op != "TimeOf" && op != "AddDays" &&
+        op != "DaysBetween")
+      return false;
+    const size_t count = op == "AddDays" || op == "DaysBetween" ? 2 : 1;
+    if (e.args.size() != count) fail(e.token, "wrong argument count for '" + op + "'");
+    analysis.calendarCalls.insert(&e);
+    const auto value = expression(*e.args[0]);
+    auto accept = [&](bool valid, const std::string &expected) {
+      if (!valid)
+        fail(e.args[0]->token, op + " requires " + expected + ", got " + typeName(value));
+    };
+    if (datePart) {
+      accept(value == Type::Date || value == Type::DateTime, "a date or datetime");
+      type = Type::Int;
+    } else if (timePart) {
+      accept(value == Type::Time || value == Type::DateTime, "a time or datetime");
+      type = Type::Int;
+    } else if (op == "DateOf" || op == "TimeOf") {
+      accept(value == Type::DateTime, "a datetime");
+      type = op == "DateOf" ? Type::Date : Type::Time;
+    } else if (op == "AddDays") {
+      accept(value == Type::Date || value == Type::DateTime, "a date or datetime");
+      expression(*e.args[1], Type::Long);
+      type = value;
+    } else {
+      accept(value == Type::Date, "a date");
+      expression(*e.args[1], Type::Date);
+      type = Type::Long;
+    }
+    return true;
   }
   bool sequence(const std::vector<std::unique_ptr<Stmt>> &statements) {
     bool terminated = false;
@@ -672,7 +974,11 @@ class Analyzer {
                            s.kind == "<<=" || s.kind == ">>=";
       if (bitwise && !integral(local.type))
         fail(s.token, "bitwise operators require integer operands");
-      if (s.kind != "assign" && !(s.kind == "+=" && managedText(local.type)) &&
+      const bool arbitraryArithmetic =
+          arbitraryNumber(local.type) &&
+          (s.kind == "+=" || s.kind == "-=" || s.kind == "*=" || s.kind == "/=" ||
+           s.kind == "++" || s.kind == "--" || (s.kind == "%=" && bigInteger(local.type)));
+      if (s.kind != "assign" && !(s.kind == "+=" && managedText(local.type)) && !arbitraryArithmetic &&
           (!numeric(local.type) || (s.kind == "%=" && !integral(local.type))))
         require(local.type, Type::Int, s.token);
       if (s.expr) {
