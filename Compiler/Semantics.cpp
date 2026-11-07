@@ -10,7 +10,12 @@
 namespace duck {
 namespace {
 std::string typeName(Type type) {
-  switch (type) {
+  if (type.depth) {
+    auto prefix = type.role == Type::Owner ? "owning " : type.role == Type::Alias ? "tracked " : "";
+    return prefix + typeName(type.pointee()) + "*";
+  }
+  if (recordValue(type)) return type.record;
+  switch (type.base) {
   case Type::Int8:
     return "int8";
   case Type::Short:
@@ -37,8 +42,6 @@ std::string typeName(Type type) {
   case Type::Name: return "name";
   case Type::Text:
     return "cstring";
-  case Type::Pointer:
-    return "void*";
   default:
     return "void";
   }
@@ -47,6 +50,7 @@ struct Local {
   Type type;
   bool constant;
   bool initialized = true;
+  bool receiver = false;
 };
 class Analyzer {
   const Symbols &symbols;
@@ -59,19 +63,25 @@ class Analyzer {
   std::vector<LoopFlow> loops;
   FunctionAnalysis analysis;
   Type result;
+  const Expr *ownerDestination = nullptr;
   std::string container;
+  bool method = false;
 
   void require(Type actual, Type expected, const Token &token) {
     if (actual != expected)
       fail(token, "type mismatch: expected " + typeName(expected) + ", got " +
                       typeName(actual));
   }
-  Local &lookup(const Token &token) {
+  Local *findLocal(const Token &token) {
     for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope) {
       auto local = scope->find(token.text);
       if (local != scope->end())
-        return local->second;
+        return &local->second;
     }
+    return nullptr;
+  }
+  Local &lookup(const Token &token) {
+    if (auto local = findLocal(token)) return *local;
     fail(token, "unknown variable '" + token.text + "'");
   }
   void requireInitialized(const Token &token) {
@@ -98,7 +108,8 @@ class Analyzer {
   void convert(const Expr &e, Type from, Type to) {
     if (from == to)
       return;
-    if (numeric(from) && numeric(to) && commonNumeric(from, to) == to) {
+    if ((from.role == Type::Raw && from.depth && to == Type::Pointer) ||
+        (numeric(from) && numeric(to) && commonNumeric(from, to) == to)) {
       analysis.conversions[&e] = to;
       return;
     }
@@ -120,10 +131,83 @@ class Analyzer {
     }
     return type;
   }
+  Symbols::const_iterator resolve(const std::string &op) const {
+    auto found = symbols.end();
+    // Resolve relative names from the innermost static container outward.
+    auto scope = container;
+    while (!scope.empty() && found == symbols.end()) {
+      found = symbols.find(scope + "." + op);
+      auto dot = scope.rfind('.');
+      scope = dot == std::string::npos ? "" : scope.substr(0, dot);
+    }
+    if (found == symbols.end())
+      found = symbols.find(op);
+    return found;
+  }
+  // An addressable expression denotes existing storage. Dot inherits the
+  // mutability of its base; dereferencing borrows the pointed-to storage.
+  Local location(const Expr &e, bool read = true) {
+    Local local{Type::Void, false};
+    if (e.kind == "name") {
+      local = lookup(e.token);
+      if (local.receiver) analysis.receiverStorage.insert(&e);
+      if (read) requireInitialized(e.token);
+    } else if (e.kind == "unary" && e.token.text == "*") {
+      auto ptr = expression(*e.args[0]);
+      if (!ptr.depth || ptr == Type::Pointer) fail(e.token, "dereference requires a typed pointer");
+      local.type = ptr.pointee();
+    } else if (e.kind == ".") {
+      const auto &base = *e.args[0];
+      if (base.addressable()) local = location(base);
+      else {
+        local.type = expression(base);
+        if (recordValue(local.type)) fail(e.token, "field access requires addressable container storage");
+      }
+      if (local.type.depth) {
+        local.type = local.type.pointee();
+        local.constant = false; // A constant pointer can point to mutable storage.
+      }
+      if (!recordValue(local.type)) fail(e.token, "field access requires a container or a pointer to a container");
+      const auto &fields = symbols.records.at(local.type.record).fields;
+      size_t i = 0;
+      while (i < fields.size() && fields[i].name.text != e.token.text) ++i;
+      if (i == fields.size()) fail(e.token, "unknown container field '" + e.token.text + "'");
+      analysis.fieldIndices[&e] = i;
+      local.type = fields[i].type;
+    } else fail(e.token, "operand must be a mutable variable, field, or dereference");
+    analysis.expressionTypes[&e] = local.type;
+    return local;
+  }
+  bool heapStorage(const Expr &e) const {
+    if (analysis.receiverStorage.count(&e)) return true;
+    if (analysis.expressionTypes.at(&e).role != Type::Raw) return true;
+    if (e.kind == "." || (e.kind == "unary" && e.token.text == "*"))
+      return heapStorage(*e.args[0]);
+    return false;
+  }
   Type checkExpression(const Expr &e, Type expected) {
     const auto &op = e.token.text;
+    if (e.kind == "initializer") {
+      if (!recordValue(expected)) fail(e.token, "named initialization requires a container value type");
+      const auto &fields = symbols.records.at(expected.record).fields;
+      std::set<size_t> assigned;
+      for (const auto &field : e.args) {
+        size_t i = 0;
+        while (i < fields.size() && fields[i].name.text != field->token.text) ++i;
+        if (i == fields.size()) fail(field->token, "unknown container field");
+        if (!assigned.insert(i).second) fail(field->token, "duplicate field initializer");
+        analysis.fieldIndices[field.get()] = i;
+        expression(*field->args.front(), fields[i].type);
+      }
+      return expected;
+    }
     if (e.kind == "cast") {
       auto source = expression(*e.args[0]);
+      if (source.role != Type::Raw) fail(e.token, "cannot cast a tracked heap reference");
+      symbols.validateType(e.castType, e.token);
+      if ((source.depth && e.castType.depth) ||
+          (source.depth && integerWidth(e.castType) == 64) ||
+          (integerWidth(source) == 64 && e.castType.depth)) return e.castType;
       if (managedText(source) && managedText(e.castType)) return e.castType;
       if ((!numeric(source) && source != Type::Bool) ||
           (!numeric(e.castType) && e.castType != Type::Bool))
@@ -209,14 +293,41 @@ class Analyzer {
       return type;
     }
     if (e.kind == "null")
-      return Type::Pointer;
+      return expected.depth ? expected : Type::Pointer;
     if (e.kind == "bool")
       return Type::Bool;
     if (e.kind == "text")
       return textType(expected) ? expected : Type::String;
-    if (e.kind == "name") {
-      requireInitialized(e.token);
-      return lookup(e.token).type;
+    if (e.addressable())
+      return location(e).type;
+    if (e.kind == "unary" && op == "&") {
+      const auto &arg = *e.args[0];
+      const Expr *root = &arg;
+      std::string suffix;
+      while (root->kind == ".") {
+        suffix = "." + root->token.text + suffix;
+        root = root->args[0].get();
+      }
+      if (root->kind == "name") {
+        bool local = false;
+        for (const auto &scope : scopes) local |= scope.count(root->token.text) != 0;
+        auto function = resolve(root->token.text + suffix);
+        if (!local && function != symbols.end()) {
+          const auto &sig = function->second;
+          if (sig.method) fail(arg.token, "instance method requires a receiver");
+          if (sig.result.role != Type::Raw || (sig.result != Type::Void && !nativeScalar(sig.result)))
+            fail(arg.token, "unsupported callback return ABI");
+          for (const auto &p : sig.parameters)
+            if (p.reference || !nativeScalar(p.type)) fail(arg.token, "unsupported callback parameter ABI");
+          analysis.callTargets[&e] = function->first;
+          return Type::Pointer;
+        }
+      }
+      auto local = location(arg);
+      if (heapStorage(arg)) fail(arg.token, "cannot expose the address of tracked heap storage");
+      if (local.constant || managedText(local.type))
+        fail(arg.token, "cannot take the address of constant or managed text storage");
+      return local.type.pointerTo();
     }
     if (e.kind == "call") {
       if (op == "Length" || op == "CodeUnitAt") {
@@ -233,40 +344,63 @@ class Analyzer {
         auto printed = expression(*e.args[0]);
         if (printed == Type::Void)
           fail(e.token, "cannot print void");
-        if (printed == Type::Pointer)
+        if (recordValue(printed)) fail(e.token, "cannot print a container");
+        if (printed.depth)
           fail(e.token, "cannot print an opaque pointer; compare it with null instead");
         return Type::Void;
       }
-      auto found = symbols.end();
-      // Resolve relative names from the innermost static container outward.
-      auto scope = container;
-      while (!scope.empty() && found == symbols.end()) {
-        found = symbols.find(scope + "." + op);
-        auto dot = scope.rfind('.');
-        scope = dot == std::string::npos ? "" : scope.substr(0, dot);
+      auto found = resolve(op);
+      bool instance = false;
+      if (e.receiver) {
+        const Expr *root = e.receiver.get();
+        while (root->kind == ".") root = root->args[0].get();
+        instance = root->kind != "name" || findLocal(root->token);
+        if (instance) {
+          const auto &base = *e.receiver;
+          Type t;
+          if (base.addressable()) {
+            auto local = location(base);
+            t = local.type;
+            if (!t.depth && local.constant) fail(base.token, "cannot call a mutable method on a constant");
+          } else t = expression(base);
+          if (t.depth) t = t.pointee();
+          if (!recordValue(t)) fail(base.token, "method receiver requires a container");
+          found = symbols.find(t.record + op.substr(op.rfind('.')));
+          if (found == symbols.end() || !found->second.method) fail(e.token, "unknown instance method '" + op + "'");
+        }
       }
-      if (found == symbols.end())
-        found = symbols.find(op);
+      if (found == symbols.end() && !e.receiver && symbols.records.count(op)) {
+        if (!e.args.empty()) fail(e.token, "default container construction takes no arguments");
+        Type t = Type::Record;
+        t.record = op;
+        return t;
+      }
       if (found == symbols.end())
         fail(e.token, "unknown function '" + op + "'");
       analysis.callTargets[&e] = found->first;
       const auto &signature = found->second;
-      if (signature.parameters.size() != e.args.size())
+      if (signature.result.role == Type::Owner && ownerDestination != &e)
+        fail(e.token, "receive an owning function result with ::");
+      if (signature.method && !instance && (!method || e.receiver))
+        fail(e.token, "instance method requires a receiver");
+      const size_t offset = signature.method ? 1 : 0;
+      if (signature.parameters.size() != e.args.size() + offset)
         fail(e.token, "wrong argument count for '" + op + "'");
       for (size_t i = 0; i < e.args.size(); ++i) {
         const auto &argument = *e.args[i];
-        const auto &parameter = signature.parameters[i];
+        const auto &parameter = signature.parameters[i + offset];
         if (parameter.reference) {
-          if (argument.kind != "name")
-            fail(argument.token,
-                 "reference argument must be a mutable variable");
-          if (lookup(argument.token).constant)
-            fail(argument.token,
-                 "cannot pass a constant to a mutable reference");
-        }
-        if (parameter.reference)
-          require(expression(argument), parameter.type, argument.token);
-        else
+          auto local = location(argument);
+          if (heapStorage(argument)) fail(argument.token, "cannot expose tracked heap storage by reference");
+          if (local.constant) fail(argument.token, "cannot pass a constant to a mutable reference");
+          require(local.type, parameter.type, argument.token);
+        } else if (argument.kind == "name" && lookup(argument.token).type.role != Type::Raw) {
+          auto tracked = expression(argument);
+          tracked.role = Type::Raw;
+          if (!signature.nonescapingParameters.count(i + offset) || tracked != parameter.type)
+            fail(argument.token, "tracked pointer requires a proven nonescaping parameter of matching type");
+          analysis.conversions[&argument] = parameter.type;
+        } else
           expression(argument, parameter.type);
       }
       return signature.result;
@@ -279,11 +413,13 @@ class Analyzer {
     if (e.kind == "conditional") {
       require(first, Type::Bool, e.token);
       auto yes = expression(*e.args[1], expected);
+      if (yes.role != Type::Raw) fail(e.token, "tracked aliases require a named source");
       if (yes == Type::Void)
         fail(e.token, "conditional branches must produce values");
       auto hint = expected;
       if (hint == Type::Void && textType(yes) && e.args[1]->kind != "text") hint = yes;
       auto no = expression(*e.args[2], hint);
+      if (no.role != Type::Raw) fail(e.token, "tracked aliases require a named source");
       if (expected == Type::Void && e.args[1]->kind == "text" && textType(no)) {
         yes = no;
         analysis.expressionTypes[e.args[1].get()] = no;
@@ -293,6 +429,12 @@ class Analyzer {
         convert(*e.args[1], yes, type);
         convert(*e.args[2], no, type);
         return type;
+      }
+      if (yes.depth && no.depth && (e.args[1]->kind == "null" || e.args[2]->kind == "null")) {
+        Type t = e.args[1]->kind == "null" ? no : yes;
+        if (e.args[1]->kind == "null") analysis.expressionTypes[e.args[1].get()] = t;
+        if (e.args[2]->kind == "null") analysis.expressionTypes[e.args[2].get()] = t;
+        return t;
       }
       require(no, yes, e.token);
       return yes;
@@ -311,7 +453,7 @@ class Analyzer {
       require(expression(*e.args[1]), Type::Bool, e.token);
       return Type::Bool;
     }
-    auto hint = Type::Void;
+    Type hint = Type::Void;
     if (op == "+" && managedText(expected)) hint = expected;
     else if (textType(first) &&
              (e.args[0]->kind != "text" || e.args[1]->kind == "text")) hint = first;
@@ -321,6 +463,9 @@ class Analyzer {
       first = second;
       analysis.expressionTypes[e.args[0].get()] = second;
     }
+    if ((op == "==" || op == "!=") && first.depth && second.depth &&
+        (first.pointee() == second.pointee() || first == Type::Pointer || second == Type::Pointer))
+      return Type::Bool;
     if (managedText(first) && managedText(second)) {
       require(second, first, e.token);
       if (op == "+") return first;
@@ -358,6 +503,18 @@ class Analyzer {
         fail(s->token, "unreachable statement");
       terminated = statement(*s);
     }
+    // A local alias may use the payload directly when neither binding can
+    // escape or be cleared/moved for the rest of this lexical scope.
+    for (size_t i = 0; i < statements.size(); ++i) {
+      const auto &s = *statements[i];
+      if (s.kind != "let" || analysis.localTypes.at(&s).role != Type::Alias ||
+          analysis.expressionTypes.at(s.expr.get()).role != Type::Owner) continue;
+      bool scoped = true;
+      for (size_t j = i + 1; scoped && j < statements.size(); ++j)
+        scoped = borrowsOnly(*statements[j], s.name) &&
+                 borrowsOnly(*statements[j], s.expr->token.text);
+      if (scoped) analysis.scopedBorrows.insert(&s);
+    }
     return terminated;
   }
   bool block(const std::vector<std::unique_ptr<Stmt>> &statements) {
@@ -378,7 +535,14 @@ class Analyzer {
         loops.back().breaks.push_back(scopes);
       return true;
     }
+    if (s.kind == "returnOwner") {
+      if (!s.expr || s.expr->kind != "name" || lookup(s.expr->token).constant ||
+          expression(*s.expr) != result)
+        fail(s.token, "return :: requires a mutable owning local of the declared type");
+      return true;
+    }
     if (s.kind == "return") {
+      if (result.role == Type::Owner) fail(s.token, "owning function requires return :: on every return");
       require(s.expr ? expression(*s.expr, result) : Type::Void, result,
               s.token);
       return true;
@@ -442,25 +606,68 @@ class Analyzer {
       scopes.pop_back();
       return false;
     }
-    if (s.kind == "let") {
-      auto type = s.expr ? expression(*s.expr, s.type) : s.type;
+    if (s.kind == "let" || s.kind == "own") {
+      symbols.validateType(s.type, s.token);
+      // Inspect the initializer before choosing between raw storage and an alias.
+      Type hint = s.type;
+      if (s.expr && s.type.depth && s.expr->kind != "null") {
+        const bool literal = s.expr->kind == "int" || s.expr->kind == "real" ||
+            (s.expr->kind == "unary" && s.expr->token.text == "-" && s.expr->args[0]->kind == "int");
+        hint = (literal && numeric(s.type.pointee())) || s.expr->kind == "initializer"
+                   ? s.type.pointee() : Type(Type::Void);
+      }
+      if (s.kind == "own") ownerDestination = s.expr.get();
+      auto type = s.expr ? expression(*s.expr, hint) : s.type;
+      ownerDestination = nullptr;
+      if (s.kind == "let" && s.type.depth && heapValue(s.type.pointee()) && heapValue(type)) {
+        convert(*s.expr, type, s.type.pointee());
+        type = s.type;
+        type.role = Type::Owner;
+      } else if (s.kind == "own") {
+        if (s.expr && type.depth) {
+          if (type.role != Type::Owner || (s.expr->kind != "call" &&
+              (s.expr->kind != "name" || lookup(s.expr->token).constant)))
+            fail(s.token, "ownership transfer requires a mutable owning source");
+        } else if (s.expr) {
+          if (!heapValue(type))
+            fail(s.token, "heap allocation requires a scalar or container value");
+          type = type.pointerTo();
+        }
+        type.role = Type::Owner;
+      } else if (type.role != Type::Raw) {
+        if (s.expr->kind != "name") fail(s.token, "tracked aliases require a named source");
+        type.role = Type::Alias;
+      } else if (s.expr && s.type.depth) {
+        convert(*s.expr, type, s.type);
+        type = s.type;
+      }
       if (type == Type::Void)
         fail(s.token, "locals currently support only values, not void");
-      if (s.type != Type::Void)
-        require(type, s.type, s.token);
+      if (s.type != Type::Void) {
+        auto declared = s.type;
+        declared.role = type.role;
+        require(type, declared, s.token);
+      }
+      analysis.localTypes[&s] = type;
       auto name = s.token;
       name.text = s.name;
-      bind(name, {type, s.constant, s.expr != nullptr});
+      bind(name, {type, s.constant, s.kind == "own" || s.expr != nullptr || recordValue(type)});
     } else if (s.kind == "expr")
       expression(*s.expr);
     else {
-      auto name = s.token;
-      name.text = s.name;
-      auto local = lookup(name);
+      auto local = location(*s.target, s.kind != "assign");
       if (local.constant)
-        fail(s.token, "cannot modify constant '" + s.name + "'");
-      if (s.kind != "assign")
-        requireInitialized(name);
+        fail(s.token, "cannot modify constant '" + s.target->token.text + "'");
+      if (local.type.role != Type::Raw) {
+        if (s.kind != "assign" || (s.expr->kind != "null" &&
+            (local.type.role != Type::Alias || s.expr->kind != "name")))
+          fail(s.token, "tracked binding requires null or an alias assignment");
+        auto source = expression(*s.expr);
+        if (s.expr->kind != "null" && (source.role == Type::Raw ||
+            source.pointee() != local.type.pointee()))
+          fail(s.token, "incompatible tracked alias source");
+        return false;
+      }
       const bool bitwise = s.kind == "&=" || s.kind == "|=" || s.kind == "^=" ||
                            s.kind == "<<=" || s.kind == ">>=";
       if (bitwise && !integral(local.type))
@@ -475,7 +682,7 @@ class Analyzer {
         } else
           expression(*s.expr, local.type);
       }
-      lookup(name).initialized = true;
+      if (s.target->kind == "name") lookup(s.target->token).initialized = true;
     }
     return false;
   }
@@ -488,8 +695,17 @@ public:
     if (dot != std::string::npos)
       container = function.name.text.substr(0, dot);
     scopes.emplace_back();
-    for (const auto &parameter : function.params)
-      bind(parameter.name, {parameter.type, false});
+    method = function.method;
+    if (method) {
+      for (const auto &field : symbols.records.at(container).fields)
+        bind(field.name, {field.type, false, true, true});
+      scopes.emplace_back();
+    }
+    symbols.validateType(result, function.name);
+    for (const auto &parameter : function.params) {
+      symbols.validateType(parameter.type, parameter.name);
+      bind(parameter.name, {parameter.type, false, true, method && &parameter == &function.params.front()});
+    }
     if (!function.nativeSymbol.empty())
       return std::move(analysis);
     if (!sequence(function.body) && result != Type::Void)

@@ -3,7 +3,7 @@ project(Duck VERSION 0.1.0 LANGUAGES CXX)
 
 add_library(duck_compiler
   Compiler/Lexer.cpp Compiler/Parser.cpp Compiler/Symbols.cpp
-  Compiler/Semantics.cpp Compiler/Codegen.cpp Compiler/Pipeline.cpp Compiler/TextRuntime.cpp)
+  Compiler/Semantics.cpp Compiler/Codegen.cpp Compiler/Pipeline.cpp Compiler/TextRuntime.cpp Compiler/HeapRuntime.cpp)
 target_compile_features(duck_compiler PUBLIC cxx_std_17)
 target_include_directories(duck_compiler PUBLIC Compiler)
 add_executable(duckc Compiler/main.cpp)

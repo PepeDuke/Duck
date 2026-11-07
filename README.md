@@ -26,8 +26,8 @@ broader than the implemented subset. See [Compiler/README.md](Compiler/README.md
 for build instructions, executable examples, and current limitations.
 The separate [build tool](BuildTool/README.md) builds modular programs from
 `.dkp` projects, with explicit dependencies, optional modules, and native linking.
-The bootstrap also supports `extern "C"` native API declarations, opaque `void*`
-handles, UTF-16 `string` and UTF-8 `name` values with deterministic cleanup,
+The bootstrap also supports `extern "C"` native API declarations, typed pointers, C-layout structs, native callbacks,
+opaque `void*` handles, UTF-16 `string` and UTF-8 `name` values with deterministic cleanup,
 and native text arguments; see the
 [native interop guide](Compiler/README.md#native-api-calls-and-opaque-handles).
 
@@ -66,7 +66,7 @@ Comments are the same as in c# or c++ as there is no need to change proven stand
 ```
 
 ## Termination in Duck
-Duck is using newline terminated expressions but in some cases ; are allowed.
+Separate statements with line breaks. Counted `for` headers use `;` between their three clauses.
 
 ## Formatting in Duck
 Formatting is up to the user and the formatting in samples should not be taken as the law, if you prefer different formatting you can use it as long each expression is ended with new line or the } symbol
@@ -517,11 +517,22 @@ Example* e
 Example* e2 = null
 ```
 
+Use `.` to access a field through either a value or a pointer.
+
+```c++
+Example local()
+Example* onHeap()
+local.Val = 3
+onHeap.Val = local.Val
+```
+
 If we want to do inplace heap allocation we can use the :: symbol
 ``` c++
 Example* [] examples
 examples += ::Example()
 ```
+
+`void*` is an untracked native handle. The API that provides it determines whether and how to release it.
 
 ## Object references in Duck
 In Duck there is only one owner of the value called parent, but this value can still have more references.
@@ -646,6 +657,63 @@ cake2 : CakeFactory.MakeCake(false) // returns null as the reference to c in the
 cake2.Eat() // <-- Error null reference
 
 ```
+
+
+A heap object has one owner and any number of non-owning aliases. Copying a
+reference creates an alias. Clearing an alias releases only that binding.
+Clearing the owner or leaving its scope requests destruction.
+
+```c++
+Item* first()
+
+alias : first
+next :: first          // first becomes null
+
+alias.Value = 7
+Print(next.Value)      // 7
+
+next = null
+Print(alias == null)   // true
+```
+
+Only the current owner may transfer ownership. Moving an owner preserves the
+object's identity and all its aliases. Moving it into a shorter scope makes
+that scope responsible for destruction. Owning fields form a tree. Transferring
+an object into one of its own descendants would create an ownership cycle and
+must be rejected. Non-owning references can point back to ancestors.
+
+Factories transfer ownership explicitly. A plain return of an alias can succeed
+when the owner outlives the call. An alias to a local owner's object expires
+when that owner leaves scope.
+
+```c++
+Item* MakeItem()
+{
+    Item* item()
+    return ::item
+}
+
+item :: MakeItem()
+```
+
+The [open design questions](Examples/DesignQuestions.dk) cover assignment into
+an existing owner, owning collection slots, and receipt of a returned owner
+with type inference.
+
+### Lazy reference tracking
+
+A heap owner starts as one word pointing directly to the object. Ownership moves
+and proven short borrows use that representation. When execution first creates
+an alias that could outlive the owner, Duck switches the owner to a control
+block. Subsequent aliases share it. On x64 the block holds a payload pointer and
+a reference count in 16 bytes, excluding allocator overhead.
+
+Releasing the owner clears the payload pointer and frees the object. All aliases
+then compare equal to null. The last alias releases the block. The bootstrap
+implements this for local scalar and container allocations, explicit ownership
+returns, and synchronous borrows. Tracked collection entries, owning fields,
+and concurrent use are future work.
+
 ##  Pointers in Duck
 Heap allocations are inherently pointer and do have size of 8 bytes
 
@@ -697,6 +765,15 @@ Print(e.Bob == null) // prints false, as it is no longer tracted it will not get
 
 ```
 
+
+
+The duck's native pointers carry machine addresses. For example,
+`State* p = &state` borrows the address of existing storage, and
+`p.Value` accesses its field. Pointer arithmetic is unsupported.
+
+In the tracking design, a Windows callback resolves a Duck handle saved in
+`GWLP_USERDATA` to live state or `null`. Calls such as `GetClientRect(window, &bounds)`
+receive a native address that stays valid for the call.
 
 ##  Constructors/Destructors in Duck
 In Game environment you usually have functions like Start/Spawn, Tick/Update, Destroy or variants on this, that are actually separated from Constructors and Destructors. this relates to the life cycle of this object, where destructor is final and you want to destroy it only at the end of the frame, for start/Spawn you might want to do something before the consturctor is called

@@ -1,0 +1,50 @@
+// x64 Windows. Both STATIC controls stay hidden during enumeration.
+Rect
+{
+    int left
+    int top
+    int right
+    int bottom
+}
+WindowState
+{
+    void* child
+    int width
+    int visits
+}
+
+extern "C" void* CreateWindowExW(uint exStyle, string className, string title,
+    uint style, int x, int y, int width, int height, void* parent,
+    void* menu, void* instance, void* param)
+extern "C" int EnumChildWindows(void* parent, void* callback, long context)
+extern "C" int GetClientRect(void* window, Rect* bounds)
+extern "C" long SetWindowLongPtrW(void* window, int index, long value)
+extern "C" long GetWindowLongPtrW(void* window, int index)
+extern "C" int DestroyWindow(void* window)
+
+int VisitChild(void* window, long context) {
+    #int userData = -21 // GWLP_USERDATA
+    WindowState* state = (WindowState*)GetWindowLongPtrW(window, userData)
+    if state == null { return 1 }
+    Rect bounds
+    if window == state.child && GetClientRect(window, &bounds) != 0 {
+        state.width = bounds.right - bounds.left
+        state.visits++
+    }
+    return 1
+}
+
+Main() {
+    void* parent = CreateWindowExW(0, "STATIC", "", 0x80000000, 0, 0, 100, 100, null, null, null, null)
+    if parent == null { return }
+    WindowState state
+    state.child = CreateWindowExW(0, "STATIC", "", 0x40000000, 0, 0, 32, 16, parent, null, null, null)
+    if state.child != null {
+        #int userData = -21 // GWLP_USERDATA
+        SetWindowLongPtrW(state.child, userData, (long)&state)
+        EnumChildWindows(parent, &VisitChild, 0)
+        Print(state.visits)
+        Print(state.width)
+    }
+    DestroyWindow(parent)
+}

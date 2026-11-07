@@ -6,8 +6,6 @@ namespace duck {
 // They are emitted with the program, so direct duckc -> clang builds need no SDK.
 std::string textRuntimeIR() {
   return R"IR(
-declare ptr @malloc(i64)
-declare void @free(ptr)
 declare i32 @putchar(i32)
 declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
 

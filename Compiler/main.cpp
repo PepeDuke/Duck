@@ -18,6 +18,8 @@ int main(int argc, char **argv) {
   try {
     const std::filesystem::path outputPath(argv[argc - 1]);
     std::vector<duck::Program> units, importedUnits;
+    std::vector<std::pair<bool, std::vector<duck::Token>>> sources;
+    std::set<std::string> containerNames;
     bool entry = true;
     for (int i = 1; i < argc - 2; ++i) {
       std::string path = argv[i];
@@ -45,7 +47,12 @@ int main(int argc, char **argv) {
       source << input.rdbuf();
       if (input.bad())
         throw std::runtime_error(path + ": cannot read input file");
-      auto unit = duck::parse(duck::lex(source.str(), path));
+      auto tokens = duck::lex(source.str(), path);
+      duck::collectContainerNames(tokens, containerNames);
+      sources.emplace_back(dependency, std::move(tokens));
+    }
+    for (auto &[dependency, tokens] : sources) {
+      auto unit = duck::parse(std::move(tokens), containerNames);
       if (dependency)
         importedUnits.push_back(std::move(unit));
       else

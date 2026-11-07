@@ -61,7 +61,8 @@ run_program(core "${core}" "42\n0\n1\n2\n120\n1\n100% Duck\n")
 run_program(scopes [=[
 Main() {
  int n = 7
- if true { int n = 3; Print(n) }
+ if true { int n = 3
+ Print(n) }
  Print(n)
  Print(-2147483648)
  Print(2 + 3 * 4)
@@ -75,7 +76,8 @@ run_program(early_return [=[
 int Choose(bool yes) {
  if yes { return 10 } else { return 20 }
 }
-Main() { Print(Choose(false)); Print(Choose(true)) }
+Main() { Print(Choose(false))
+Print(Choose(true)) }
 ]=] "20\n10\n")
 
 file(READ "${SOURCE}/Examples/Tutorial/06_ConditionsAndLoops.dk" conditions)
@@ -85,13 +87,17 @@ run_program(references "${references}" "10\n6\n")
 file(READ "${SOURCE}/Examples/Bootstrap/03_ReferencesAndConstants.dk" constants)
 run_program(constants "${constants}" "12\n1\n10\n")
 run_program(reference_aliases [=[
-Change(int& first, int& second) { first = 10; second += first }
+Change(int& first, int& second) { first = 10
+second += first }
 Forward(int& value) { Change(value, value) }
-Copy(int value) { value = 99; Print(value) }
+Copy(int value) { value = 99
+Print(value) }
 Count(int& value, int remaining) {
- if remaining > 0 { value++; Count(value, remaining - 1) }
+ if remaining > 0 { value++
+ Count(value, remaining - 1) }
 }
-bool Flip(bool& flag) { flag = !flag; return flag }
+bool Flip(bool& flag) { flag = !flag
+return flag }
 Main() {
  n : 1
  Forward(n)
@@ -108,8 +114,10 @@ Main() {
 }
 ]=] "20\n99\n20\n23\n0\n0\n1\n1\n")
 run_program(reference_evaluation [=[
-int Increment(int& value) { value++; return value }
-Show(int first, int second) { Print(first); Print(second) }
+int Increment(int& value) { value++
+return value }
+Show(int first, int second) { Print(first)
+Print(second) }
 Main() {
  n : 1
  Show(Increment(n), Increment(n))
@@ -123,7 +131,9 @@ int Value(int n) { return n + 1 }
 Main() {
  #int limit = Value(4)
  #bool enabled = limit > 0
- if enabled { int limit = 2; limit++; Print(limit) }
+ if enabled { int limit = 2
+ limit++
+ Print(limit) }
  Print(limit)
  Print(Value(limit))
 }
@@ -131,8 +141,10 @@ Main() {
 file(READ "${SOURCE}/Examples/Bootstrap/02_ControlFlow.dk" control)
 run_program(control "${control}" "9\nselected\n1\n")
 run_program(short_circuit [=[
-bool Mark(int n) { Print(n); return true }
-int Value(int n) { Print(n); return n }
+bool Mark(int n) { Print(n)
+return true }
+int Value(int n) { Print(n)
+return n }
 Main() {
  Print(false && Mark(100))
  Print(true || Mark(200))
@@ -206,17 +218,46 @@ reject(type "Main() { int n = true }" "type mismatch")
 reject(unknown "Main() { Print(missing) }" "unknown variable")
 reject(case "Main() { print(1) }" "unknown function")
 reject(return "int F() { if true { return 1 } }\nMain() {}" "not all paths return")
-reject(duplicate "Main() { n : 1; n : 2 }" "duplicate variable")
+reject(duplicate "Main() { n : 1\nn : 2 }" "duplicate variable")
 reject(parameter "F(int n, int n) {}\nMain() {}" "duplicate variable")
 reject(arity "F(int n) {}\nMain() { F() }" "wrong argument count")
 reject(condition "Main() { while 1 {} }" "type mismatch")
-reject(scope "Main() { if true { n : 1 }; Print(n) }" "unknown variable")
-reject(unreachable "Main() { return; Print(1) }" "unreachable")
+reject(scope "Main() { if true { n : 1 }\nPrint(n) }" "unknown variable")
+reject(unreachable "Main() { return\nPrint(1) }" "unreachable")
 reject(overflow "Main() { int n = 2147483648 }" "type mismatch")
 reject(literal "Main() { Print(123abc) }" "invalid integer literal")
 reject(string "Main() { Print(\"oops) }" "unterminated string")
 reject(comment "Main() { /* oops" "unterminated comment")
 reject(brace "Main() {" "expected '}'")
+reject(semicolon_commands "Main() { Print(1); Print(2) }" "expected newline")
+reject(semicolon_trailing "Main() { Print(1); }" "expected newline")
+reject(semicolon_fields "Example { int first; int second }\nMain() {}" "member terminator")
+reject(compound_without_newline "Main() { if true {} Print(1) }" "newline between statements")
+run_program(instance_container [=[
+Main()
+{
+    Example local()
+    local.Increment()
+    Example copy = local
+    Example named = {Val : 9}
+    Example* cloned = named
+    Print(cloned.Val)
+    Example* owner = {Val : 5}
+    owner.Increment()
+    Print(copy.Val)
+    Print(owner.Val)
+    inferred :: Example()
+    Print(inferred.Val)
+}
+Example
+{
+    int Val
+    Increment()
+    {
+        Val++
+    }
+}
+]=] "9\n1\n6\n0\n")
 reject(separator "Main() { Print(1) Print(2) }" "expected newline")
 reject(entry "main() {}" "program requires Main")
 reject(entry_signature "int Main() { return 0 }" "bootstrap entry point")
@@ -224,14 +265,14 @@ reject(unsupported "Main() { big n = 1 }" "syntax may not be supported")
 reject(void_value "F() {}\nMain() { n : F() }" "locals currently support")
 reject(break_outside "Main() { break }" "requires an enclosing loop")
 reject(continue_outside "Main() { continue }" "requires an enclosing loop")
-reject(loop_scope "Main() { for int i = 0; i < 1; i++ {} ; Print(i) }" "unknown variable")
+reject(loop_scope "Main() { for int i = 0; i < 1; i++ {} \nPrint(i) }" "unknown variable")
 reject(loop_step_scope "Main() { for int i = 0; i < 1; n++ { n : 0 } }" "unknown variable")
 reject(loop_step_declaration "Main() { for ;; int n = 0 {} }" "step cannot declare")
 reject(loop_condition "Main() { for ; 1; {} }" "type mismatch")
 reject(loop_separator "Main() { for int i = 0 i < 1; i++ {} }" "expected ';'")
-reject(after_break "Main() { while true { break; Print(1) } }" "unreachable")
-reject(compound_bool "Main() { b : true; b += 1 }" "type mismatch")
-reject(compound_operand "Main() { n : 1; n += false }" "type mismatch")
+reject(after_break "Main() { while true { break\nPrint(1) } }" "unreachable")
+reject(compound_bool "Main() { b : true\nb += 1 }" "type mismatch")
+reject(compound_operand "Main() { n : 1\nn += false }" "type mismatch")
 reject(logical_operand "Main() { Print(true && 1) }" "type mismatch")
 reject(logical_unselected "Main() { Print(false && Missing()) }" "unknown function")
 reject(conditional_type "Main() { Print(true ? 1 | false) }" "type mismatch")
@@ -240,17 +281,17 @@ reject(conditional_condition "Main() { Print(1 ? 2 | 3) }" "type mismatch")
 reject(conditional_separator "Main() { Print(true ? 2 : 3) }" "expected '\\|'")
 reject(keyword_name "Main() { int break = 1 }" "reserved keyword")
 reject(reference_literal "F(int& n) {}\nMain() { F(1) }" "must be a mutable variable")
-reject(reference_expression "F(int& n) {}\nMain() { n : 1; F(n + 1) }" "must be a mutable variable")
+reject(reference_expression "F(int& n) {}\nMain() { n : 1\nF(n + 1) }" "must be a mutable variable")
 reject(reference_call "int Get() { return 1 }\nF(int& n) {}\nMain() { F(Get()) }" "must be a mutable variable")
-reject(reference_type "F(int& n) {}\nMain() { b : true; F(b) }" "type mismatch")
+reject(reference_type "F(int& n) {}\nMain() { b : true\nF(b) }" "type mismatch")
 reject(reference_unknown "F(int& n) {}\nMain() { F(missing) }" "unknown variable")
-reject(reference_constant "F(int& n) {}\nMain() { #int n = 1; F(n) }" "cannot pass a constant")
+reject(reference_constant "F(int& n) {}\nMain() { #int n = 1\nF(n) }" "cannot pass a constant")
 reject(reference_duplicate "F(int& n, int& n) {}\nMain() {}" "duplicate variable")
 reject(reference_local_duplicate "F(int& n) { int n = 1 }\nMain() {}" "duplicate variable")
 reject(reference_return "int& F(int& n) { return n }\nMain() {}" "expected identifier")
-reject(constant_assignment "Main() { #int n = 1; n = 2 }" "cannot modify constant")
-reject(constant_increment "Main() { #int n = 1; n++ }" "cannot modify constant")
-reject(constant_compound "Main() { #int n = 1; n += 2 }" "cannot modify constant")
+reject(constant_assignment "Main() { #int n = 1\nn = 2 }" "cannot modify constant")
+reject(constant_increment "Main() { #int n = 1\nn++ }" "cannot modify constant")
+reject(constant_compound "Main() { #int n = 1\nn += 2 }" "cannot modify constant")
 reject(constant_inference "Main() { #n : 1 }" "requires an explicit type")
 reject(constant_initializer "Main() { #int n }" "expected '='")
 file(READ "${SOURCE}/Examples/Tutorial/02_ValuesAndInference.dk" values)
@@ -318,15 +359,15 @@ Main() {
 }
 ]=] "0\n1\n0\n0\n1\n1\n1\n1\n2\n")
 reject(narrow_int "Main() { int n = 1.5 }" "type mismatch")
-reject(narrow_float "Main() { double d = 1.5; float f = d }" "type mismatch")
+reject(narrow_float "Main() { double d = 1.5\nfloat f = d }" "type mismatch")
 reject(narrow_return "int F() { return 1.5 }\nMain() {}" "type mismatch")
-reject(narrow_compound "Main() { n : 1; n += 1.5 }" "type mismatch")
+reject(narrow_compound "Main() { n : 1\nn += 1.5 }" "type mismatch")
 reject(float_bool "Main() { float f = true }" "type mismatch")
 reject(float_condition "Main() { if 1.5 {} }" "type mismatch")
 reject(float_remainder "Main() { Print(1.5 % 1.0) }" "type mismatch")
-reject(float_remainder_assign "Main() { f : 1.5; f %= 1 }" "type mismatch")
-reject(float_reference "F(double& n) {}\nMain() { f : 1.0; F(f) }" "type mismatch")
-reject(float_constant "Main() { #double d = 1; d++ }" "cannot modify constant")
+reject(float_remainder_assign "Main() { f : 1.5\nf %= 1 }" "type mismatch")
+reject(float_reference "F(double& n) {}\nMain() { f : 1.0\nF(f) }" "type mismatch")
+reject(float_constant "Main() { #double d = 1\nd++ }" "cannot modify constant")
 reject(float_overflow "Main() { f : 1e100 }" "out-of-range floating literal")
 reject(double_overflow "Main() { double d = 1e999 }" "out-of-range floating literal")
 reject(float_suffix "Main() { f : 1.5abc }" "invalid or out-of-range")
@@ -353,7 +394,9 @@ Main() {
  Print(Guard(false))
  int n
  n = 5
- if true { int n; n = 9; Print(n) }
+ if true { int n
+ n = 9
+ Print(n) }
  Print(n)
 }
 ]=] "2\n3\n7\n8\n9\n5\n")
@@ -364,12 +407,14 @@ Main() {
  Print(n)
  int step
  for int i = 0; i < 3; i += step {
-  if i == 0 { step = 1; continue } else { step = 2 }
+  if i == 0 { step = 1
+  continue } else { step = 2 }
  }
  int count = 0
  while count < 3 {
   int local
-  if count == 0 { count++; continue } else { local = count }
+  if count == 0 { count++
+  continue } else { local = count }
   Print(local)
   count++
  }
@@ -401,23 +446,23 @@ Main() {
  int unused
 }
 ]=] "5\n5\n1\n")
-reject(uninitialized_read "Main() { int n; Print(n) }" "read before assignment")
-reject(uninitialized_self "Main() { int n; n = n + 1 }" "read before assignment")
-reject(uninitialized_increment "Main() { int n; n++ }" "read before assignment")
-reject(uninitialized_compound "Main() { int n; n += 1 }" "read before assignment")
-reject(uninitialized_reference "Set(int& n) { n = 1 }\nMain() { int n; Set(n) }" "read before assignment")
-reject(uninitialized_branch "Main() { int n; if true { n = 1 }; Print(n) }" "read before assignment")
-reject(uninitialized_else "Main() { int n; if true { n = 1 } else { Print(n) } }" "read before assignment")
-reject(uninitialized_shadow "Main() { int n; if true { int n = 1 } else { int n = 2 }; Print(n) }" "read before assignment")
-reject(uninitialized_loop "Main() { int n; while false { n = 1 }; Print(n) }" "read before assignment")
-reject(uninitialized_break "Main() { int n; while true { n = 1; break }; Print(n) }" "read before assignment")
-reject(uninitialized_step "Main() { int step; for int i = 0; i < 3; i += step { if i == 0 { continue }; step = 1 } }" "read before assignment")
-reject(uninitialized_after_step "Main() { int n; for int i = 0; i < 0; n = 1 { break }; Print(n) }" "read before assignment")
-reject(uninitialized_next_iteration "Main() { int n; for int i = 0; i < 2; i++ { Print(n); n = 1 } }" "read before assignment")
-reject(uninitialized_short_circuit "Main() { bool b; Print(false && b) }" "read before assignment")
-reject(uninitialized_ternary "Main() { int n; Print(true ? 1 | n) }" "read before assignment")
-reject(uninitialized_bool "Main() { bool b; if b {} }" "read before assignment")
-reject(uninitialized_duplicate "Main() { int n; int n }" "duplicate variable")
+reject(uninitialized_read "Main() { int n\nPrint(n) }" "read before assignment")
+reject(uninitialized_self "Main() { int n\nn = n + 1 }" "read before assignment")
+reject(uninitialized_increment "Main() { int n\nn++ }" "read before assignment")
+reject(uninitialized_compound "Main() { int n\nn += 1 }" "read before assignment")
+reject(uninitialized_reference "Set(int& n) { n = 1 }\nMain() { int n\nSet(n) }" "read before assignment")
+reject(uninitialized_branch "Main() { int n\nif true { n = 1 }\nPrint(n) }" "read before assignment")
+reject(uninitialized_else "Main() { int n\nif true { n = 1 } else { Print(n) } }" "read before assignment")
+reject(uninitialized_shadow "Main() { int n\nif true { int n = 1 } else { int n = 2 }\nPrint(n) }" "read before assignment")
+reject(uninitialized_loop "Main() { int n\nwhile false { n = 1 }\nPrint(n) }" "read before assignment")
+reject(uninitialized_break "Main() { int n\nwhile true { n = 1\nbreak }\nPrint(n) }" "read before assignment")
+reject(uninitialized_step "Main() { int step\nfor int i = 0; i < 3; i += step { if i == 0 { continue }\nstep = 1 } }" "read before assignment")
+reject(uninitialized_after_step "Main() { int n\nfor int i = 0; i < 0; n = 1 { break }\nPrint(n) }" "read before assignment")
+reject(uninitialized_next_iteration "Main() { int n\nfor int i = 0; i < 2; i++ { Print(n)\nn = 1 } }" "read before assignment")
+reject(uninitialized_short_circuit "Main() { bool b\nPrint(false && b) }" "read before assignment")
+reject(uninitialized_ternary "Main() { int n\nPrint(true ? 1 | n) }" "read before assignment")
+reject(uninitialized_bool "Main() { bool b\nif b {} }" "read before assignment")
+reject(uninitialized_duplicate "Main() { int n\nint n }" "duplicate variable")
 file(READ "${SOURCE}/Examples/Bootstrap/06_LoopBodies.dk" loop_bodies)
 run_program(loop_bodies "${loop_bodies}" "2\n3\n9\n4\n")
 run_program(single_statements [=[
@@ -434,12 +479,14 @@ Main() {
  Print(Choose(true, true))
  Print(Choose(true, false))
  Print(Choose(false, true))
- if false Print(100); else Print(4)
+ if false Print(100)
+ else Print(4)
  int count = 0
  for int i = 0; i < 3; i++
   count += i
  Print(count)
- do count++; while count < 5
+ do count++
+ while count < 5
  Print(count)
  if false
   Print(100)
@@ -450,17 +497,20 @@ run_program(do_assignment [=[
 int Choose(bool stop) {
  int n
  do {
-  if stop { n = 7; break }
+  if stop { n = 7
+  break }
   n = 8
  } while false
  return n
 }
 int Early(bool first) {
- do { if first return 9; else return 10 } while false
+ do { if first return 9
+ else return 10 } while false
 }
 Main() {
  int n
- do n = 1; while false
+ do n = 1
+ while false
  Print(n)
  int result
  bool again = true
@@ -477,7 +527,8 @@ Main() {
 }
 ]=] "1\n5\n7\n8\n9\n10\n")
 run_program(nested_do [=[
-bool Check(int& calls) { calls++; return calls < 3 }
+bool Check(int& calls) { calls++
+return calls < 3 }
 Main() {
  int calls = 0
  int bodies = 0
@@ -493,19 +544,20 @@ Main() {
  int n
  { n = 12 }
  Print(n)
- { int n = 20; Print(n) }
+ { int n = 20
+ Print(n) }
  Print(n)
 }
 ]=] "3\n3\n3\n12\n20\n12\n")
 reject(do_missing_while "Main() { do {} }" "expected 'while'")
 reject(do_condition "Main() { do {} while 1 }" "type mismatch")
-reject(do_condition_unassigned "Main() { bool again; do { continue } while again }" "read before assignment")
-reject(do_break_unassigned "Main() { int n; do { if true break; n = 1 } while false; Print(n) }" "read before assignment")
+reject(do_condition_unassigned "Main() { bool again\ndo { continue } while again }" "read before assignment")
+reject(do_break_unassigned "Main() { int n\ndo { if true break\nn = 1 } while false\nPrint(n) }" "read before assignment")
 reject(do_body_scope "Main() { do { int n = 1 } while n > 0 }" "unknown variable")
-reject(do_unreachable "Main() { do { return } while false; Print(1) }" "unreachable statement")
-reject(single_body_scope "Main() { if true int n = 1; Print(n) }" "unknown variable")
-reject(block_scope "Main() { { int n = 1 }; Print(n) }" "unknown variable")
-reject(block_unreachable "Main() { { return }; Print(1) }" "unreachable statement")
+reject(do_unreachable "Main() { do { return } while false\nPrint(1) }" "unreachable statement")
+reject(single_body_scope "Main() { if true int n = 1\nPrint(n) }" "unknown variable")
+reject(block_scope "Main() { { int n = 1 }\nPrint(n) }" "unknown variable")
+reject(block_unreachable "Main() { { return }\nPrint(1) }" "unreachable statement")
 reject(empty_body "Main() { if true; }" "expected identifier")
 reject(do_keyword "Main() { int do = 1 }" "reserved keyword")
 run_files(multiple_files "42\n1\n"
@@ -571,11 +623,13 @@ Main() {
 ]=] "1\n2\n3\n3\n2\n9\n4\n")
 run_program(container_recursion [=[
 Numbers #{
- bool Even(int n) { if n == 0 return true; return Odd(n - 1) }
+ bool Even(int n) { if n == 0 return true
+ return Odd(n - 1) }
  Advance(int& n) { n++ }
 }
 Numbers #{
- bool Odd(int n) { if n == 0 return false; return Even(n - 1) }
+ bool Odd(int n) { if n == 0 return false
+ return Even(n - 1) }
  double Scale(double n) { return n * 2 }
 }
 Main() {
@@ -589,7 +643,7 @@ reject(container_duplicate "Math #{ F() {} }\nMath #{ F() {} }\nMain() {}" "dupl
 reject(container_missing "Math #{ F() {} }\nMain() { Math.Missing() }" "unknown function")
 reject(container_no_global_entry "Math #{ Main() {} }" "program requires Main")
 reject(container_private_lookup "Math #{ F() {} }\nMain() { F() }" "unknown function")
-reject(container_instance "Math { int n = 1 }\nMain() {}" "instance containers are not implemented")
+reject(container_instance "Math { int n = 1 }\nMain() {}" "field defaults")
 reject(container_field "Math #{ int n = 1 }\nMain() {}" "expected '\\('")
 reject(container_separated_chain "Math #{}\n\n#{}\nMain() {}" "expected identifier")
 reject(container_unclosed "Math #{ F() {}" "expected '}'")
@@ -659,18 +713,19 @@ Main() {
  deferred = 5000000000
  Print(deferred)
  long index = 0
- while index < 2 { Print(index); index++ }
+ while index < 2 { Print(index)
+ index++ }
 }
 ]=] "7\n7\n7\n7.5\n5000000000\n0\n1\n")
 reject(long_overflow "Main() { long n = 9223372036854775808 }" "integer literal out of range")
 reject(long_negative_overflow "Main() { long n = -9223372036854775809 }" "integer literal out of range")
-reject(long_narrowing "Main() { long n = 1; int small = n }" "type mismatch")
-reject(long_reference_width "F(long& n) {}\nMain() { int n = 1; F(n) }" "type mismatch")
-reject(long_reference_reverse "F(int& n) {}\nMain() { long n = 1; F(n) }" "type mismatch")
+reject(long_narrowing "Main() { long n = 1\nint small = n }" "type mismatch")
+reject(long_reference_width "F(long& n) {}\nMain() { int n = 1\nF(n) }" "type mismatch")
+reject(long_reference_reverse "F(int& n) {}\nMain() { long n = 1\nF(n) }" "type mismatch")
 reject(long_float_narrowing "Main() { long n = 1.5 }" "type mismatch")
 reject(long_bool "Main() { long n = true }" "type mismatch")
-reject(long_compound_narrowing "Main() { int n = 1; n += 5000000000 }" "type mismatch")
-reject(long_constant "Main() { #long n = 1; n++ }" "cannot modify constant")
+reject(long_compound_narrowing "Main() { int n = 1\nn += 5000000000 }" "type mismatch")
+reject(long_constant "Main() { #long n = 1\nn++ }" "cannot modify constant")
 file(READ "${SOURCE}/Examples/Bootstrap/09_TypeCasts.dk" casts)
 run_program(casts "${casts}" "9\n-10\n0\n1\n3.5\n")
 run_program(cast_precedence [=[
@@ -722,7 +777,7 @@ Main() {
 reject(cast_void "Main() { Print((void)1) }" "casts currently require")
 reject(cast_text "Main() { Print((int)\"12\") }" "casts currently require")
 reject(cast_void_result "F() {}\nMain() { Print((int)F()) }" "casts currently require")
-reject(cast_reference "F(long& n) {}\nMain() { n : 1; F((long)n) }" "must be a mutable variable")
+reject(cast_reference "F(long& n) {}\nMain() { n : 1\nF((long)n) }" "must be a mutable variable")
 reject(cast_no_operand "Main() { Print((int)) }" "expected identifier")
 foreach(type IN ITEMS int8 short int long)
   if(type STREQUAL "int8")
@@ -745,16 +800,17 @@ foreach(type IN ITEMS int8 short int long)
     trap_program(${type}_${operation}_overflow
       "${type} F(${type} a, ${type} b) { return a ${op} b }\nMain() { Print(F(${minimum}, -1)) }")
     trap_program(${type}_${operation}_assign_zero
-      "F(${type}& a, ${type} b) { a ${op}= b }\nMain() { ${type} n = 7; F(n, 0) }")
+      "F(${type}& a, ${type} b) { a ${op}= b }\nMain() { ${type} n = 7\nF(n, 0) }")
     trap_program(${type}_${operation}_assign_overflow
-      "F(${type}& a, ${type} b) { a ${op}= b }\nMain() { ${type} n = ${minimum}; F(n, -1) }")
+      "F(${type}& a, ${type} b) { a ${op}= b }\nMain() { ${type} n = ${minimum}\nF(n, -1) }")
   endforeach()
   run_program(${type}_division_boundaries
-    "Main() { ${type} n = ${minimum}; Print(n / 1); Print(n % 1); Print(n / n); Print(n % n); ${type} a = -7; Print(a / 3); Print(a % 3); Print(a / -3); Print(a % -3); a /= -1; Print(a); a %= 3; Print(a) }"
+    "Main() { ${type} n = ${minimum}\nPrint(n / 1)\nPrint(n % 1)\nPrint(n / n)\nPrint(n % n)\n${type} a = -7\nPrint(a / 3)\nPrint(a % 3)\nPrint(a / -3)\nPrint(a % -3)\na /= -1\nPrint(a)\na %= 3\nPrint(a) }"
     "${minimum}\n0\n1\n0\n-2\n-1\n2\n-1\n7\n1\n")
 endforeach()
 run_program(division_control_flow [=[
-int Next(int& n) { n++; return n }
+int Next(int& n) { n++
+return n }
 int Divide(int a, int b) { return a / b }
 Main() {
  n : 7
@@ -777,7 +833,8 @@ file(READ "${SOURCE}/Examples/Bootstrap/10_SmallIntegers.dk" small_integers)
 run_program(small_integers "${small_integers}" "-128\n302\n-32768\n127\n-1\n-10\n")
 run_program(small_integer_operations [=[
 int8 Identity(int8 n) { return n }
-Change(int8& a, int8& b) { a = 12; b += a }
+Change(int8& a, int8& b) { a = 12
+b += a }
 Forward(int8& n) { Change(n, n) }
 Main() {
  int8 a = -128
@@ -788,12 +845,24 @@ Main() {
  Print((int8)64 * (int8)4)
  Print(a < b)
  Print(a == (short)-128)
- a--; Print(a); a++; Print(a)
- a = 10; a *= 12; a += 10; Print(a); a -= 1; Print(a)
- Forward(a); Print(a)
+ a--
+ Print(a)
+ a++
+ Print(a)
+ a = 10
+ a *= 12
+ a += 10
+ Print(a)
+ a -= 1
+ Print(a)
+ Forward(a)
+ Print(a)
  short s = -32768
  Print(-s)
- s--; Print(s); s++; Print(s)
+ s--
+ Print(s)
+ s++
+ Print(s)
  Print((short)16384 * (short)4)
  Print(b + s)
  Print(b + 1)
@@ -801,24 +870,41 @@ Main() {
  int8 n
  if true { n = 3 } else { n = -4 }
  inferred : n
- inferred++; Print(inferred)
+ inferred++
+ Print(inferred)
  Print(true ? n | s)
  Print(false ? n | 128)
- int32 i = n; int64 l = s; float f = n; double d = s
- Print(i); Print(l); Print(f); Print(d)
+ int32 i = n
+ int64 l = s
+ float f = n
+ double d = s
+ Print(i)
+ Print(l)
+ Print(f)
+ Print(d)
 }
 ]=] "-128\n-128\n127\n0\n1\n1\n127\n-128\n-126\n-127\n24\n-32768\n32767\n-32768\n0\n-32641\n128\n-128\n4\n3\n128\n3\n-32768\n3\n-32768\n")
 run_program(small_integer_casts [=[
 Main() {
- Print((int8)128); Print((short)65535); Print((int8)(long)511)
- Print((int8)(short)-129); Print((short)(int8)-128)
- Print((bool)(int8)-128); Print((bool)(short)0)
- Print((int8)true); Print((short)false)
- Print((float)(int8)-128); Print((double)(short)-32768)
- double hi8 = 127.99; double lo8 = -128.0
- double hi16 = 32767.99; double lo16 = -32768.0
- Print((int8)hi8); Print((int8)lo8)
- Print((short)hi16); Print((short)lo16)
+ Print((int8)128)
+ Print((short)65535)
+ Print((int8)(long)511)
+ Print((int8)(short)-129)
+ Print((short)(int8)-128)
+ Print((bool)(int8)-128)
+ Print((bool)(short)0)
+ Print((int8)true)
+ Print((short)false)
+ Print((float)(int8)-128)
+ Print((double)(short)-32768)
+ double hi8 = 127.99
+ double lo8 = -128.0
+ double hi16 = 32767.99
+ double lo16 = -32768.0
+ Print((int8)hi8)
+ Print((int8)lo8)
+ Print((short)hi16)
+ Print((short)lo16)
 }
 ]=] "-128\n-1\n-1\n127\n-128\n1\n0\n1\n0\n-128\n-32768\n127\n-128\n32767\n-32768\n")
 foreach(type IN ITEMS int8 short)
@@ -835,17 +921,17 @@ foreach(type IN ITEMS int8 short)
   reject(${type}_literal_low "Main() { ${type} n = ${below} }" "literal out of range")
   reject(${type}_argument_range "F(${type} n) {}\nMain() { F(${above}) }" "literal out of range")
   reject(${type}_return_range "${type} F() { return ${below} }\nMain() {}" "literal out of range")
-  reject(${type}_narrow "Main() { int n = 1; ${type} s = n }" "type mismatch")
-  reject(${type}_arithmetic_narrow "Main() { ${type} s = 1; s = s + 1 }" "type mismatch")
-  reject(${type}_reference_mismatch "F(${type}& n) {}\nMain() { int n = 1; F(n) }" "type mismatch")
-  reject(${type}_constant_reference "F(${type}& n) {}\nMain() { #${type} n = 1; F(n) }" "cannot pass a constant")
-  reject(${type}_uninitialized "Main() { ${type} n; Print(n) }" "read before assignment")
+  reject(${type}_narrow "Main() { int n = 1\n${type} s = n }" "type mismatch")
+  reject(${type}_arithmetic_narrow "Main() { ${type} s = 1\ns = s + 1 }" "type mismatch")
+  reject(${type}_reference_mismatch "F(${type}& n) {}\nMain() { int n = 1\nF(n) }" "type mismatch")
+  reject(${type}_constant_reference "F(${type}& n) {}\nMain() { #${type} n = 1\nF(n) }" "cannot pass a constant")
+  reject(${type}_uninitialized "Main() { ${type} n\nPrint(n) }" "read before assignment")
   trap_program(${type}_cast_high "Main() { Print((${type})${above}.0) }")
-  trap_program(${type}_cast_low "Main() { double d = ${fraction_below}; Print((${type})d) }")
+  trap_program(${type}_cast_low "Main() { double d = ${fraction_below}\nPrint((${type})d) }")
   trap_program(${type}_cast_nan "Main() { Print((${type})(0.0 / 0.0)) }")
   trap_program(${type}_cast_inf "Main() { Print((${type})(1.0 / 0.0)) }")
 endforeach()
-reject(short_to_int8 "Main() { short s = 1; int8 n = s }" "type mismatch")
+reject(short_to_int8 "Main() { short s = 1\nint8 n = s }" "type mismatch")
 file(READ "${SOURCE}/Examples/Bootstrap/11_UnsignedIntegers.dk" unsigned_integers)
 run_program(unsigned_integers "${unsigned_integers}"
   "0\n4294967295\n6148914691236517205\n1\n4294967294\n-1\n1\n")
@@ -873,14 +959,14 @@ foreach(width IN ITEMS 8 16 32 64)
     set(quotient 9223372036854775807)
   endif()
   run_program(${type}_operations
-    "${type} Maximum() { return ${maximum} }\nChange(${type}& n) { n++; n -= 1 }\nMain() { #${type} top = Maximum(); ${type} n = top; Print(n); n++; Print(n); n--; Print(n); n *= 2; Print(n / (${type})2); Print(n % (${type})2); n = top; Print(n / (${type})2); Print(n % (${type})2); Print(n > (${type})${half}); Print(n >= top); Print(n < (${type})1); Print(n <= top); Print(n == top); Print(n != (${type})0); Change(n); Print(n); n = ${half}; Print(-n); Print(n / top); Print(n % top); n /= ${half}; Print(n); n %= 1; Print(n); Print((bool)n); Print((${type})true); Print((${type})false); Print((${type})-1); Print((${type})-0.0) }"
+    "${type} Maximum() { return ${maximum} }\nChange(${type}& n) { n++\nn -= 1 }\nMain() { #${type} top = Maximum()\n${type} n = top\nPrint(n)\nn++\nPrint(n)\nn--\nPrint(n)\nn *= 2\nPrint(n / (${type})2)\nPrint(n % (${type})2)\nn = top\nPrint(n / (${type})2)\nPrint(n % (${type})2)\nPrint(n > (${type})${half})\nPrint(n >= top)\nPrint(n < (${type})1)\nPrint(n <= top)\nPrint(n == top)\nPrint(n != (${type})0)\nChange(n)\nPrint(n)\nn = ${half}\nPrint(-n)\nPrint(n / top)\nPrint(n % top)\nn /= ${half}\nPrint(n)\nn %= 1\nPrint(n)\nPrint((bool)n)\nPrint((${type})true)\nPrint((${type})false)\nPrint((${type})-1)\nPrint((${type})-0.0) }"
     "${maximum}\n0\n${maximum}\n${quotient}\n0\n${quotient}\n1\n1\n1\n0\n1\n1\n1\n${maximum}\n${half}\n0\n${half}\n1\n0\n0\n1\n0\n${maximum}\n0\n")
   reject(${type}_literal_overflow "Main() { ${type} n = ${above} }" "integer literal out of range")
   reject(${type}_negative_literal "Main() { ${type} n = -1 }" "integer literal out of range")
-  reject(${type}_signed_assignment "Main() { int n = 1; ${type} u = n }" "type mismatch")
-  reject(${type}_signed_reference "F(${type}& n) {}\nMain() { int${width} n = 1; F(n) }" "type mismatch")
-  reject(${type}_constant_reference "F(${type}& n) {}\nMain() { #${type} n = 1; F(n) }" "cannot pass a constant")
-  reject(${type}_uninitialized "Main() { ${type} n; Print(n) }" "read before assignment")
+  reject(${type}_signed_assignment "Main() { int n = 1\n${type} u = n }" "type mismatch")
+  reject(${type}_signed_reference "F(${type}& n) {}\nMain() { int${width} n = 1\nF(n) }" "type mismatch")
+  reject(${type}_constant_reference "F(${type}& n) {}\nMain() { #${type} n = 1\nF(n) }" "cannot pass a constant")
+  reject(${type}_uninitialized "Main() { ${type} n\nPrint(n) }" "read before assignment")
   reject(${type}_negative_return "${type} F() { return -1 }\nMain() {}" "integer literal out of range")
   reject(${type}_overflow_argument "F(${type} n) {}\nMain() { F(${above}) }" "integer literal out of range")
   foreach(op IN ITEMS / %)
@@ -892,24 +978,38 @@ foreach(width IN ITEMS 8 16 32 64)
     trap_program(${type}_${operation}_zero
       "${type} F(${type} a, ${type} b) { return a ${op} b }\nMain() { Print(F(7, 0)) }")
     trap_program(${type}_${operation}_assign_zero
-      "F(${type}& a, ${type} b) { a ${op}= b }\nMain() { ${type} n = 7; F(n, 0) }")
+      "F(${type}& a, ${type} b) { a ${op}= b }\nMain() { ${type} n = 7\nF(n, 0) }")
   endforeach()
-  trap_program(${type}_cast_upper "Main() { double d = ${above}.0; Print((${type})d) }")
+  trap_program(${type}_cast_upper "Main() { double d = ${above}.0\nPrint((${type})d) }")
   trap_program(${type}_cast_negative "Main() { Print((${type})-0.01) }")
   trap_program(${type}_cast_nan "Main() { Print((${type})(0.0 / 0.0)) }")
   trap_program(${type}_cast_infinity "Main() { Print((${type})(1.0 / 0.0)) }")
 endforeach()
 run_program(unsigned_conversions [=[
-Alias(byte& b, uint& u) { b++; u++ }
+Alias(byte& b, uint& u) { b++
+u++ }
 Forward(uint8& b, uint32& u) { Alias(b, u) }
-uint64 Recurse(uint64 n) { if n == (uint64)0 { return 1 }; return Recurse(n - (uint64)1) * (uint64)2 }
+uint64 Recurse(uint64 n) { if n == (uint64)0 { return 1 }
+return Recurse(n - (uint64)1) * (uint64)2 }
 Main() {
- byte b = 255; uint u = 4294967295
- Forward(b, u); Print(b); Print(u)
- b = 255; uint16 s = b; uint32 i = s; uint64 l = i
- Print(s); Print(i); Print(l)
- short ss = b; int si = s; long sl = i
- Print(ss); Print(si); Print(sl)
+ byte b = 255
+ uint u = 4294967295
+ Forward(b, u)
+ Print(b)
+ Print(u)
+ b = 255
+ uint16 s = b
+ uint32 i = s
+ uint64 l = i
+ Print(s)
+ Print(i)
+ Print(l)
+ short ss = b
+ int si = s
+ long sl = i
+ Print(ss)
+ Print(si)
+ Print(sl)
  Print((long)(uint32)4294967295)
  Print((uint64)(int8)-1)
  Print((int8)(uint8)255)
@@ -929,35 +1029,50 @@ Main() {
  Print((uint16)65535.99)
  double limit32 = 4294967295.99
  double limit64 = 18446744073709549568.0
- Print((uint32)limit32); Print((uint64)limit64)
+ Print((uint32)limit32)
+ Print((uint64)limit64)
  double power = 9223372036854775808.0
  Print((uint64)power)
 }
 ]=] "0\n0\n255\n255\n255\n255\n255\n255\n4294967295\n18446744073709551615\n-1\n-1\n-1\n-1\n255\n65535\n0\n18446744073709551615\n-9223372036854775808\n-2147483648\n16\n1\n1\n255\n65535\n4294967295\n18446744073709549568\n9223372036854775808\n")
 run_program(mixed_integers [=[
 Main() {
- uint8 a = 255; int8 b = -128
- Print(a + b); Print(b + a); Print(a > b); Print(b < a)
- Print(true ? a | b); Print(false ? a | b)
- uint16 c = 65535; short d = -32768
- Print(c + d); Print(d + c)
- uint32 e = 4294967295; int f = -2147483648
- Print(e + f); Print(f + e); Print(e > f); Print(f > e)
- Print(e == f); Print(e != f)
- Print(e + 1); Print(1 + e)
- Print(e / -1); Print(e % -2)
+ uint8 a = 255
+ int8 b = -128
+ Print(a + b)
+ Print(b + a)
+ Print(a > b)
+ Print(b < a)
+ Print(true ? a | b)
+ Print(false ? a | b)
+ uint16 c = 65535
+ short d = -32768
+ Print(c + d)
+ Print(d + c)
+ uint32 e = 4294967295
+ int f = -2147483648
+ Print(e + f)
+ Print(f + e)
+ Print(e > f)
+ Print(f > e)
+ Print(e == f)
+ Print(e != f)
+ Print(e + 1)
+ Print(1 + e)
+ Print(e / -1)
+ Print(e % -2)
  uint64 huge = 18446744073709551615
  Print(false && huge / (uint64)0 == (uint64)0)
  Print(true ? huge / (uint64)3 | huge / (uint64)0)
  Print((huge / (uint64)3 > (uint64)0) && (huge % (uint64)2 == (uint64)1))
 }
 ]=] "127\n127\n1\n1\n255\n-128\n32767\n32767\n2147483647\n2147483647\n1\n0\n0\n1\n4294967296\n4294967296\n-4294967295\n1\n0\n6148914691236517205\n1\n")
-reject(uint64_mixed "Main() { uint64 n = 1; Print(n + 1) }" "explicit cast")
-reject(uint64_mixed_reverse "Main() { uint64 n = 1; Print(-1 < n) }" "explicit cast")
-reject(uint64_conditional "Main() { uint64 n = 1; Print(true ? n | -1) }" "explicit cast")
-reject(uint64_to_long "Main() { uint64 n = 1; long s = n }" "type mismatch")
-reject(uint32_to_int "Main() { uint32 n = 1; int s = n }" "type mismatch")
-reject(unsigned_narrow "Main() { uint64 n = 1; uint32 s = n }" "type mismatch")
+reject(uint64_mixed "Main() { uint64 n = 1\nPrint(n + 1) }" "explicit cast")
+reject(uint64_mixed_reverse "Main() { uint64 n = 1\nPrint(-1 < n) }" "explicit cast")
+reject(uint64_conditional "Main() { uint64 n = 1\nPrint(true ? n | -1) }" "explicit cast")
+reject(uint64_to_long "Main() { uint64 n = 1\nlong s = n }" "type mismatch")
+reject(uint32_to_int "Main() { uint32 n = 1\nint s = n }" "type mismatch")
+reject(unsigned_narrow "Main() { uint64 n = 1\nuint32 s = n }" "type mismatch")
 reject(uint64_literal_overflow_inferred "Main() { n : 18446744073709551616 }" "integer literal out of range")
 reject(negative_literal_overflow_inferred "Main() { Print(-9223372036854775809) }" "integer literal out of range")
 file(READ "${SOURCE}/Examples/Bootstrap/12_IntegerLiterals.dk" integer_literals)
@@ -967,32 +1082,59 @@ run_program(radix_boundaries [=[
 Small(int8& n) { n++ }
 Large(uint64& n) { n-- }
 Main() {
- int8 a = -0b10000000; short b = -0x8000
- int c = -0x80000000; long d = -0x8000000000000000
- Print(a); Print(b); Print(c); Print(d)
- uint8 e = 0xFF; uint16 f = 0xFFFF
- uint32 g = 0xFFFFFFFF; uint64 h = 0xFFFFFFFFFFFFFFFF
- Print(e); Print(f); Print(g); Print(h)
- Print(0x7FFFFFFF); Print(0x80000000)
- Print(0x7FFFFFFFFFFFFFFF); Print(0x8000000000000000)
+ int8 a = -0b10000000
+ short b = -0x8000
+ int c = -0x80000000
+ long d = -0x8000000000000000
+ Print(a)
+ Print(b)
+ Print(c)
+ Print(d)
+ uint8 e = 0xFF
+ uint16 f = 0xFFFF
+ uint32 g = 0xFFFFFFFF
+ uint64 h = 0xFFFFFFFFFFFFFFFF
+ Print(e)
+ Print(f)
+ Print(g)
+ Print(h)
+ Print(0x7FFFFFFF)
+ Print(0x80000000)
+ Print(0x7FFFFFFFFFFFFFFF)
+ Print(0x8000000000000000)
  Print(0b1111111111111111111111111111111111111111111111111111111111111111)
  Print(-0b1000000000000000000000000000000000000000000000000000000000000000)
  Print(0x0000000000000000000000000000000000000000FF)
  Print(-0X00008000000000000000)
- int8 small = -0x80; Small(small); Print(small)
- huge : 0xFFFFFFFFFFFFFFFF; Large(huge); Print(huge)
- #byte constant = 0b11111111; Print(constant)
- e = true ? 0xFE | 0b1; Print(e)
- e += 0x1; Print(e)
- double number = 0xFF; Print(number)
- Print((int8)0xFF); Print((bool)0b0)
+ int8 small = -0x80
+ Small(small)
+ Print(small)
+ huge : 0xFFFFFFFFFFFFFFFF
+ Large(huge)
+ Print(huge)
+ #byte constant = 0b11111111
+ Print(constant)
+ e = true ? 0xFE | 0b1
+ Print(e)
+ e += 0x1
+ Print(e)
+ double number = 0xFF
+ Print(number)
+ Print((int8)0xFF)
+ Print((bool)0b0)
 }
 ]=] "-128\n-32768\n-2147483648\n-9223372036854775808\n255\n65535\n4294967295\n18446744073709551615\n2147483647\n2147483648\n9223372036854775807\n9223372036854775808\n18446744073709551615\n-9223372036854775808\n255\n-9223372036854775808\n-127\n18446744073709551614\n255\n254\n255\n255\n-1\n0\n")
 run_program(radix_lexing [=[
 Main() {
- Print(0x1e+2); Print(0x1E-2); Print(0xBEEF)
- Print(0xdead); Print(0b101+0B11); Print(0x10*0b10)
- Print(012); Print(1e2); Print(1.25e-2)
+ Print(0x1e+2)
+ Print(0x1E-2)
+ Print(0xBEEF)
+ Print(0xdead)
+ Print(0b101+0B11)
+ Print(0x10*0b10)
+ Print(012)
+ Print(1e2)
+ Print(1.25e-2)
  Print(0xA/* comment */+0xB)
  Print(true ? 0xE | 0xF)
 }
@@ -1016,35 +1158,71 @@ file(READ "${SOURCE}/Examples/Bootstrap/13_Bitwise.dk" bitwise)
 run_program(bitwise "${bitwise}" "5\n250\n2\n-4\n1\n3\n6\n")
 run_program(bitwise_widths [=[
 Main() {
- Print(~(int8)0); Print(~(short)0); Print(~0); Print(~(long)0)
- Print(~(byte)0); Print(~(uint16)0); Print(~(uint)0); Print(~(uint64)0)
- Print((int8)64 << 1); Print((byte)128 >> 7)
- Print((short)-32768 >> 15); Print((uint16)32768 >> 15)
- Print((long)1 << 63); Print((uint64)1 << 63)
+ Print(~(int8)0)
+ Print(~(short)0)
+ Print(~0)
+ Print(~(long)0)
+ Print(~(byte)0)
+ Print(~(uint16)0)
+ Print(~(uint)0)
+ Print(~(uint64)0)
+ Print((int8)64 << 1)
+ Print((byte)128 >> 7)
+ Print((short)-32768 >> 15)
+ Print((uint16)32768 >> 15)
+ Print((long)1 << 63)
+ Print((uint64)1 << 63)
  Print((uint64)0x8000000000000000 >> 63)
- Print((byte)1 << (uint64)7); Print(1 << (byte)3)
- Print((int8)-1 & (byte)255); Print((uint64)1 | (uint64)2)
- byte b = 255; b &= 3; b |= 4; b ^= 2; Print(b)
- long s = -8; s >>= 1; s <<= 2; Print(s)
- b <<= (uint64)7; Print(b); b >>= (long)7; Print(b)
- int n = 0; n++; n--; Print(n)
+ Print((byte)1 << (uint64)7)
+ Print(1 << (byte)3)
+ Print((int8)-1 & (byte)255)
+ Print((uint64)1 | (uint64)2)
+ byte b = 255
+ b &= 3
+ b |= 4
+ b ^= 2
+ Print(b)
+ long s = -8
+ s >>= 1
+ s <<= 2
+ Print(s)
+ b <<= (uint64)7
+ Print(b)
+ b >>= (long)7
+ Print(b)
+ int n = 0
+ n++
+ n--
+ Print(n)
 }
 ]=] "-1\n-1\n-1\n-1\n255\n65535\n4294967295\n18446744073709551615\n-128\n1\n-1\n1\n-9223372036854775808\n9223372036854775808\n1\n128\n8\n255\n3\n5\n-16\n128\n1\n0\n")
 run_program(bitwise_precedence [=[
-int Mark(int& n, int value) { n = n * 10 + value; return value }
+int Mark(int& n, int value) { n = n * 10 + value
+return value }
 Main() {
- Print(1 | 2 ^ 3 & 6); Print(1 << 2 + 1); Print(16 >> 1 >> 1)
- Print(~1 + 3); Print((byte)~(byte)0)
+ Print(1 | 2 ^ 3 & 6)
+ Print(1 << 2 + 1)
+ Print(16 >> 1 >> 1)
+ Print(~1 + 3)
+ Print((byte)~(byte)0)
  Print(true ? false ? (1 | 2) | 8 | 16)
  Print(true ? (false ? 1 | 2 | 4) | 8)
  Print(false ? 1 | true ? 2 | 4)
  Print((true ? 1 | 2) | 4)
- int n = 0; Print(Mark(n, 1) | Mark(n, 2)); Print(n)
- Print(true ? 7 | (1 << -1)); Print(false && ((1 << 32) == 0))
- int count = 0; byte flags = 3
- flags <<= Mark(count, 1); Print(flags); Print(count)
- Print(true ? Mark(count, 2) | Mark(count, 3)); Print(count)
- Print(true ? Mark(count, 1 | 2) | 0); Print(count)
+ int n = 0
+ Print(Mark(n, 1) | Mark(n, 2))
+ Print(n)
+ Print(true ? 7 | (1 << -1))
+ Print(false && ((1 << 32) == 0))
+ int count = 0
+ byte flags = 3
+ flags <<= Mark(count, 1)
+ Print(flags)
+ Print(count)
+ Print(true ? Mark(count, 2) | Mark(count, 3))
+ Print(count)
+ Print(true ? Mark(count, 1 | 2) | 0)
+ Print(count)
 }
 ]=] "1\n8\n4\n1\n255\n8\n6\n2\n5\n3\n12\n7\n0\n6\n1\n2\n12\n3\n123\n")
 reject(bitwise_equality_precedence "Main() { Print(1 & 3 == 3) }" "require integer operands")
@@ -1057,11 +1235,11 @@ endforeach()
 reject(bitwise_not_bool "Main() { Print(~true) }" "require integer operands")
 reject(bitwise_not_text "Main() { Print(~\"text\") }" "require integer operands")
 reject(bitwise_mixed_range "Main() { Print((uint64)1 | 1) }" "no common integer type")
-reject(bitwise_constant "Main() { #int n = 1; n |= 2 }" "cannot modify constant")
-reject(bitwise_uninitialized "Main() { int n; n <<= 1 }" "read before assignment")
-reject(bitwise_float_assign "Main() { float n = 1.0; n &= 1 }" "require integer operands")
-reject(bitwise_count_float "Main() { int n = 1; n <<= 1.0 }" "require integer operands")
-reject(bitwise_narrow_assign "Main() { byte n = 1; n |= 256 }" "out of range")
+reject(bitwise_constant "Main() { #int n = 1\nn |= 2 }" "cannot modify constant")
+reject(bitwise_uninitialized "Main() { int n\nn <<= 1 }" "read before assignment")
+reject(bitwise_float_assign "Main() { float n = 1.0\nn &= 1 }" "require integer operands")
+reject(bitwise_count_float "Main() { int n = 1\nn <<= 1.0 }" "require integer operands")
+reject(bitwise_narrow_assign "Main() { byte n = 1\nn |= 256 }" "out of range")
 foreach(op IN ITEMS "<<" ">>")
   string(MAKE_C_IDENTIFIER "${op}" operator_id)
   trap_program(shift_negative_${operator_id} "Main() { Print(1 ${op} -1) }")
@@ -1069,6 +1247,8 @@ foreach(op IN ITEMS "<<" ">>")
   trap_program(shift_small_${operator_id} "Main() { Print((byte)1 ${op} 8) }")
   trap_program(shift_large_${operator_id} "Main() { Print((byte)1 ${op} (uint64)256) }")
   trap_program(shift_long_${operator_id} "Main() { Print((long)1 ${op} 64) }")
-  trap_program(shift_assign_${operator_id} "Main() { byte n = 1; n ${op}= -1; Print(n) }")
+  trap_program(shift_assign_${operator_id} "Main() { byte n = 1\nn ${op}= -1\nPrint(n) }")
 endforeach()
 message(STATUS "Duck integration tests passed")
+
+trap_program(expired_heap_alias "Main() { int* value = 5\nalias : value\nvalue = null\nPrint(*alias) }")

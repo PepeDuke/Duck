@@ -144,11 +144,13 @@ std::vector<Token> lex(const std::string &source,
              (std::isalnum(static_cast<unsigned char>(source[i])) ||
               source[i] == '_'))
         t.text += take();
+      if (t.text == "struct" || t.text == "class")
+        fail(t, "'" + t.text + "' is reserved in Duck. Use the container name directly");
     } else {
       t.text += take();
       if (i < source.size()) {
         std::string pair = t.text + source[i];
-        if (pair == "==" || pair == "!=" || pair == "<=" || pair == ">=" ||
+        if (pair == "::" || pair == "==" || pair == "!=" || pair == "<=" || pair == ">=" ||
             pair == "++" || pair == "--" || pair == "&&" || pair == "||" ||
             pair == "+=" || pair == "-=" || pair == "*=" || pair == "/=" ||
             pair == "%=" || pair == "&=" || pair == "|=" || pair == "^=" ||

@@ -7,7 +7,7 @@ elsewhere use the clarified rules; this file records remaining boundaries.
 1. Receiving returned ownership
    The factory tutorial uses item :: Factory.Make() to make ownership intent
    explicit. Does item : Factory.Make() also become an owner when Make
-   returns ::local? The README's older factory call uses :.
+   returns ::local?
    Specify how a returned owning temporary is consumed by each form.
 
 2. Assigning into an existing owner
@@ -34,8 +34,8 @@ elsewhere use the clarified rules; this file records remaining boundaries.
    Do not assume a container's relocation policy from its surface syntax.
 
 6. Pointer arithmetic
-   The README says pointer arithmetic can leave owner tracking.
-   Define the unsafe boundary, permitted address operations, and diagnostics.
+   The bootstrap rejects pointer arithmetic. For any future unsafe facility,
+   define the unsafe boundary, permitted address operations, and diagnostics.
    Do not assume two separately allocated objects occupy adjacent addresses.
 
 7. Lock granularity and nested $

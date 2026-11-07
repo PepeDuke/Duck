@@ -1,0 +1,9 @@
+version = 1
+
+[project]
+name = "WindowState"
+entry = "app"
+
+[modules.app]
+sources = ["Main.dk"]
+libraries = ["User32"]

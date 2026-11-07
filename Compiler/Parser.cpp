@@ -5,6 +5,8 @@ namespace {
 class Parser {
   std::vector<Token> tokens;
   size_t pos = 0;
+  const std::set<std::string> &containerNames;
+  bool returnsOwner = false;
   const Token &peek() const { return tokens[pos]; }
   bool at(const std::string &s) const {
     return !peek().string && peek().text == s;
@@ -25,10 +27,6 @@ class Parser {
     while (accept("\n")) {
     }
   }
-  void separators() {
-    while (accept("\n") || accept(";")) {
-    }
-  }
   Token identifier() {
     auto t = peek();
     if (t.string || t.text.empty() ||
@@ -43,6 +41,15 @@ class Parser {
       fail(t, "reserved keyword cannot be an identifier");
     return pop();
   }
+  bool namedType() const {
+    return !peek().string && containerNames.count(peek().text);
+  }
+  bool declarationType() const {
+    if (!namedType()) return isType();
+    const auto &next = tokens.at(pos + 1);
+    return !next.string && (next.text == "*" || next.text == "&" ||
+           std::isalpha(static_cast<unsigned char>(next.text[0])) || next.text[0] == '_');
+  }
   bool isType() const {
     return at("byte") || at("uint") || at("uint8") || at("uint16") ||
            at("uint32") || at("uint64") ||
@@ -52,6 +59,18 @@ class Parser {
            at("string") || at("name");
   }
   Type type() {
+    Type t = baseType();
+    while (accept("*")) t = t.pointerTo();
+    if (t.depth && (t.base == Type::String || t.base == Type::Name))
+      fail(peek(), "pointers to managed text are unsupported");
+    return t;
+  }
+  Type baseType() {
+    if (namedType()) {
+      Type t = Type::Record;
+      t.record = identifier().text;
+      return t;
+    }
     if (accept("byte") || accept("uint8"))
       return Type::UInt8;
     if (accept("uint16"))
@@ -79,7 +98,7 @@ class Parser {
     if (accept("cstring"))
       return Type::Text;
     expect("void");
-    return accept("*") ? Type::Pointer : Type::Void;
+    return Type::Void;
   }
   static int precedence(const Token &t) {
     if (t.string)
@@ -110,12 +129,12 @@ class Parser {
   std::unique_ptr<Expr> expression(int minimum = 1, bool stopAtPipe = false) {
     auto e = std::make_unique<Expr>();
     e->token = peek();
-    if (accept("-") || accept("!") || accept("~")) {
+    if (accept("-") || accept("!") || accept("~") || accept("&") || accept("*")) {
       e->kind = "unary";
       e->args.push_back(expression(11, stopAtPipe));
     } else if (accept("(")) {
       lines();
-      if (isType()) {
+      if (isType() || (namedType() && tokens[pos + 1].text == "*")) {
         e->kind = "cast";
         e->castType = type();
         lines();
@@ -126,6 +145,21 @@ class Parser {
         lines();
         expect(")");
       }
+    } else if (accept("{")) {
+      e->kind = "initializer";
+      lines();
+      while (!at("}")) {
+        auto field = std::make_unique<Expr>();
+        field->token = identifier();
+        field->kind = "fieldInitializer";
+        expect(":");
+        field->args.push_back(expression());
+        e->args.push_back(std::move(field));
+        if (!at("}") && !at("\n") && !at(",")) fail(peek(), "expected field separator");
+        accept(",");
+        lines();
+      }
+      expect("}");
     } else if (peek().string) {
       e->kind = "text";
       pop();
@@ -142,10 +176,25 @@ class Parser {
     } else {
       e->token = identifier();
       e->kind = "name";
-      while (accept("."))
-        e->token.text += "." + identifier().text;
-      if (accept("(")) {
+    }
+    std::string path = e->kind == "name" ? e->token.text : "";
+    while (at(".") || at("(")) {
+      if (accept(".")) {
+        auto member = std::make_unique<Expr>();
+        member->kind = ".";
+        member->token = identifier();
+        path += "." + member->token.text;
+        member->args.push_back(std::move(e));
+        e = std::move(member);
+      } else {
+        expect("(");
+        if (e->kind != "name" && e->kind != ".") fail(e->token, "expected a function or method name");
+        if (e->kind == ".") {
+          e->receiver = std::move(e->args.front());
+          e->args.clear();
+        }
         e->kind = "call";
+        e->token.text = path;
         lines();
         if (!at(")"))
           do {
@@ -154,6 +203,7 @@ class Parser {
             lines();
           } while (accept(","));
         expect(")");
+        path.clear();
       }
     }
     // In a conditional's true arm, the first unparenthesized pipe is
@@ -182,13 +232,14 @@ class Parser {
   std::vector<std::unique_ptr<Stmt>> block() {
     lines();
     expect("{");
-    separators();
+    lines();
     std::vector<std::unique_ptr<Stmt>> result;
     while (!at("}")) {
       if (at("<eof>"))
         fail(peek(), "expected '}'");
       result.push_back(statement());
-      separators();
+      if (!at("}") && !at("\n")) fail(peek(), "expected newline between statements");
+      lines();
     }
     expect("}");
     return result;
@@ -207,7 +258,7 @@ class Parser {
       lines();
       expect("while");
       s->expr = expression();
-      if (!at("\n") && !at(";") && !at("}"))
+      if (!at("\n") && !at("}"))
         fail(peek(), "expected terminator after do-while condition");
       return s;
     }
@@ -221,7 +272,7 @@ class Parser {
       expect(";");
       if (!at("{") && !at("\n"))
         s->step = simpleStatement();
-      if (s->step && s->step->kind == "let")
+      if (s->step && (s->step->kind == "let" || s->step->kind == "own"))
         fail(s->step->token, "for step cannot declare a variable");
       s->body = controlBody();
       return s;
@@ -248,12 +299,16 @@ class Parser {
       s->kind = s->token.text;
     else if (accept("return")) {
       s->kind = "return";
-      if (!at("\n") && !at(";") && !at("}"))
+      if (accept("::")) {
+        returnsOwner = true;
+        s->kind = "returnOwner";
+      }
+      if (!at("\n") && !at("}"))
         s->expr = expression();
     } else
       s = simpleStatement();
-    if (!at("\n") && !at(";") && !at("}"))
-      fail(peek(), "expected newline, ';', or '}' after statement (syntax may "
+    if (!at("\n") && !at("}"))
+      fail(peek(), "expected newline or '}' after statement (syntax may "
                    "not be supported yet)");
     return s;
   }
@@ -263,50 +318,131 @@ class Parser {
       return block();
     std::vector<std::unique_ptr<Stmt>> body;
     body.push_back(statement());
-    accept(";"); // A single statement's terminator precedes else/while.
     return body;
   }
   std::unique_ptr<Stmt> simpleStatement() {
     auto s = std::make_unique<Stmt>();
     s->token = peek();
     s->constant = accept("#");
-    if (s->constant && !isType())
+    if (s->constant && !declarationType())
       fail(peek(), "constant declaration requires an explicit type");
-    if (isType()) {
+    if (declarationType()) {
       s->kind = "let";
       s->type = type();
       if (s->type == Type::Void)
         fail(s->token, "variable cannot have void type");
       s->name = identifier().text;
-      if (s->constant) {
+      if (accept("(")) {
+        expect(")");
+        if (recordValue(s->type)) return s;
+        if (s->type.depth != 1 || !heapValue(s->type.pointee()))
+          fail(s->token, "heap construction requires a typed pointer");
+        s->kind = "own";
+      } else if (s->constant) {
         expect("=");
         s->expr = expression();
       } else if (accept("="))
         s->expr = expression();
-    } else if (pos + 1 < tokens.size() && !peek().string &&
-               !tokens[pos + 1].string &&
-               (tokens[pos + 1].text == ":" || tokens[pos + 1].text == "=" ||
-                tokens[pos + 1].text == "++" || tokens[pos + 1].text == "--" ||
-                tokens[pos + 1].text == "+=" || tokens[pos + 1].text == "-=" ||
-                tokens[pos + 1].text == "*=" || tokens[pos + 1].text == "/=" ||
-                tokens[pos + 1].text == "%=" || tokens[pos + 1].text == "&=" ||
-                tokens[pos + 1].text == "|=" || tokens[pos + 1].text == "^=" ||
-                tokens[pos + 1].text == "<<=" || tokens[pos + 1].text == ">>=")) {
-      s->name = identifier().text;
-      auto op = pop().text;
-      s->kind = op == ":" ? "let" : op == "=" ? "assign" : op;
-      if (op != "++" && op != "--")
-        s->expr = expression();
     } else {
-      s->kind = "expr";
-      s->expr = expression();
+      auto target = expression();
+      if (at(":") || at("::")) {
+        if (target->kind != "name") fail(target->token, "expected local name");
+        s->kind = pop().text == "::" ? "own" : "let";
+        s->name = target->token.text;
+        s->expr = expression();
+      } else if (at("=") || at("++") || at("--") || at("+=") || at("-=") ||
+                 at("*=") || at("/=") || at("%=") || at("&=") || at("|=") ||
+                 at("^=") || at("<<=") || at(">>=")) {
+        auto op = pop().text;
+        s->kind = op == "=" ? "assign" : op;
+        s->target = std::move(target);
+        if (op != "++" && op != "--") s->expr = expression();
+      } else {
+        s->kind = "expr";
+        s->expr = std::move(target);
+      }
     }
     return s;
   }
 
+  Function function(Token name, Type result, bool external, const std::string &nativeName,
+                    const std::string &receiver = "") {
+    Function f{std::move(name), result, {}, {}, !receiver.empty(), {}};
+    if (f.method) {
+      Type self = Type::Record;
+      self.record = receiver;
+      Token token = f.name;
+      token.text = "this";
+      f.params.push_back({token, self, true});
+    }
+    expect("(");
+    lines();
+    if (!at(")"))
+      do {
+        lines();
+        if (!declarationType())
+          fail(peek(),
+               "parameter requires a supported explicit type (int8, short, "
+               "int16, int, int32, long, int64, byte, uint, uint8, uint16, "
+               "uint32, uint64, float, double, bool, string, name, cstring, or void*)");
+        Type t = type();
+        if (t == Type::Void)
+          fail(peek(), "parameter cannot have void type");
+        bool reference = accept("&");
+        f.params.push_back({identifier(), t, reference});
+        lines();
+      } while (accept(","));
+    expect(")");
+    if (external) {
+      f.nativeSymbol = nativeName;
+      if (accept("=")) {
+        if (!peek().string || peek().text.empty())
+          fail(peek(), "native symbol must be a nonempty string literal");
+        f.nativeSymbol = pop().text;
+      }
+      if (at("{"))
+        fail(peek(), "native declaration cannot have a body");
+    } else {
+      returnsOwner = false;
+      f.body = block();
+      if (returnsOwner) {
+        if (f.result.depth != 1 || f.result == Type::Pointer)
+          fail(f.name, "return :: requires a typed heap pointer result");
+        f.result.role = Type::Owner;
+      }
+    }
+    return f;
+  }
+  void containerBody(Program &program, Token tag) {
+    expect("{");
+    Record record{tag, {}};
+    std::set<std::string> members;
+    lines();
+    while (!accept("}")) {
+      bool typed = declarationType();
+      Type t = typed ? type() : Type(Type::Void);
+      auto name = identifier();
+      if (!members.insert(name.text).second) fail(name, "duplicate container member");
+      if (name.text == "this") fail(name, "this is reserved for the receiver");
+      if (at("(")) {
+        if (name.text == tag.text) fail(name, "custom constructors are not implemented");
+        name.text = tag.text + "." + name.text;
+        program.push_back(function(std::move(name), t, false, "", tag.text));
+      } else {
+        if (!typed || t == Type::Void || managedText(t))
+          fail(name, "container fields require an unmanaged value type");
+        if (at("=")) fail(name, "container field defaults are not implemented");
+        record.fields.push_back({name, t});
+      }
+      if (!at("}") && !at("\n")) fail(peek(), "expected member terminator");
+      lines();
+    }
+    program.records.push_back(std::move(record));
+  }
+
   void declarations(Program &functions, const std::string &prefix,
                     bool nested) {
-    separators();
+    lines();
     while (!at("<eof>") && !(nested && at("}"))) {
       bool external = accept("extern");
       if (external) {
@@ -314,14 +450,24 @@ class Parser {
           fail(peek(), "native declarations require extern \"C\"");
         pop();
       }
-      bool typed = isType();
+      if (!external && namedType()) {
+        auto saved = pos;
+        auto tag = identifier();
+        lines();
+        if (at("{")) {
+          if (nested) fail(tag, "container definitions must be at file scope");
+          containerBody(functions, tag);
+          if (!at("<eof>") && !at("\n")) fail(peek(), "expected container terminator");
+          lines();
+          continue;
+        }
+        pos = saved;
+      }
+      bool typed = declarationType();
       Type result = typed ? type() : Type::Void;
       Token name = identifier();
       if (!external && !typed && !at("(")) {
         lines();
-        if (at("{"))
-          fail(name, "instance containers are not implemented yet; use #{ for "
-                     "static functions");
         if (accept("#")) {
           const auto container = prefix + name.text + ".";
           do {
@@ -335,53 +481,23 @@ class Parser {
             if (!at("#"))
               pos = saved;
           } while (accept("#"));
-          if (!at("<eof>") && !at("\n") && !at(";") && !(nested && at("}")))
+          if (!at("<eof>") && !at("\n") && !(nested && at("}")))
             fail(peek(), "expected newline after static container");
-          separators();
+          lines();
           continue;
         }
       }
       name.text = prefix + name.text;
       auto nativeName = name.text.substr(prefix.size());
-      Function f{std::move(name), result, {}, {}, {}};
-      expect("(");
-      lines();
-      if (!at(")"))
-        do {
-          lines();
-          if (!isType())
-            fail(peek(),
-                 "parameter requires a supported explicit type (int8, short, "
-                 "int16, int, int32, long, int64, byte, uint, uint8, uint16, "
-                 "uint32, uint64, float, double, bool, string, name, cstring, or void*)");
-          Type t = type();
-          if (t == Type::Void)
-            fail(peek(), "parameter cannot have void type");
-          bool reference = accept("&");
-          f.params.push_back({identifier(), t, reference});
-          lines();
-        } while (accept(","));
-      expect(")");
-      if (external) {
-        f.nativeSymbol = nativeName;
-        if (accept("=")) {
-          if (!peek().string || peek().text.empty())
-            fail(peek(), "native symbol must be a nonempty string literal");
-          f.nativeSymbol = pop().text;
-        }
-        if (at("{"))
-          fail(peek(), "native declaration cannot have a body");
-      } else
-        f.body = block();
-      functions.push_back(std::move(f));
-      if (!at("<eof>") && !at("\n") && !at(";") && !(nested && at("}")))
+      functions.push_back(function(std::move(name), result, external, nativeName));
+      if (!at("<eof>") && !at("\n") && !(nested && at("}")))
         fail(peek(), "expected newline between functions");
-      separators();
+      lines();
     }
   }
 
 public:
-  explicit Parser(std::vector<Token> t) : tokens(std::move(t)) {}
+  Parser(std::vector<Token> t, const std::set<std::string> &names) : tokens(std::move(t)), containerNames(names) {}
   Program parse() {
     Program functions;
     declarations(functions, "", false);
@@ -390,6 +506,26 @@ public:
 };
 } // namespace
 Program parse(std::vector<Token> tokens) {
-  return Parser(std::move(tokens)).parse();
+  std::set<std::string> names;
+  collectContainerNames(tokens, names);
+  return parse(std::move(tokens), names);
+}
+void collectContainerNames(const std::vector<Token> &tokens, std::set<std::string> &names) {
+  int depth = 0;
+  for (size_t i = 0; i < tokens.size(); ++i) {
+    const auto &t = tokens[i];
+    if (t.string) continue;
+    if (t.text == "{") ++depth;
+    else if (t.text == "}") --depth;
+    else if (depth == 0 && (std::isalpha(static_cast<unsigned char>(t.text[0])) || t.text[0] == '_')) {
+      size_t next = i + 1;
+      while (next < tokens.size() && tokens[next].text == "\n" && !tokens[next].string) ++next;
+      if (next < tokens.size() && !tokens[next].string && tokens[next].text == "{")
+        names.insert(t.text);
+    }
+  }
+}
+Program parse(std::vector<Token> tokens, const std::set<std::string> &names) {
+  return Parser(std::move(tokens), names).parse();
 }
 } // namespace duck

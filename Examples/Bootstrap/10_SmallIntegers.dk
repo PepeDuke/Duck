@@ -1,5 +1,8 @@
 // Signed small integers keep their width during same-type arithmetic.
-int8 Next(int8 value) { value++; return value }
+int8 Next(int8 value) {
+    value++
+    return value
+}
 Adjust(int16& value) { value += 2 }
 short Choose(bool first) { return first ? -32768 | 32767 }
 

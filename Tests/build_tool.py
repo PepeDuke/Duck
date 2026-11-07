@@ -211,7 +211,7 @@ class Projects(unittest.TestCase):
             "Bump(int& n) { n++ }\ndouble Twice(double value) { return value * 2 }",
             encoding="utf-8")
         (self.root / "app.dk").write_text(
-            "Main() { n : 4; Bump(n); Print(n); Print(Twice(1.25)) }", encoding="utf-8")
+            "Main() { n : 4\nBump(n)\nPrint(n)\nPrint(Twice(1.25)) }", encoding="utf-8")
         self.invoke("--profile", "release")
         exe = self.root / ".duck/build/release" / ("Demo.exe" if os.name == "nt" else "Demo")
         self.assertEqual(subprocess.check_output([str(exe)], text=True).splitlines(), ["5", "2.5"])
@@ -231,7 +231,7 @@ class Projects(unittest.TestCase):
         (self.root / "core.dk").write_text(
             "Bump(int64& n) { n++ }\nlong Twice(long n) { return n * 2 }", encoding="utf-8")
         (self.root / "app.dk").write_text(
-            "Main() { long n = 5000000000; Bump(n); Print(Twice(n)) }", encoding="utf-8")
+            "Main() { long n = 5000000000\nBump(n)\nPrint(Twice(n)) }", encoding="utf-8")
         self.invoke("--profile", "release")
         output = self.root / ".duck/build/release"
         self.assertIn("declare i64 @duck.Twice(i64)", (output / "app.ll").read_text())
@@ -240,14 +240,14 @@ class Projects(unittest.TestCase):
 
     def test_unsigned_interface(self):
         (self.root / "core.dk").write_text(
-            "Bump(byte& b, uint& n) { b++; n++ }\n"
+            "Bump(byte& b, uint& n) { b++\nn++ }\n"
             "uint64 Divide(uint64 n) { return n / (uint64)3 }\n"
             "uint16 Small(uint16 n) { return n }\n"
             "int8 Signed(int8 n) { return n }", encoding="utf-8")
         (self.root / "app.dk").write_text(
-            "Main() { uint8 b = 255; uint32 n = 4294967295; Bump(b, n); "
-            "Print(b); Print(n); Print(Divide(18446744073709551615)); "
-            "Print(Small(65535)); Print(Signed(-128)) }", encoding="utf-8")
+            "Main() { uint8 b = 255\nuint32 n = 4294967295\nBump(b, n)\n"
+            "Print(b)\nPrint(n)\nPrint(Divide(18446744073709551615))\n"
+            "Print(Small(65535))\nPrint(Signed(-128)) }", encoding="utf-8")
         for profile in ("debug", "release"):
             with self.subTest(profile=profile):
                 self.invoke("--profile", profile)

@@ -34,8 +34,10 @@ int CheckBytes(const unsigned char *p) {
 OWNERSHIP = r'''
 extern "C" int Live()
 extern "C" int Peak()
-string Make() { string part = "A" + "B"; return part + "C" }
-string Change(string& target) { target = "changed" + " value"; return "!" }
+string Make() { string part = "A" + "B"
+return part + "C" }
+string Change(string& target) { target = "changed" + " value"
+return "!" }
 string First(string first, string second) { return first }
 string Early(bool option) {
     for string value = "x" + "y"; Length(value) < 9; value += "z" {
@@ -82,7 +84,8 @@ Work() {
     for string value = "a" + "b"; Length(value) < 5; value += "c" {
         string local = Make()
     }
-    { string s = Make(); s += "inner" }
+    { string s = Make()
+    s += "inner" }
     Make()
 }
 Cycle() {
@@ -94,7 +97,11 @@ Cycle() {
         if duplicate != current { Print("bad") }
     }
 }
-Main() { Work(); Print(Live()); Cycle(); Print(Live()); Print(Peak() < 20) }
+Main() { Work()
+Print(Live())
+Cycle()
+Print(Live())
+Print(Peak() < 20) }
 '''
 
 
@@ -144,38 +151,49 @@ extern "C" int CheckBytes(name text)
 Main() {
     string wide = "AŽ🦆"
     name narrow = "AŽ🦆"
-    Print(Length(wide)); Print(Length(narrow))
-    Print(CodeUnitAt(wide, 2)); Print(CodeUnitAt(wide, 3)); Print(CodeUnitAt(narrow, 3))
-    Print(CheckWide(wide)); Print(CheckBytes(narrow))
-    Print(CheckWide("AŽ🦆")); Print(CheckBytes("AŽ🦆"))
-    Print(wide); Print(narrow)
-    Print((string)narrow == wide); Print((name)wide == narrow)
-    Print(wide != "other"); Print("AŽ🦆" == narrow)
+    Print(Length(wide))
+    Print(Length(narrow))
+    Print(CodeUnitAt(wide, 2))
+    Print(CodeUnitAt(wide, 3))
+    Print(CodeUnitAt(narrow, 3))
+    Print(CheckWide(wide))
+    Print(CheckBytes(narrow))
+    Print(CheckWide("AŽ🦆"))
+    Print(CheckBytes("AŽ🦆"))
+    Print(wide)
+    Print(narrow)
+    Print((string)narrow == wide)
+    Print((name)wide == narrow)
+    Print(wide != "other")
+    Print("AŽ🦆" == narrow)
     name composed = "A" + "Ž🦆"
     composed += "!"
     Print(composed)
-    Print(Length("")); Print(Length((name)""))
+    Print(Length(""))
+    Print(Length((name)""))
     #string escaped = "\u0041\u017D\U0001F986"
     Print(escaped == wide)
     string embedded = "a\0b"
-    Print(Length(embedded)); Print(CodeUnitAt(embedded, 1)); Print(embedded)
+    Print(Length(embedded))
+    Print(CodeUnitAt(embedded, 1))
+    Print(embedded)
     Print((string)(name)embedded == embedded)
 }
 ''', '4\n7\n55358\n56710\n240\n1\n1\n1\n1\nAŽ🦆\nAŽ🦆\n1\n1\n1\n1\nAŽ🦆!\n0\n0\n1\n3\n0\na\0b\n1\n', fixture=True)
 
     def test_contextual_text_literals(self):
-        self.run_source('Main() { name n = "a"; name joined = "b" + ("c" + "d"); '
-                        'name nested = n + ("e" + "f"); '
-                        'one : true ? n | "g"; two : false ? "h" | n; '
-                        'Print(joined); Print(nested); Print(one == n); Print(two == n) }',
+        self.run_source('Main() { name n = "a"\nname joined = "b" + ("c" + "d")\n'
+                        'name nested = n + ("e" + "f")\n'
+                        'one : true ? n | "g"\ntwo : false ? "h" | n\n'
+                        'Print(joined)\nPrint(nested)\nPrint(one == n)\nPrint(two == n) }',
                         'bcd\naef\n1\n1\n')
 
     def test_unicode_boundaries(self):
         points = [0, 0x7F, 0x80, 0x7FF, 0x800, 0xD7FF, 0xE000, 0xFFFF, 0x10000, 0x10FFFF]
         literal = ''.join('\\U%08X' % cp for cp in points)
         text = ''.join(chr(cp) for cp in points)
-        self.run_source('Main() { string s = "' + literal + '"; name n = (name)s; '
-                        'Print(Length(s)); Print(Length(n)); Print((string)n == s); Print(s == (string)(name)s) }',
+        self.run_source('Main() { string s = "' + literal + '"\nname n = (name)s\n'
+                        'Print(Length(s))\nPrint(Length(n))\nPrint((string)n == s)\nPrint(s == (string)(name)s) }',
                         f'{len(text.encode("utf-16-le")) // 2}\n{len(text.encode("utf-8"))}\n1\n1\n')
 
     def test_ownership(self):
@@ -184,8 +202,8 @@ Main() {
     def test_separate_modules(self):
         path, lib = self.compile('string Echo(string text) { return text + "!" }\n'
                                  'name Identity(name text) { return text }', 'library', library=True)
-        _, app = self.compile('Main() { string s = Echo("Duck"); name n = "Ž🦆"; '
-                              'Print(s); Print(Identity(n)); Print(Echo(s) == "Duck!!") }', imports=[path])
+        _, app = self.compile('Main() { string s = Echo("Duck")\nname n = "Ž🦆"\n'
+                              'Print(s)\nPrint(Identity(n))\nPrint(Echo(s) == "Duck!!") }', imports=[path])
         for level in ('-O0', '-O2'):
             obj, exe = self.root / 'library.o', self.root / 'modules.exe'
             self.command(options.clang, level, '-c', str(lib), '-o', str(obj))
@@ -194,22 +212,22 @@ Main() {
 
     def test_rejections(self):
         cases = [
-            ('Main() { string s = "x"; name n = s }', 'type mismatch'),
-            ('Main() { name n = "x"; string s = n }', 'type mismatch'),
-            ('Main() { string s = "x"; cstring c = s }', 'type mismatch'),
+            ('Main() { string s = "x"\nname n = s }', 'type mismatch'),
+            ('Main() { name n = "x"\nstring s = n }', 'type mismatch'),
+            ('Main() { string s = "x"\ncstring c = s }', 'type mismatch'),
             ('Main() { Print((cstring)"x") }', 'casts currently require'),
-            ('Main() { string s; Print(s) }', 'read before assignment'),
+            ('Main() { string s\nPrint(s) }', 'read before assignment'),
             ('Main() { string s = null }', 'type mismatch'),
             ('Main() { Print("x" - "y") }', 'text supports'),
-            ('Main() { string s = "x"; s++ }', 'type mismatch'),
-            ('Main() { #name n = "x"; n += "y" }', 'constant'),
+            ('Main() { string s = "x"\ns++ }', 'type mismatch'),
+            ('Main() { #name n = "x"\nn += "y" }', 'constant'),
             ('Main() { Print(Length(3)) }', 'requires string or name'),
             ('Main() { Print(CodeUnitAt("x", true)) }', 'type mismatch'),
             ('extern "C" string Bad()\nMain() {}', 'native return'),
             ('extern "C" name Bad()\nMain() {}', 'native return'),
             ('extern "C" Bad(string& s)\nMain() {}', 'native parameter ABI'),
             ('extern "C" Bad(name& s)\nMain() {}', 'native parameter ABI'),
-            ('Set(string& s) {}\nMain() { name n = "x"; Set(n) }', 'type mismatch'),
+            ('Set(string& s) {}\nMain() { name n = "x"\nSet(n) }', 'type mismatch'),
             ('Main() { Print("\\uD800") }', 'scalar value'),
             ('Main() { Print("\\U00110000") }', 'scalar value'),
             ('Main() { Print("\\uQQQQ") }', 'invalid Unicode escape'),

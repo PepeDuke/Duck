@@ -80,7 +80,7 @@ accept explicit files/options only and never reads project configuration.
 
 - Top-level functions with explicit supported numeric or `bool` parameters and returns,
   or omitted/explicit `void` returns. Forward calls and recursion work.
-  `string`, `name`, `cstring`, and opaque `void*` parameters, locals, and returns
+  `string`, `name`, `cstring`, and pointer parameters, locals, and returns
   are also supported. See the text and native interop sections below.
 - Mutable scalar reference parameters for all supported numeric and boolean types. Arguments must be
   mutable variables of exactly the declared type. References can be forwarded
@@ -151,7 +151,7 @@ accept explicit files/options only and never reads project configuration.
   destination's low bits. Integer widening sign-extends signed sources and
   zero-extends unsigned sources; equal-width casts reinterpret the bits.
   Numeric-to-bool tests nonzero (NaN is true); bool-to-numeric yields
-  0 or 1. Explicit casts between `string` and `name` transcode text. Object, pointer,
+  0 or 1. Explicit casts between `string` and `name` transcode text. Raw pointers support explicit pointer and 64-bit integer casts. Object,
   `cstring`, and void casts are not implemented.
 - Short-circuit `&&` / `||` and Duck's `condition ? value | value` expression.
   Conditions require booleans; conditional branches must have matching
@@ -161,14 +161,13 @@ accept explicit files/options only and never reads project configuration.
 - `if` / `else if` / `else`, `while`, `do body while condition`, and counted
   `for initializer; condition; step` loops with braced or single-statement
   bodies. Single-statement bodies also introduce a scope. `else` attaches to
-  the nearest unmatched `if`; a simple body ends with a newline or semicolon.
+  the nearest unmatched `if`; a simple body ends with a newline or closing brace.
   Function bodies still require braces. Standalone `{ ... }` statements create
   lexical scopes and propagate assignments to outer variables.
   Any for-header clause may be omitted; an omitted condition is true.
   `break` exits the innermost loop; `continue` runs the for-loop step or
   checks a while/do-while condition. A do-while body runs before its condition,
-  and `break` skips the condition. A trailing semicolon after the do-while
-  condition is optional at newline or `}`. The bare `do { ... }` form without
+  and `break` skips the condition. The condition ends at a newline or `}`. The bare `do { ... }` form without
   `while` shown in the broader design is not yet supported.
   For-initializer locals belong to the loop
   scope. The step cannot declare a variable.
@@ -179,7 +178,7 @@ accept explicit files/options only and never reads project configuration.
   Text is printed as data, so percent characters never become format specifiers.
   Inferred locals can hold and reassign these literal values, including
   conditional selections such as `label : ready ? "yes" | "no"`.
-- Line and block comments, newline statement terminators, optional semicolons,
+- Line and block comments, newline statement terminators,
   and termination before `}`. Call arguments and parameter lists may span lines.
 - Source-file, line, and column diagnostics. Invalid programs do not write IR.
 
@@ -222,7 +221,7 @@ Two small operands retain their common width: `(int8)127 + (int8)1` wraps to
 `-128`. A plain literal in arithmetic still infers `int`, so `small + 1` has
 type `int`; assigning it to `int8` or `short` requires a cast. Compound
 assignments accept direct in-range literals at the target width, so
-`int8 n = 127; n += 1` wraps to `-128`. Integer casts may deliberately narrow
+incrementing an `int8` holding 127 wraps to `-128`. Integer casts may deliberately narrow
 out-of-range values: `(int8)255` is `-1`. Unary negation of an unsigned value
 wraps at its width. Floating casts to unsigned types floor first and trap
 if the result is negative, non-finite, or at least 2 raised to the type's width.
@@ -260,8 +259,7 @@ the if. These bootstrap rules do not settle default initialization of future
 containers or fields.
 
 Execution is sequential. The compiler does not yet implement Duck's automatic
-concurrency, ownership rules, resource locking, or runtime. Instance containers,
-container references, local reference declarations, reference returns, arrays,
+concurrency, ownership rules, resource locking, or runtime. Local reference declarations, reference returns, arrays,
 custom byte-width `iN`/`uN` types, other numeric types, mutable text buffers, range-based loops,
 markup and compile-time evaluation
 remain future work. Unsupported constructs produce errors; the design
@@ -269,11 +267,12 @@ examples are not a claim of compiler coverage. Non-void functions must have
 an explicit return on every structurally reachable path, and statements
 after a guaranteed return are rejected.
 
-Static containers currently group functions only: fields, access modifiers,
-instances, constructors, and properties are not implemented. The mixed instance
-and static tutorial (`04_ContainersAndStaticBlocks.dk`) therefore remains a
-design example. Qualified names currently refer to static functions, not object
-member access. The executable entry point must still be a global `Main`.
+Declare an instance container as `Example { ... }`. Fields and instance methods
+share the body. Each member and each statement starts on its own line when
+there is more than one. Instance methods can use field names directly or access
+them through `this`. Declare and use the type by its name alone, such as `Example` or `Example*`.
+Static function groups continue to use `#{}`. Custom constructors, field
+defaults, properties, and inheritance remain future work.
 
 ## String and name values
 
@@ -373,17 +372,17 @@ An optional `= "symbol"` maps a Duck function name to a native linker symbol.
 Without an alias, the unqualified function name is used, even inside a static
 container. Symbols must be ASCII identifiers; `main` and `printf` are reserved
 by the bootstrap (as are `malloc`, `free`, and `putchar`, used by text helpers). Only `extern "C"` is accepted. Declarations end at a newline,
-semicolon, enclosing brace, or EOF. The compiler rejects bodies, conflicting
+enclosing brace, or EOF. The compiler rejects bodies, conflicting
 signatures for the same native symbol, and native Main declarations. Compatible
 aliases share one LLVM declaration. Native declarations can be exported through
 ordinary direct module dependencies; their bodies are never emitted.
 
 Native signatures currently support:
 
-- By value: signed/unsigned 32-bit and 64-bit integers, float, double, `void*`,
+- By value: signed/unsigned 32-bit and 64-bit integers, float, double, raw pointers,
   and `string`, `name`, or `cstring` arguments. Native returns allow the supported
   numeric/pointer types or void, but exclude all text types.
-- By reference: all supported numeric types and `void*&`. References pass the
+- By reference: all supported numeric types, raw pointer variables, and structs. References pass the
   address of an initialized, mutable, exactly typed variable. Initialize output
   arguments explicitly; native calls do not bypass definite assignment checks.
 - `bool`, 8/16-bit integers by value, native text returns, and text references are
@@ -393,7 +392,7 @@ Native signatures currently support:
 
 `void*` is an opaque handle type. It supports null, assignment, function arguments
 and returns, mutable references, conditionals, and equality/inequality. It does
-not support dereferencing, arithmetic, ordering, numeric casts, or Print. Use
+not support dereferencing, arithmetic, ordering, or Print. Use
 `handle != null` to check a handle. A local handle is not initialized implicitly.
 There is no automatic native resource ownership: explicitly call the native
 library's destroy/close function when required.
@@ -404,9 +403,85 @@ accepts it. It is distinct from an opaque handle and cannot be null or cast to
 `void*`. Native callees must not modify its storage. Native references borrow
 Duck storage only during the call and must not be retained. These native
 contracts are the binding author's responsibility; Duck does not inspect the
-library implementation. General pointers, buffers, callbacks, structures by
+library implementation. Pointer arithmetic, indirect Duck calls, structures passed to C by
 value, varargs, C++ name mangling, and alternate calling conventions remain
 unsupported.
+
+### Owned heap locals
+
+```duck
+Entity { int score }
+
+int ReadScore(Entity* e) { return e.score }
+
+Entity* Make() {
+    Entity* owner()
+    owner.score = 42
+    return ::owner
+}
+
+Main() {
+    entity :: Make()
+    Print(ReadScore(entity))
+    alias : entity
+    {
+        temporary :: entity
+        Print(alias.score)
+    }
+    Print(alias == null)
+}
+```
+
+Use `int* n = 5` or `n :: 5` to allocate a scalar. A move clears its source.
+The compiler can keep a local alias as a direct borrow when its remaining
+lexical uses preserve the owner. More general local aliases trigger lazy
+promotion on the executed path. An expired alias compares equal to null and
+dereferencing it traps. Scope exit, early return, break, and continue clean up
+owned locals.
+
+Tracked arguments may borrow into Duck pointer parameters whose bodies the
+compiler proves only access the pointee. Unproven escapes, raw casts, storing
+tracked aliases in native-layout fields, and transfers from aliases are rejected.
+Owners cross a function return via `return ::owner` and a receiving `::`
+declaration. Native pointers obtained from `&local` or a platform API continue
+to use the existing raw ABI.
+
+### Typed pointers and window state
+
+Declare a file-scope container with fields in native declaration order. Struct
+locals start zero-initialized. LLVM supplies the target's ordinary C field
+alignment and padding. Fields can be scalars, pointers, or embedded structs. Use fixed-width types that match the native header.
+
+```duck
+WindowState
+{
+    int visits
+    void* window
+}
+
+int Visit(void* window, long context) {
+    WindowState* state = (WindowState*)context
+    state.window = window
+    state.visits++
+    return 1
+}
+```
+
+`&value` takes the address of initialized mutable storage. `*p` reads or
+writes the pointee. Use `value.field` or `p.field` for fields. Each dot follows at most one pointer
+level, so a pointer-to-pointer needs an explicit dereference, as in `(*pp).field`. A typed pointer
+can pass directly to a `void*` parameter. Recover its type with an explicit
+cast. On x64 Windows, `(long)&state` carries the address in an `LPARAM`.
+The binding author must keep the storage alive and check nullable pointers
+before accessing their pointees.
+
+Pass `&Visit` to a native callback parameter declared as `void*`. The compiler
+checks the callback uses supported scalar ABI types. The binding author must
+match the actual parameter list, return type, and calling convention.
+[WindowState](../Examples/Projects/WindowState/Main.dk) creates two hidden
+windows and stores a state pointer in the child's `GWLP_USERDATA` slot. The
+enumeration callback retrieves that pointer, passes a Duck container to
+`GetClientRect`, and updates the caller's state.
 
 Add libraries to the `.dkp` module's `libraries` array or pass them to Clang
 when linking IR directly. Library names and prototype correctness must match

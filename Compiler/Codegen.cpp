@@ -7,7 +7,9 @@ namespace {
 std::string irType(Type t) {
   if (integral(t))
     return "i" + std::to_string(integerWidth(t));
-  switch (t) {
+  if (t.depth) return "ptr";
+  if (recordValue(t)) return "%struct." + t.record;
+  switch (t.base) {
   case Type::Float:
     return "float";
   case Type::Double:
@@ -17,7 +19,6 @@ std::string irType(Type t) {
   case Type::String:
   case Type::Name:
   case Type::Text:
-  case Type::Pointer:
     return "ptr";
   default:
     return "void";
@@ -40,6 +41,7 @@ struct Binding {
   std::string value;
   bool constant = false;
   bool owned = false;
+  bool scopedBorrow = false;
 };
 class Generator {
   const Symbols &functions;
@@ -54,7 +56,7 @@ class Generator {
   std::vector<Loop> loops;
   std::string currentBlock = "entry";
   int next = 0, strings = 0;
-  bool usesTextRuntime = false;
+  bool usesTextRuntime = false, usesHeapRuntime = false;
   std::string fresh() { return "%v" + std::to_string(next++); }
   std::string label() { return "b" + std::to_string(next++); }
   void emit(const std::string &s) { code << "  " << s << '\n'; }
@@ -77,7 +79,27 @@ class Generator {
     usesTextRuntime = true;
     emit("call void @duck.text.release(ptr " + value.value + ")");
   }
+  static std::string ownerFlag(Type type) { return type.role == Type::Owner ? "true" : "false"; }
+  std::string moveOwner(const Token &source) {
+    auto slot = variable(source).value;
+    auto word = fresh();
+    emit(word + " = load ptr, ptr " + slot);
+    emit("store ptr null, ptr " + slot);
+    return word;
+  }
+  std::string aliasWord(const Expr &source) {
+    if (source.kind == "null") return "null";
+    auto binding = variable(source.token);
+    auto word = fresh();
+    emit(word + " = call ptr @duck.heap$alias(ptr " + binding.value + ", i1 " + ownerFlag(binding.type) + ")");
+    return word;
+  }
   void releaseBinding(const Binding &binding) {
+    if (binding.scopedBorrow) return;
+    if (binding.type.role != Type::Raw) {
+      emit("call void @duck.heap$drop(ptr " + binding.value + ", i1 " + ownerFlag(binding.type) + ")");
+      return;
+    }
     if (!managedText(binding.type)) return;
     auto old = fresh();
     emit(old + " = load ptr, ptr " + binding.value);
@@ -93,6 +115,20 @@ class Generator {
   Value convert(Value value, Type target) {
     if (value.type == target)
       return value;
+    if (value.type.depth && target.depth) {
+      if (value.type.role != Type::Raw && target.role == Type::Raw) {
+        auto valid = fresh();
+        emit(valid + " = icmp ne ptr " + value.value + ", null");
+        require(valid);
+      }
+      return {target, value.value};
+    }
+    if (value.type.depth || target.depth) {
+      auto id = fresh();
+      emit(id + (value.type.depth ? " = ptrtoint " : " = inttoptr ") +
+           irType(value.type) + " " + value.value + " to " + irType(target));
+      return {target, id};
+    }
     if (managedText(value.type) && managedText(target)) {
       usesTextRuntime = true;
       auto converted = fresh();
@@ -230,15 +266,16 @@ class Generator {
 
     scopes.back()[t.text] = binding;
   }
-  void declare(const Token &t, Value value, bool constant = false) {
+  void declare(const Token &t, Value value, bool constant = false, bool scopedBorrow = false) {
     auto address = fresh();
     allocations << "  " << address << " = alloca " << irType(value.type)
                 << '\n';
+    if (recordValue(value.type) && value.value.empty()) value.value = "zeroinitializer";
     if (managedText(value.type) && value.value.empty()) value.value = "null";
     if (!value.value.empty())
       emit("store " + irType(value.type) + " " + value.value + ", ptr " +
            address);
-    bind(t, {value.type, address, constant, true});
+    bind(t, {value.type, address, constant, true, scopedBorrow});
   }
   std::string textConstant(const std::string &value) {
     std::string name = "@str." + symbolPrefix + "." + std::to_string(strings++),
@@ -287,18 +324,56 @@ class Generator {
                ? value
                : convert(value, conversion->second);
   }
+  Value dereference(const Expr &e) {
+    auto v = expression(e);
+    if (v.type.role != Type::Raw) {
+      auto valid = fresh();
+      emit(valid + " = icmp ne ptr " + v.value + ", null");
+      require(valid);
+    }
+    return v;
+  }
+  Binding location(const Expr &e) {
+    if (e.kind == "name") return variable(e.token);
+    auto type = analysis.expressionTypes.at(&e);
+    if (e.kind == "unary") return {type, dereference(*e.args[0]).value};
+    const auto &base = *e.args[0];
+    auto record = analysis.expressionTypes.at(&base);
+    std::string address;
+    if (!record.depth) address = location(base).value;
+    else {
+      address = dereference(base).value;
+      record = record.pointee();
+    }
+    auto id = fresh();
+    emit(id + " = getelementptr " + irType(record) + ", ptr " + address +
+         ", i32 0, i32 " + std::to_string(analysis.fieldIndices.at(&e)));
+    return {type, id};
+  }
   Value lowerExpression(const Expr &e) {
     const auto &op = e.token.text;
     auto integer = analysis.integerConstants.find(&e);
     if (integer != analysis.integerConstants.end())
       return {analysis.expressionTypes.at(&e), integer->second};
+    if (e.kind == "initializer") {
+      auto type = analysis.expressionTypes.at(&e);
+      std::string value = "zeroinitializer";
+      for (const auto &field : e.args) {
+        auto v = expression(*field->args.front());
+        auto aggregate = fresh();
+        emit(aggregate + " = insertvalue " + irType(type) + " " + value + ", " + irType(v.type) +
+             " " + v.value + ", " + std::to_string(analysis.fieldIndices.at(field.get())));
+        value = aggregate;
+      }
+      return {type, value};
+    }
     if (e.kind == "cast")
       return convert(expression(*e.args[0]), e.castType);
     if (e.kind == "real")
       return {analysis.expressionTypes.at(&e),
               analysis.floatingConstants.at(&e)};
     if (e.kind == "null")
-      return {Type::Pointer, "null"};
+      return {analysis.expressionTypes.at(&e), "null"};
     if (e.kind == "bool")
       return {Type::Bool, op == "true" ? "1" : "0"};
     if (e.kind == "text") {
@@ -306,10 +381,23 @@ class Generator {
       if (managedText(type)) return managedLiteral(e, type);
       return {Type::Text, textConstant(op)};
     }
-    if (e.kind == "name") {
-      auto v = variable(e.token);
+    if (e.kind == "unary" && op == "&") {
+      auto target = analysis.callTargets.find(&e);
+      if (target != analysis.callTargets.end()) {
+        const auto &native = functions.at(target->second).nativeSymbol;
+        return {Type::Pointer, native.empty() ? "@duck." + target->second : "@" + native};
+      }
+      return {analysis.expressionTypes.at(&e), location(*e.args[0]).value};
+    }
+    if (e.addressable()) {
+      auto v = location(e);
       auto id = fresh();
       emit(id + " = load " + irType(v.type) + ", ptr " + v.value);
+      if (v.type.role != Type::Raw && !v.scopedBorrow) {
+        auto payload = fresh();
+        emit(payload + " = call ptr @duck.heap$payload(ptr " + id + ", i1 " + ownerFlag(v.type) + ")");
+        return {v.type, payload};
+      }
       retain({v.type, id});
       return {v.type, id};
     }
@@ -358,21 +446,39 @@ class Generator {
              " " + v.value + ")");
         return {Type::Void, ""};
       }
+      if (!analysis.callTargets.count(&e))
+        return {analysis.expressionTypes.at(&e), "zeroinitializer"};
       const auto &target = analysis.callTargets.at(&e);
       auto found = functions.find(target);
 
       const auto &f = found->second;
 
       std::string args;
+      if (f.method) {
+        std::string address;
+        if (!e.receiver) {
+          address = "%arg0";
+        } else if (analysis.expressionTypes.at(e.receiver.get()).depth)
+          address = dereference(*e.receiver).value;
+        else if (e.receiver->addressable())
+          address = location(*e.receiver).value;
+        else {
+          auto temporary = expression(*e.receiver);
+          address = fresh();
+          allocations << "  " << address << " = alloca " << irType(temporary.type) << '\n';
+          emit("store " + irType(temporary.type) + " " + temporary.value + ", ptr " + address);
+        }
+        args = "ptr " + address;
+      }
       std::vector<Value> arguments;
       for (size_t i = 0; i < e.args.size(); ++i) {
-        const auto &parameter = f.parameters[i];
+        const auto &parameter = f.parameters[i + (f.method ? 1 : 0)];
         const auto &argument = *e.args[i];
-        if (i)
+        if (!args.empty())
           args += ", ";
         if (parameter.reference) {
 
-          auto binding = variable(argument.token);
+          auto binding = location(argument);
 
           args += "ptr " + binding.value;
         } else {
@@ -459,6 +565,12 @@ class Generator {
            (s.kind == "break" ? loops.back().exit : loops.back().next));
       return true;
     }
+    if (s.kind == "returnOwner") {
+      auto word = moveOwner(s.expr->token);
+      cleanupScopes(0);
+      emit("ret ptr " + word);
+      return true;
+    }
     if (s.kind == "return") {
       Value v = s.expr ? expression(*s.expr) : Value{Type::Void, ""};
       cleanupScopes(0);
@@ -526,7 +638,29 @@ class Generator {
       scopes.pop_back();
       return false;
     }
-    if (s.kind == "let") {
+    if (s.kind == "own" || s.kind == "let") {
+      const auto type = analysis.localTypes.at(&s);
+      if (type.role != Type::Raw) {
+        usesHeapRuntime = true;
+        std::string word;
+        bool scoped = analysis.scopedBorrows.count(&s) != 0;
+        if (scoped) word = expression(*s.expr).value;
+        else if (type.role == Type::Alias) word = aliasWord(*s.expr);
+        else if (s.expr && analysis.expressionTypes.at(s.expr.get()).role == Type::Owner) {
+          word = s.expr->kind == "call" ? expression(*s.expr).value : moveOwner(s.expr->token);
+        } else {
+          auto payload = irType(type.pointee());
+          auto value = s.expr ? expression(*s.expr).value : "zeroinitializer";
+          word = fresh();
+          emit(word + " = call ptr @duck.heap$alloc(i64 ptrtoint (ptr getelementptr (" +
+               payload + ", ptr null, i32 1) to i64))");
+          emit("store " + payload + " " + value + ", ptr " + word);
+        }
+        auto name = s.token;
+        name.text = s.name;
+        declare(name, {type, word}, s.constant, scoped);
+        return false;
+      }
       auto v = s.expr ? expression(*s.expr) : Value{s.type, ""};
 
       auto name = s.token;
@@ -537,9 +671,13 @@ class Generator {
                s.kind == "/=" || s.kind == "%=" || s.kind == "&=" ||
                s.kind == "|=" || s.kind == "^=" ||
                s.kind == "<<=" || s.kind == ">>=") {
-      auto name = s.token;
-      name.text = s.name;
-      auto address = variable(name);
+      auto address = location(*s.target);
+      if (address.type.role != Type::Raw) {
+        auto word = aliasWord(*s.expr); // Retain first, including on self-assignment.
+        releaseBinding(address);
+        emit("store ptr " + word + ", ptr " + address.value);
+        return false;
+      }
       Value v;
 
       if (s.kind == "assign")
@@ -568,6 +706,16 @@ public:
       : functions(symbols), analysis(analysis), symbolPrefix(name) {}
   FunctionIR generate(const Function &f) {
     scopes.emplace_back();
+    if (f.method) {
+      const auto &self = f.params.front().type;
+      const auto &fields = functions.records.at(self.record).fields;
+      for (size_t i = 0; i < fields.size(); ++i) {
+        auto address = fresh();
+        emit(address + " = getelementptr " + irType(self) + ", ptr %arg0, i32 0, i32 " + std::to_string(i));
+        bind(fields[i].name, {fields[i].type, address});
+      }
+      scopes.emplace_back();
+    }
     std::ostringstream output;
     output << "define " << irType(f.result) << " @duck." << f.name.text << "(";
     for (size_t i = 0; i < f.params.size(); ++i) {
@@ -592,7 +740,7 @@ public:
       emit("ret void");
     }
     output << ") {\nentry:\n" << allocations.str() << code.str() << "}\n\n";
-    return {globals.str(), output.str(), usesTextRuntime};
+    return {globals.str(), output.str(), usesTextRuntime, usesHeapRuntime};
   }
 };
 } // namespace
@@ -600,6 +748,19 @@ FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
                          const FunctionAnalysis &analysis) {
   if (!function.nativeSymbol.empty()) return {};
   return Generator(symbols, analysis, function.name.text).generate(function);
+}
+std::string emitRecords(const Symbols &symbols) {
+  std::string ir;
+  for (const auto &[name, record] : symbols.records) {
+    ir += "%struct." + name + " = type { ";
+    if (record.fields.empty()) ir += "i8"; // Give empty instances an addressable byte.
+    for (size_t i = 0; i < record.fields.size(); ++i) {
+      if (i) ir += ", ";
+      ir += irType(record.fields[i].type);
+    }
+    ir += " }\n";
+  }
+  return ir;
 }
 std::string emitDeclarations(const Symbols &symbols) {
   std::string declarations;

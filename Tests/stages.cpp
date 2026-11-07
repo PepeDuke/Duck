@@ -32,7 +32,7 @@ int main() {
     const auto invalidSymbols = duck::collectSymbols(invalid);
     rejects([&] { duck::analyzeFunction(invalid.front(), invalidSymbols); },
             "type mismatch");
-    auto uninitialized = duck::parse(duck::lex("Main() { int n; Print(n) }"));
+    auto uninitialized = duck::parse(duck::lex("Main() { int n\nPrint(n) }"));
     const auto uninitializedSymbols = duck::collectSymbols(uninitialized);
     rejects(
         [&] {
@@ -59,21 +59,30 @@ int main() {
             "syntax.dk:2:");
 
     const std::string source = R"(
-Main() { Print(Even(4)); Alpha(); Beta() }
+Main() { Print(Even(4))
+    Alpha()
+    Beta() }
 bool Even(int n) { if n == 0 { return true } else { return Odd(n - 1) } }
 bool Odd(int n) { if n == 0 { return false } else { return Even(n - 1) } }
 Alpha() { Print("alpha") }
 Beta() { Print("beta") }
 double Scale(double n) { return n + 0.5 }
-Numbers() { double n = 1.25; Print(Scale(n)); Print(Scale(2)) }
-int Assigned(bool b) { int n; if b { n = 1 } else { n = 2 }; return n }
-int PostLoop() { int n; do { n = 4 } while false; return n }
+Numbers() { double n = 1.25
+    Print(Scale(n))
+    Print(Scale(2)) }
+int Assigned(bool b) { int n
+    if b { n = 1 } else { n = 2 }
+    return n }
+int PostLoop() { int n
+    do { n = 4 } while false
+    return n }
 int PostReturn() { do { return 3 } while false }
 Utility #{ int Identity(int n) { return n } }
 int Qualified() { return Utility.Identity(6) }
 long Large() { return 5000000000 }
 int FloorCast(double n) { return (int)n }
-int8 Small(int8 n) { n++; return n }
+int8 Small(int8 n) { n++
+    return n }
 short SmallFloor(double n) { return (int16)n }
 int8 SmallMinimum() { return -128 }
 short SmallSum(int8 n, short m) { return n + m }
@@ -84,7 +93,8 @@ byte UnsignedFloor(double n) { return (uint8)n }
 uint64 Hexadecimal() { return 0xFFFFFFFFFFFFFFFF }
 long BinaryMinimum() { return -0b1000000000000000000000000000000000000000000000000000000000000000 }
 uint64 Bitwise(uint64 n) { return ~(n ^ (uint64)0xFF) }
-byte Shift(byte n, long count) { n <<= count; return n >> count }
+byte Shift(byte n, long count) { n <<= count
+    return n >> count }
 int BitwiseConditional(bool ready) { return ready ? (1 | 2) | 4 | 8 }
 )";
     const auto program = duck::parse(duck::lex(source));
