@@ -5,7 +5,7 @@ add_library(duck_compiler
   Compiler/Lexer.cpp Compiler/Parser.cpp Compiler/Symbols.cpp
   Compiler/Semantics.cpp Compiler/Codegen.cpp Compiler/Pipeline.cpp Compiler/TextRuntime.cpp Compiler/HeapRuntime.cpp
   Compiler/CalendarRuntime.cpp Compiler/WideRuntime.cpp Compiler/BigRuntime.cpp
-  Compiler/DecimalRuntime.cpp
+  Compiler/DecimalRuntime.cpp Compiler/CollectionRuntime.cpp
   Compiler/Scheduling.cpp Compiler/TaskRuntime.cpp)
 target_compile_features(duck_compiler PUBLIC cxx_std_17)
 target_include_directories(duck_compiler PUBLIC Compiler)

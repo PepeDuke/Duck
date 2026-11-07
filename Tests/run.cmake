@@ -911,8 +911,55 @@ Main()
     }
 }
 ]=] "seed\nmain\n42\n400\nv<1>\n100000000000000000000\n49\n<duck>\n11\nseed\n7\n<duck>\n102\n12\n12345678901234567890\ngiven\n1\n13\n")
-reject(managed_heap_container "A { string s }\nMain() { A* p() }" "heap containers with string, name, or big fields")
-reject(managed_heap_copy "A { string s }\nMain() { A a()\nA* p = a }" "heap containers with string, name, or big fields")
+run_program(managed_heap_containers [=[
+Tag
+{
+    name Label = "t"
+}
+Named
+{
+    string Title = "Duck"
+    big Mass = 12345678901234567890
+    Tag Inner
+    Rename(string s) { Title = s }
+}
+Named* Make(string s)
+{
+    Named* p()
+    p.Title = s + "!"
+    return ::p
+}
+Main()
+{
+    for i : 0; i < 1000; i++ {
+        Named* a()
+        a.Rename("a" + "b")
+        a.Inner.Label = (name)("x" + "y")
+        a.Mass = a.Mass + 1
+        Named local()
+        local.Title = "l" + "m"
+        Named* b = local
+        c :: Make("made")
+        alias : c
+        d :: c
+        e : d
+        d = null
+        Named* f()
+        f = null
+    }
+    p :: Make("final")
+    Print(p.Title)
+    Print(p.Inner.Label)
+    Print(p.Mass + 1)
+    alias : p
+    p = null
+    Print(alias == null)
+}
+]=] "final!\nt\n12345678901234567891\n1\n")
+file(READ "${WORK}/managed_heap_containers.ll" heap_ir)
+if(NOT heap_ir MATCHES "call void @duck.heap\\$drop\\(ptr [^,]+, i1 true, ptr @duck\\$cleanup.Named\\)")
+  message(FATAL_ERROR "managed heap owners must drop with the container's cleanup")
+endif()
 reject(managed_pointer_cast "A { string s }\nMain() { void* v = null\nA* p = (A*)v }" "cannot cast to a pointer to a container with string, name, or big fields")
 reject(managed_inherited_cast "A { name s }\nB : A { int x }\nMain() { void* v = null\nB* p = (B*)v }" "cannot cast to a pointer")
 reject(managed_native_reference "A { string s }\nextern \"C\" F(A& a)\nMain() {}" "native parameters cannot reference a container with string, name, or big fields")
@@ -974,7 +1021,460 @@ reject(chain_instance_calls_static "A\n#{\n int S() { return 1 }\n}\n{\n int x\n
 reject(chain_duplicate_instance_member "A { int x }\n{ int x }\nMain() {}" "duplicate container member")
 reject(chain_duplicate_static_member "A #{ F() {} }\n#{ F() {} }\nMain() {}" "duplicate or reserved function")
 reject(chain_parents_without_instance "A : B #{}\nB { int x }\nMain() {}" "a parent list requires an instance body")
-reject(chain_nested_instance "Outer #{\n Inner #{}\n {}\n}\nMain() {}" "instance containers must be declared at file scope")
+# Instance containers nested in static bodies are named by their enclosing
+# path. Type paths resolve from the innermost container outward, then at file
+# scope, in declarations, casts, parent lists, and construction.
+run_program(nested_instance_types [=[
+Space { int Value = 1 }
+Name
+#{
+    Space
+    #{
+        int Count = 2
+        Space Make()
+        {
+            Space s = {Value: Count}
+            return s
+        }
+    }
+    {
+        int Value = 5
+        int Twice() { return Value * 2 }
+        Space Copy()
+        {
+            Space c = {Value: Value + 1}
+            return c
+        }
+    }
+    -int Secret = 7
+    A
+    #{
+        B
+        #{
+            C
+            {
+                int V = 4
+                int Peek() { return Secret }
+            }
+        }
+        int FromA()
+        {
+            B.C c()
+            return c.V
+        }
+    }
+    Base { int X = 10 }
+    Derived : Base { int Y = 1 }
+    Space Build()
+    {
+        Space t = Space()
+        return t
+    }
+}
+Outer
+{
+    int X = 1
+}
+#{
+    Inner : Outer { int Y = 2 }
+}
+Main()
+{
+    Space top()
+    Print(top.Value)
+    Name.Space sp()
+    Print(sp.Twice())
+    Name.Space made = Name.Space.Make()
+    Print(made.Value)
+    Name.Space copy = sp.Copy()
+    Print(copy.Value)
+    Name.Space built = Name.Build()
+    Print(built.Value)
+    Name.Space* p = (Name.Space*)null
+    Print(p == null)
+    Name.Space* h()
+    Print(h.Value)
+    Name.A.B.C c()
+    Print(c.V + Name.A.FromA())
+    Print(c.Peek())
+    Name.Derived d()
+    Print(d.X + d.Y)
+    Outer.Inner i()
+    Print(i.X + i.Y)
+}
+]=] "1\n10\n2\n6\n5\n1\n5\n8\n7\n11\n3\n")
+file(WRITE "${WORK}/nested_first.dk" "Name #{ Space { int a = 1 } }\n")
+file(WRITE "${WORK}/nested_second.dk" "Name #{ Space { int b = 2 } }\nMain() { Name.Space s()\nPrint(s.a + s.b) }\n")
+run_files(nested_merge "3\n" "${WORK}/nested_first.dk" "${WORK}/nested_second.dk")
+# An importing module uses a nested managed type by its qualified name,
+# including the heap cleanup generated for it.
+file(WRITE "${WORK}/nested_library.dk" "Lib\n#{\n    Item\n    {\n        string Label = \"lib\"\n        int N = 3\n        int Twice() { return N * 2 }\n    }\n    Item Make()\n    {\n        Item i = {N: 4}\n        return i\n    }\n}\n")
+file(WRITE "${WORK}/nested_client.dk" "Main()\n{\n    Lib.Item i = Lib.Make()\n    Print(i.Twice())\n    Lib.Item* h()\n    Print(h.Label)\n}\n")
+execute_process(COMMAND "${COMPILER}" --library "${WORK}/nested_library.dk" -o "${WORK}/nested_library.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "nested_library: compilation failed: ${errors}")
+endif()
+execute_process(COMMAND "${COMPILER}" --dependency "${WORK}/nested_library.dk" "${WORK}/nested_client.dk" -o "${WORK}/nested_client.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "nested_client: compilation failed: ${errors}")
+endif()
+execute_process(COMMAND "${CLANG}" "${WORK}/nested_library.ll" "${WORK}/nested_client.ll" -o "${WORK}/nested_client.exe" RESULT_VARIABLE status ERROR_VARIABLE errors)
+execute_process(COMMAND "${WORK}/nested_client.exe" RESULT_VARIABLE status OUTPUT_VARIABLE actual)
+string(REPLACE "\r\n" "\n" actual "${actual}")
+if(NOT status EQUAL 0 OR NOT actual STREQUAL "8\nlib\n")
+  message(FATAL_ERROR "nested_client: exit=${status}, actual=[${actual}]")
+endif()
+reject(nested_type_unqualified "Name #{ Space { int x } }\nMain() { Space s() }" "unknown type 'Space'; did you mean 'Name.Space'")
+reject(nested_type_function_clash "Name #{ Space() {}\n Space { int x } }\nMain() {}" "'Name.Space' is already declared as a container")
+reject(nested_type_static_clash "Name #{ int Space\n Space { int x } }\nMain() {}" "duplicate static field or member 'Name.Space'")
+reject(nested_type_protected "Name #{ Space { -int x } }\nMain() { Name.Space s()\nPrint(s.x) }" "'x' is a protected member of 'Name.Space'")
+# `using` imports a container's members into the file or static body that
+# declares it. Each scope searches its own members, then its directives, before
+# the enclosing scope, so an inner directive wins over an outer one.
+file(WRITE "${WORK}/using_library.dk" [=[
+Name
+#{
+    Space
+    #{
+        int Foo() { return 1 }
+        int Count = 5
+    }
+    {
+        int Foo2() { return 2 }
+    }
+}
+Other
+#{
+    int Helper() { return 30 }
+    Space { int V = 7 }
+}
+X #{ int Helper() { return 1 } }
+]=])
+file(WRITE "${WORK}/using_main.dk" [=[
+using Name
+
+Holder
+#{
+    using Other
+    int Total = Helper() + Space.Count
+    int Pick()
+    {
+        Space s()
+        return s.V
+    }
+}
+Defaults
+{
+    int Seed = Space.Foo() + 40
+}
+Main()
+{
+    Print(Space.Foo())
+    Space sp()
+    Print(sp.Foo2())
+    Print(Space.Count)
+    Space d = Space()
+    Print(d.Foo2())
+    Print(Holder.Total)
+    Print(Holder.Pick())
+    Defaults f()
+    Print(f.Seed)
+}
+]=])
+run_files(using_directives "1\n2\n5\n2\n35\n7\n41\n" "${WORK}/using_library.dk" "${WORK}/using_main.dk")
+file(WRITE "${WORK}/using_own.dk" "using X\nusing Other\nint Helper() { return 9 }\nMain()\n{\n    Print(Helper())\n    int Space = 4\n    Print(Space)\n}\n")
+run_files(using_own_and_local_win "9\n4\n" "${WORK}/using_library.dk" "${WORK}/using_own.dk")
+function(reject_using name source diagnostic)
+  file(WRITE "${WORK}/${name}.dk" "${source}")
+  execute_process(COMMAND "${COMPILER}" "${WORK}/using_library.dk" "${WORK}/${name}.dk" -o "${WORK}/${name}.ll"
+                  RESULT_VARIABLE status ERROR_VARIABLE errors)
+  if(NOT status EQUAL 1 OR NOT errors MATCHES "${diagnostic}")
+    message(FATAL_ERROR "${name}: expected ${diagnostic}, got ${status}: ${errors}")
+  endif()
+endfunction()
+reject_using(using_ambiguous_type "using Name\nusing Other\nMain() { Space s() }" "'Space' is ambiguous between 'Name.Space' \\(using Name\\) and 'Other.Space' \\(using Other\\)")
+reject_using(using_ambiguous_function "using X\nusing Other\nMain() { Print(Helper()) }" "'Helper' is ambiguous between 'X.Helper' \\(using X\\) and 'Other.Helper' \\(using Other\\)")
+reject_using(using_unknown "using Nope\nMain() {}" "unknown container 'Nope' in using directive")
+reject_using(using_duplicate "using Name\nusing Name\nMain() {}" "duplicate using directive for 'Name'")
+reject_using(using_after_declaration "Main() {}\nusing Name\n" "using directives must come before the other declarations")
+reject_using(using_lexical_scope "Holder #{ using Name }\nMain() { Print(Space.Foo()) }" "unknown function 'Space.Foo'")
+# Constructors are chosen by argument types; destructors run exactly once per
+# constructed object: at scope exit in reverse declaration order, when an
+# assignment replaces the value, for temporaries, and when an owner drops a
+# heap payload. Construction runs parents, then fields, then the body;
+# destruction runs the body, then fields in reverse, then parents.
+run_program(constructors_destructors [=[
+Probe
+{
+    int Id
+    Probe() { Print(0) }
+    Probe(int id)
+    {
+        Id = id
+        Print(Id)
+    }
+    Probe(int a, int b)
+    {
+        Id = a * 10 + b
+        Print(Id)
+    }
+    ~Probe() { Print(-Id) }
+}
+Base
+{
+    Base() { Print("base") }
+    ~Base() { Print("~base") }
+}
+Holder : Base
+{
+    Probe Inner
+    Probe Second = Probe(7)
+    string Label = "h"
+    Holder() { Print("holder") }
+    ~Holder() { Print("~holder") }
+}
+N
+{
+    N(long a) { Print("long") }
+    N(int a) { Print("int") }
+}
+Probe Make(int id)
+{
+    Probe p(id)
+    return p
+}
+Probe Pick(bool early)
+{
+    Probe t(1)
+    if early { return t }
+    Probe u(2)
+    return u
+}
+Peek(Probe& p) { Print(p.Id + 100) }
+Main()
+{
+    Probe a(1)
+    Probe b = Probe(2, 3)
+    Peek(a)
+    {
+        Probe c
+    }
+    Probe m = Make(4)
+    m = Make(5)
+    Make(6)
+    Print("holder")
+    {
+        Holder h()
+    }
+    Print("heap")
+    {
+        Probe* p(8)
+        Probe* alias = p
+    }
+    Print("moves")
+    Probe early = Pick(true)
+    Probe late = Pick(false)
+    Print("loop")
+    for int i = 0; i < 3; i++
+    {
+        Probe step(10 + i)
+        if i == 1 { break }
+    }
+    N n(3)
+    Print("end")
+}
+]=] "1\n23\n101\n0\n0\n4\n5\n-4\n6\n-6\nholder\nbase\n0\n7\nholder\n~holder\n-7\n0\n~base\nheap\n8\n-8\nmoves\n1\n1\n2\n-1\nloop\n10\n-10\n11\n-11\nint\nend\n-2\n-1\n-5\n-23\n-1\n")
+file(WRITE "${WORK}/ctor_library.dk" "Kit\n{\n    int V\n    Kit(int v)\n    {\n        V = v\n        Print(V)\n    }\n    ~Kit() { Print(-V) }\n}\n")
+file(WRITE "${WORK}/ctor_client.dk" "Main()\n{\n    Kit k(4)\n    Kit* h(6)\n}\n")
+execute_process(COMMAND "${COMPILER}" --library "${WORK}/ctor_library.dk" -o "${WORK}/ctor_library.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "ctor_library: compilation failed: ${errors}")
+endif()
+execute_process(COMMAND "${COMPILER}" --dependency "${WORK}/ctor_library.dk" "${WORK}/ctor_client.dk" -o "${WORK}/ctor_client.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "ctor_client: compilation failed: ${errors}")
+endif()
+execute_process(COMMAND "${CLANG}" "${WORK}/ctor_library.ll" "${WORK}/ctor_client.ll" -o "${WORK}/ctor_client.exe" RESULT_VARIABLE status ERROR_VARIABLE errors)
+execute_process(COMMAND "${WORK}/ctor_client.exe" RESULT_VARIABLE status OUTPUT_VARIABLE actual)
+string(REPLACE "\r\n" "\n" actual "${actual}")
+if(NOT status EQUAL 0 OR NOT actual STREQUAL "4\n6\n-6\n-4\n")
+  message(FATAL_ERROR "ctor_client: exit=${status}, actual=[${actual}]")
+endif()
+set(probe "Probe\n{\n    int Id\n    Probe() {}\n    Probe(int id) { Id = id }\n    ~Probe() { Print(Id) }\n}\n")
+reject(ctor_copy_declaration "${probe}Main() { Probe a(1)\nProbe b = a }" "cannot copy 'Probe': it has a destructor")
+reject(ctor_copy_assignment "${probe}Main() { Probe a(1)\nProbe b(2)\nb = a }" "cannot copy 'Probe'")
+reject(ctor_copy_dereference "${probe}Main() { Probe* p(1)\nProbe c = *p }" "cannot copy 'Probe'")
+reject(ctor_return_reference "${probe}Probe Get(Probe& p) { return p }\nMain() {}" "cannot copy 'Probe'")
+reject(ctor_value_parameter "${probe}Use(Probe p) {}\nMain() {}" "parameter 'p' must take 'Probe' by reference")
+reject(ctor_static_field "${probe}S #{ Probe Keep }\nMain() {}" "static field 'S.Keep' cannot hold 'Probe'")
+reject(ctor_named_initializer "${probe}Main() { Probe a = {Id: 1} }" "'Probe' has constructors; construct it with Probe")
+reject(ctor_no_match "${probe}Main() { Probe a(\"x\") }" "no constructor of 'Probe' accepts \\(string\\); candidates: Probe\\(\\), Probe\\(int\\)")
+reject(ctor_ambiguous "N\n{\n    N(long a) {}\n    N(double a) {}\n}\nMain() { N n(3) }" "constructor call N\\(int\\) is ambiguous between N\\(double\\) and N\\(long\\)")
+reject(ctor_no_default "G { G(int a) {} }\nMain() { G g }" "'g' may be incomplete when its scope ends: G\\(...\\) may still be missing")
+reject(ctor_field_no_default "G { G(int a) {} }\nW { G Inner }\nMain() {}" "field 'Inner' needs a default")
+reject(ctor_parent_no_default "G { G(int a) {} }\nW : G { int x }\nMain() { W w = W() }" "this construction of 'W' leaves G\\(...\\) missing")
+reject(ctor_destructor_name "G { ~H() {} }\nMain() {}" "a destructor is written ~G\\(\\)")
+reject(ctor_destructor_parameters "G { ~G(int a) {} }\nMain() {}" "a destructor takes no parameters")
+reject(ctor_duplicate_destructor "G { ~G() {}\n ~G() {} }\nMain() {}" "already declares a destructor")
+reject(ctor_duplicate_constructor "G { G() {}\n G() {} }\nMain() {}" "already declares a constructor with these parameter types")
+reject(ctor_result_type "G { int G() {} }\nMain() {}" "a constructor has no result type")
+# Partial constructors (-Name(...)) are a container's partial part; any one
+# overload completes it and a zero-argument one runs automatically. Composite
+# construction splits flat arguments across parents' parts, then the
+# container's partial part, then its regular part. A declared local may be
+# left incomplete and completed later with local(...); until then it cannot
+# be used as a whole, and it must be complete on every path out of its scope.
+run_program(partial_constructors [=[
+World { int Size = 9 }
+Example
+{
+    -Example() { Print("Hello") }
+    Example() { Print("World") }
+}
+Entity
+{
+    int Size
+    -Entity(World& w)
+    {
+        Size = w.Size
+        Print("entity")
+    }
+    ~Entity() { Print("~entity") }
+}
+Gun : Entity
+{
+    int Ammo
+    Gun(int ammo)
+    {
+        Ammo = ammo
+        Print("gun")
+    }
+    Fire() { Print(Ammo + Size) }
+}
+G { G(int a) { Print(a) } }
+W : G { int X = 4 }
+Arm(bool ok, World& w)
+{
+    Gun g(1)
+    if ok { g(w) }
+    else { g(w) }
+    g.Fire()
+}
+Main()
+{
+    Example e()
+    World w()
+    Gun a(w, 5)
+    a.Fire()
+    Gun b(6)
+    b.Ammo = 7
+    b(w)
+    b.Fire()
+    Gun c
+    c(w, 3)
+    c.Fire()
+    W x(2)
+    Print(x.X)
+    Arm(true, w)
+    Print("end")
+}
+]=] "Hello\nWorld\nentity\ngun\n14\ngun\nentity\n16\nentity\ngun\n12\n2\n4\ngun\nentity\n10\n~entity\nend\n~entity\n~entity\n~entity\n")
+set(gun "World { int Size = 9 }\nEntity\n{\n    -Entity(World& w) {}\n}\nGun : Entity\n{\n    int Ammo\n    Gun(int ammo) {}\n    Fire() {}\n}\n")
+reject(partial_method_call "${gun}Main() { Gun g(5)\ng.Fire() }" "'g' may be incomplete: -Entity\\(...\\) may still be missing")
+reject(partial_scope_end "${gun}Main() { Gun g(5) }" "'g' may be incomplete when its scope ends")
+reject(partial_one_branch "${gun}Run(bool ok) { World w()\nGun g(5)\nif ok { g(w) }\ng.Fire() }\nMain() {}" "'g' may be incomplete")
+reject(partial_twice "${gun}Run(bool ok) { World w()\nGun g(5)\nif ok { g(w) }\ng(w) }\nMain() {}" "'g' was completed on some paths but not others")
+reject(partial_return "${gun}Run(bool ok) { World w()\nGun g(5)\nif ok { return }\ng(w) }\nMain() {}" "'g' may be incomplete when its scope ends")
+reject(partial_loop "${gun}Main() { World w()\nGun g(5)\nwhile true\n{\ng(w)\nbreak\n}\n}" "complete 'g' outside the loop")
+reject(partial_complete_again "${gun}Main() { World w()\nGun g(w, 5)\ng(w) }" "reinitializing 'g' leaves Gun\\(...\\) missing")
+reject(partial_temporary "${gun}Main() { Gun g = Gun(5) }" "this construction of 'Gun' leaves -Entity\\(...\\) missing")
+reject(partial_heap "${gun}Main() { Gun* p(5) }" "this construction of 'Gun' leaves -Entity\\(...\\) missing")
+reject(partial_reference "${gun}Use(Gun& g) {}\nMain() { Gun g(5)\nUse(g) }" "'g' may be incomplete")
+reject(partial_field "${gun}Box { Gun Inner }\nMain() {}" "field 'Inner' needs a default")
+reject(partial_ambiguous "A\n{\n    -A(int x) {}\n    A(int y) {}\n}\nMain() { A a(1) }" "constructor call A\\(int\\) is ambiguous between -A\\(int\\) and A\\(int\\)")
+reject(partial_duplicate "A\n{\n    -A() {}\n    -A() {}\n}\nMain() {}" "already declares a partial constructor with these parameter types")
+# Calling a constructor on a complete object reinitializes it in place: the
+# new state is built first (so arguments may read the old one), then the old
+# object is destroyed and releases its fields, and the new state moves into
+# the same storage, so references and heap aliases see the new object.
+run_program(reinitialization [=[
+Probe
+{
+    int Id
+    Probe(int id)
+    {
+        Id = id
+        Print(id)
+    }
+    Probe(Probe& other, int add)
+    {
+        Id = other.Id + add
+        Print(Id)
+    }
+    ~Probe() { Print(-Id) }
+    Show() { Print(Id) }
+}
+Box
+{
+    Probe Inner = Probe(10)
+    string Label = "box"
+}
+Point
+{
+    int X = 3
+    int Y
+}
+Named
+{
+    string Text
+    Named(string text) { Text = text }
+}
+Bump(Probe& p) { p(p, 100) }
+Main()
+{
+    Probe a(1)
+    a(2)
+    a.Show()
+    a(a, 5)
+    Bump(a)
+    Probe* h(20)
+    alias : h
+    h(21)
+    alias.Show()
+    alias(22)
+    h.Show()
+    Box b()
+    b.Inner(11)
+    b.Inner.Show()
+    Point pt()
+    pt.Y = 9
+    pt.X = 8
+    pt()
+    Print(pt.X)
+    Print(pt.Y)
+    Named n("first")
+    n(n.Text + " second")
+    Print(n.Text)
+    int i = 0
+    while i < 2
+    {
+        a(i)
+        i = i + 1
+    }
+    Print("end")
+}
+]=] "1\n2\n-1\n2\n7\n-2\n107\n-7\n20\n21\n-20\n21\n22\n-21\n22\n10\n11\n-10\n11\n3\n0\nfirst second\n0\n-107\n1\n0\nend\n-11\n-22\n-1\n")
+reject(reinit_constant "P { P(int a) {} }\nMain() { #P c = P(1)\nc(2) }" "cannot reinitialize constant 'c'")
+reject(reinit_incomplete "${gun}Main() { World w()\nGun g(w, 5)\ng(6) }" "reinitializing 'g' leaves -Entity\\(...\\) missing")
+reject(reinit_receiver "P\n{\n    P(int a) {}\n    Reset() { this(1) }\n}\nMain() {}" "cannot reinitialize the receiver inside its own method")
+reject(reinit_constant_field "P { P(int a) {} }\nB { P Inner = P(1) }\nMain() { #B b = B()\nb.Inner(2) }" "cannot reinitialize field 'Inner' of a constant")
+reject(reinit_temporary_field "P { P(int a) {} }\nB { P Inner = P(1) }\nB Make() { return B() }\nMain() { Make().Inner(2) }" "cannot reinitialize field 'Inner' of a temporary")
+reject(reinit_protected_field "P { P(int a) {} }\nB { -P Inner = P(1) }\nMain() { B b()\nb.Inner(2) }" "'Inner' is a protected member of 'B'")
+trap_program(reinit_moved_owner "P { int X }
+Main() { P* h()
+other :: h
+h() }")
+reject(reinit_no_match "P { P(int a) {} }\nMain() { P p(1)\np(true) }" "no constructor of 'P' accepts \\(bool\\)")
 run_program(chain_constant_after_nested "Outer #{\n Inner #{}\n #int Max = 1\n}\nMain() { Print(Outer.Max) }" "1\n")
 reject(container_unclosed "Math #{ F() {}" "expected '}'")
 reject(container_reference "Math #{ F(int& n) {} }\nMain() { Math.F(1) }" "must be a mutable variable")
@@ -1084,8 +1584,517 @@ reject(inheritance_self "A : A { int x }\nMain() {}" "inheritance cycle through 
 reject(inheritance_unknown_parent "A : Missing { int x }\nMain() {}" "unknown parent container 'Missing'")
 reject(inheritance_enum_parent "E : int #@{ V }\nA : E { int x }\nMain() {}" "unknown parent container 'E'")
 reject(inheritance_duplicate_parent "A { int x }\nB : A, A { int y }\nMain() {}" "duplicate parent 'A'")
-reject(inheritance_override "A { F() {} }\nB : A { F() {} }\nMain() {}" "'F' is already inherited from 'A'")
-reject(inheritance_field_redeclared "A { int x }\nB : A { int x }\nMain() {}" "'x' is already inherited from 'A'")
+reject(inheritance_field_redeclared "A { int x }\nB : A { int x }\nMain() {}" "'x' is already inherited from 'A' as a field; fields cannot be overridden")
+# A method redeclaring an inherited one overrides it. Calls on this (implicit
+# or this.M()) dispatch to the final overrider of the dynamic object, through
+# a dispatch table passed with the receiver; this.Parent.M() is a direct base
+# call; constructors and destructors run their own container's versions.
+run_program(overrides [=[
+Animal
+{
+    int Legs = 4
+    string Speak() { return "..." }
+    Describe()
+    {
+        Print(Speak())
+        Print(Legs)
+    }
+    Twice() { Describe() }
+}
+Walker
+{
+    int Steps = 1
+    Walk() { Print("walker walks") }
+    Run()
+    {
+        Walk()
+        Walk()
+    }
+}
+Cat : Animal, Walker
+{
+    string Name = "cat"
+    string Speak() { return "meow" }
+    Walk() { Print("cat walks " + Name) }
+    Loud()
+    {
+        Print(this.Animal.Speak())
+        this.Walker.Walk()
+        Print(this.Speak())
+    }
+}
+Lion : Cat
+{
+    string Speak() { return "roar" }
+}
+Base
+{
+    Base() { Hello() }
+    ~Base() { Hello() }
+    Hello() { Print("base hello") }
+}
+Child : Base
+{
+    Hello() { Print("child hello") }
+}
+Main()
+{
+    Animal a()
+    a.Describe()
+    Cat c()
+    c.Describe()
+    c.Twice()
+    c.Run()
+    c.Loud()
+    Lion l()
+    l.Describe()
+    l.Run()
+    l.Loud()
+    Print(l.Speak())
+    Lion* h()
+    h.Twice()
+    Child k()
+    k.Hello()
+    Print("end")
+}
+]=] "...\n4\nmeow\n4\nmeow\n4\ncat walks cat\ncat walks cat\n...\nwalker walks\nmeow\nroar\n4\ncat walks cat\ncat walks cat\n...\nwalker walks\nroar\nroar\nroar\n4\nbase hello\nchild hello\nend\nbase hello\n")
+reject(override_parameters "A { Go(int x) {} }\nB : A { Go(long x) {} }\nMain() {}" "'Go' overrides A.Go\\(int\\) but is declared as Go\\(long\\)")
+reject(override_result "A { int Go() { return 1 } }\nB : A { Go() {} }\nMain() {}" "'Go' overrides A.Go\\(\\) -> int but is declared as Go\\(\\)")
+reject(override_access "A { -Go() {} }\nB : A { Go() {} }\nMain() {}" "'Go' overrides -A.Go\\(\\) but is declared as Go\\(\\)")
+reject(override_reference "A { Go(int& x) {} }\nB : A { Go(int x) {} }\nMain() {}" "'Go' overrides A.Go\\(int&\\) but is declared as Go\\(int\\)")
+reject(override_every_parent "A { Go() {} }\nM { Go(int a) {} }\nB : A, M { Go() {} }\nMain() {}" "'Go' overrides M.Go\\(int\\) but is declared as Go\\(\\)")
+reject(override_field_with_method "A { int X }\nB : A { X() {} }\nMain() {}" "'X' is already inherited from 'A' as a field")
+reject(override_method_with_field "A { X() {} }\nB : A { int X }\nMain() {}" "'X' is already inherited from 'A' as a method; only a method can override it")
+# A derived container passes for a parent reference parameter: the callee
+# receives the parent's state and the object's dispatch table, so calls
+# through the parameter reach the object's overrides.
+run_program(interface_parameters [=[
+Animal
+{
+    int Legs = 4
+    string Speak() { return "..." }
+    Describe() { Print(Speak() + " on " + "legs") }
+}
+Walker
+{
+    int Steps = 1
+    Walk() { Print("walker walks") }
+}
+Cat : Animal, Walker
+{
+    string Name = "cat"
+    string Speak() { return "meow " + Name }
+    Walk() { Print("cat walks") }
+}
+Lion : Cat
+{
+    string Speak() { return "roar" }
+}
+Talk(Animal& a)
+{
+    Print(a.Speak())
+    a.Describe()
+    a.Legs = a.Legs + 1
+    Again(a)
+}
+Again(Animal& a) { Print(a.Speak() + "!") }
+Stroll(Walker& w) { w.Walk() }
+Pet(Cat& c)
+{
+    Talk(c)
+    Stroll(c)
+}
+Kennel
+{
+    Kennel(Animal& a) { Print(a.Speak()) }
+}
+Main()
+{
+    Animal a()
+    Talk(a)
+    Cat c()
+    Talk(c)
+    Print(c.Legs)
+    Stroll(c)
+    Lion l()
+    Pet(l)
+    Kennel k(l)
+}
+]=] "...\n... on legs\n...!\nmeow cat\nmeow cat on legs\nmeow cat!\n5\ncat walks\nroar\nroar on legs\nroar!\ncat walks\nroar\n")
+set(sliced "P\n{\n    int X\n    P(int a) { X = a }\n}\nQ : P { int Y }\n")
+run_program(interface_whole_object "${sliced}Reset(P& p) { p(1) }\nSet(P& p) { p = P(3) }\nMain() { P p(2)\nReset(p)\nPrint(p.X)\nSet(p)\nPrint(p.X) }" "1\n3\n")
+trap_program(interface_reinitialize_part "${sliced}Reset(P& p) { p(1) }\nMain() { Q q(5)\nReset(q) }")
+trap_program(interface_assign_part "${sliced}Set(P& p) { p = P(3) }\nMain() { Q q(5)\nSet(q) }")
+reject(interface_ambiguous "B { int X }\nL : B { int Y }\nR : B { int Z }\nD : L, R { int W }\nUse(B& b) {}\nMain() { D d()\nUse(d) }" "'D' contains 'B' through more than one parent")
+reject(interface_unrelated "B { int X }\nO { int X }\nUse(B& b) {}\nMain() { O o()\nUse(o) }" "type mismatch: expected B, got O")
+reject(interface_by_value "B { int X }\nL : B { int Y }\nUse(B b) {}\nMain() { L l()\nUse(l) }" "type mismatch: expected B, got L")
+# Getter blocks (@{ Name: expression }) and setter blocks (={ Name: statement },
+# reading `value`) chained to a container declare properties. Untyped
+# properties take their getter expression's type. Reads call the getter,
+# assignments the setter, and compound assignments both on a receiver
+# evaluated once; accessors override and dispatch like methods.
+file(READ "${SOURCE}/Examples/Containers/04_Properties.dk" properties_example)
+run_program(properties_example "${properties_example}" "20\n25\n")
+run_program(properties [=[
+Person
+{
+    -int Age = 20
+    -string First = "Ada"
+    -int Writes
+    Birthday() { Age += 1 }
+    Show() { Print(Label) }
+}
+@{
+    Age: Age,
+    Label: First + " " + "Lovelace"
+    Twice: Age * 2
+    long Big: Age
+    -int Hidden: 7
+}
+={
+    Age:
+    {
+        Writes += 1
+        Age = value
+    }
+    Label: First = value
+    Writes: Writes = value
+}
+@{
+    Writes: Writes
+}
+Student : Person
+{
+    int School = 1
+}
+@{
+    Label: "student"
+}
+Bump(Person& p) { p.Age += 10 }
+Person Make() { return Person() }
+Main()
+{
+    Person p()
+    Print(p.Age)
+    p.Age = 25
+    Print(p.Age)
+    p.Age += 5
+    p.Age++
+    Print(p.Age)
+    Print(p.Writes)
+    Print(p.Twice)
+    Print(p.Big)
+    p.Label = "Grace"
+    Print(p.Label)
+    p.Show()
+    p.Birthday()
+    Print(p.Age)
+    Person* h()
+    h.Age = 40
+    Print(h.Age)
+    Print(Make().Age)
+    Student s()
+    s.Show()
+    Bump(s)
+    Print(s.Age)
+    Print(s.Writes)
+}
+]=] "20\n25\n31\n3\n62\n31\nGrace Lovelace\nGrace Lovelace\n32\n40\n20\nstudent\n30\n1\n")
+set(property "P\n{\n    -int A = 1\n}\n@{\n    A: A\n    Two: A * 2\n}\n={\n    A: A = value\n}\n")
+reject(property_read_only "${property}Main() { P p()\np.Two = 3 }" "property 'Two' of 'P' has no setter; it is read-only")
+reject(property_write_only "P { int W }\n={ int Code: W = value }\nMain() { P p()\nPrint(p.Code) }" "property 'Code' of 'P' has no getter")
+reject(property_untyped_setter "P { int W }\n={ Code: W = value }\nMain() {}" "setter of property 'Code' needs a type")
+reject(property_types_disagree "P { int W }\n@{ W2: W }\n={ long W2: W = 1 }\nMain() {}" "the getter and setter of property 'W2' disagree on its type: int and long")
+reject(property_public_field "P { int W }\n@{ W: W }\nMain() {}" "property 'W' has the name of a public field of 'P'")
+reject(property_method "P\n{\n    int W\n    X() {}\n}\n@{ X: W }\nMain() {}" "property 'X' has the name of a method of 'P'")
+reject(property_reference "${property}Use(int& x) {}\nMain() { P p()\nUse(p.A) }" "'A' is a property, not storage")
+reject(property_protected "P { int W }\n@{ -Secret: W }\nMain() { P p()\nPrint(p.Secret) }" "'Secret' is a protected member of 'P'")
+reject(property_temporary "${property}P Make() { return P() }\nMain() { Make().A = 3 }" "cannot set property 'A' of a temporary")
+reject(property_constant "${property}Main() { #P c = P()\nPrint(c.A) }" "cannot read property 'A' of a constant")
+reject(property_cycle "P { int W }\n@{\n    X: Y\n    Y: X\n}\nMain() {}" "cannot infer the type of property")
+reject(property_override_type "${property}Q : P { int Z }\n@{ long Two: 1 }\nMain() {}" "property 'Two' overrides P.Two \\(getter of int\\) but is declared as Two \\(getter of long\\)")
+reject(property_block_untyped "P { int W }\n@{ X: { return W } }\nMain() {}" "a getter with a block body needs a type")
+reject(property_duplicate "P { int W }\n@{\n    X: W\n    X: W\n}\nMain() {}" "property 'X' already has a getter")
+reject(property_field_override "${property}Q : P { int Two }\nMain() {}" "'Two' is already inherited from 'P' as a property")
+# Queues (first in, first out), stacks (last in, first out), and pairs
+# (keyed, in insertion order). `+=` adds, `--` removes the queue's front,
+# the stack's top, or the pair's last added entry; replacing a key's value
+# keeps its place. Collections are move-only and start empty.
+run_program(collections [=[
+Inbox
+{
+    string queue Mail
+    int Count = 0
+}
+Fill(int queue& q, int from, int to)
+{
+    int i = from
+    while i <= to
+    {
+        q += i
+        i = i + 1
+    }
+}
+int stack Build()
+{
+    int stack s
+    s += 7
+    s += 8
+    return s
+}
+Main()
+{
+    int queue q
+    Print(q.Len)
+    q += 2
+    q += 3
+    q += 4
+    Print(q.Front)
+    q--
+    Print(q.Front)
+    Print(q.Len)
+    Fill(q, 5, 12)
+    q--
+    q--
+    Print(q.Front)
+    Print(q.Len)
+    int stack s
+    s += 2
+    s += 3
+    s += 4
+    Print(s.Top)
+    s--
+    Print(s.Top)
+    int stack built = Build()
+    Print(built.Top)
+    built--
+    Print(built.Top)
+    string, string pair p
+    p += "name" : "Bob"
+    p += "city" : "York"
+    p += "name" : "Tom"
+    Print(p["name"])
+    Print(p.LastKey)
+    Print(p.Last)
+    Print(p.Len)
+    p--
+    Print(p.LastKey)
+    Print(p.Len)
+    string pair codes
+    codes += "a" : "first"
+    Print(codes["a"])
+    int, big pair totals
+    totals += 1 : 10
+    totals += 1 : 20
+    Print(totals[1])
+    Inbox box()
+    box.Mail += "hello"
+    box.Mail += "world"
+    Print(box.Mail.Front)
+    box.Mail--
+    Print(box.Mail.Front)
+    char queue letters
+    int k = 0
+    while k < 100
+    {
+        letters += 'x'
+        letters--
+        k = k + 1
+    }
+    Print(letters.Len)
+}
+]=] "0\n2\n3\n2\n5\n8\n4\n3\n8\n7\nTom\ncity\nYork\n2\nname\n1\nfirst\n20\nhello\nworld\n0\n")
+trap_program(collection_empty_front "Main() { int queue q\nPrint(q.Front) }")
+trap_program(collection_empty_drop "Main() { int stack s\ns-- }")
+trap_program(collection_missing_key "Main() { string, int pair p\np += \"a\" : 1\nPrint(p[\"b\"]) }")
+trap_program(collection_empty_last "Main() { int pair p\nPrint(p.Last) }")
+reject(collection_copy "Main() { int queue a\nint queue b = a }" "cannot copy int queue 'a': collections are move-only")
+reject(collection_by_value "Use(int queue q) {}\nMain() {}" "parameter 'q' must take int queue by reference")
+reject(collection_static "S #{ int queue Q }\nMain() {}" "static fields of type int queue are not supported")
+reject(collection_container_element "P { int X }\nMain() { P queue q }" "a collection cannot hold P")
+reject(collection_float_key "Main() { double, int pair p }" "a pair cannot be keyed by double")
+reject(collection_entry_in_queue "Main() { int queue q\nq += 1 : 2 }" "key : value entries belong in a pair, not in int queue")
+reject(collection_pair_without_entry "Main() { string, int pair p\np += \"a\" }" "add to a pair as p \\+= key : value")
+reject(collection_unsupported "Main() { int queue q\nq *= 2 }" "'\\*=' is not supported on int queue yet")
+reject(collection_member "Main() { int queue q\nPrint(q.Top) }" "int queue has no member 'Top'; a queue has Front and Len")
+reject(collection_read_only "Main() { int queue q\nq.Len = 3 }" "'Len' is a read-only member of int queue")
+reject(collection_field_copy "B { int queue Q }\nMain() { B a()\nB b = a }" "cannot copy 'B': it holds a collection, so it is move-only")
+reject(collection_index_queue "Main() { int queue q\nPrint(q[0]) }" "only arrays and pairs can be indexed; int queue cannot")
+reject(collection_entry_elsewhere "Main() { int x = 1\nx += 1 : 2 }" "key : value entries can only be added to a pair")
+# Fixed arrays (T [N]) store their elements inline and start at defaults;
+# dynamic arrays (T []) grow on +=, moving elements bytewise, and clean up
+# each element on --, on assignment, and when they leave scope. a[i] names an
+# element and traps outside the array.
+run_program(arrays [=[
+Point
+{
+    int X
+    int Y = 2
+    Move(int d) { X += d }
+}
+Probe
+{
+    int Id
+    string Tag = "probe"
+    Probe(int id) { Id = id }
+    ~Probe() { Print(-Id) }
+}
+Grid
+{
+    int [3] Cells
+    string [] Names
+}
+int Sum(int [4]& values)
+{
+    int total = 0
+    int i = 0
+    while i < values.Len
+    {
+        total += values[i]
+        i = i + 1
+    }
+    return total
+}
+int [] Range(int count)
+{
+    int [] result
+    int i = 0
+    while i < count
+    {
+        result += i * i
+        i = i + 1
+    }
+    return result
+}
+Main()
+{
+    int [4] a
+    Print(a[2])
+    a[0] = 5
+    a[1] = 6
+    a[3] += 4
+    a[3]++
+    Print(Sum(a))
+    Print(a.Len)
+    int [4] copy = a
+    copy[0] = 100
+    Print(a[0])
+    string [2] words
+    Print(Length(words[1]))
+    words[0] = "hello"
+    Print(words[0])
+    Point [2] points
+    Print(points[1].Y)
+    points[1].Move(3)
+    Print(points[1].X)
+    int [] squares = Range(6)
+    Print(squares.Len)
+    Print(squares[5])
+    squares--
+    Print(squares.Len)
+    string [] names
+    int k = 0
+    while k < 10
+    {
+        names += "n"
+        k = k + 1
+    }
+    names[9] = "last"
+    Print(names[9])
+    big [] bigs
+    bigs += 12345678901234567890
+    Print(bigs[0])
+    Grid g()
+    g.Cells[2] = 7
+    g.Names += "grid"
+    Print(g.Cells[2])
+    Print(g.Names[0])
+    Probe [] probes
+    probes += Probe(1)
+    probes += Probe(2)
+    probes += Probe(3)
+    probes += Probe(4)
+    probes += Probe(5)
+    Print(probes[4].Tag)
+    probes--
+    Print("end")
+}
+]=] "0\n16\n4\n5\n0\nhello\n2\n3\n6\n25\n5\nlast\n12345678901234567890\n7\ngrid\nprobe\n-5\nend\n-1\n-2\n-3\n-4\n")
+trap_program(array_fixed_high "Main() { int [3] a\nPrint(a[3]) }")
+trap_program(array_fixed_negative "Main() { int [3] a\nint i = -1\na[i] = 1 }")
+trap_program(array_dynamic_high "Main() { int [] a\na += 1\nPrint(a[1]) }")
+trap_program(array_dynamic_empty_remove "Main() { int [] a\na-- }")
+reject(array_copy_dynamic "Main() { int [] a\nint [] b = a }" "cannot copy int \\[\\] 'a': dynamic arrays are move-only")
+reject(array_copy_managed "Main() { string [2] a\nstring [2] b = a }" "cannot copy string \\[2\\] 'a': its elements cannot be copied implicitly")
+reject(array_by_value "Use(int [] a) {}\nMain() {}" "parameter 'a' must take int \\[\\] by reference")
+reject(array_fixed_append "Main() { int [3] a\na += 1 }" "int \\[3\\] has a fixed length")
+reject(array_element_reference "Use(int& x) {}\nMain() { int [] a\na += 1\nUse(a[0]) }" "cannot pass an element of a dynamic array by reference")
+reject(array_field_strings "G { string [2] Names }\nMain() {}" "field 'Names' cannot hold string \\[2\\] yet")
+reject(array_runtime_elements "P\n{\n    int X\n    P() { X = 1 }\n}\nMain() { P [2] ps }" "'ps' cannot default its elements")
+reject(array_pair_write "Main() { string, int pair p\np[\"a\"] = 1 }" "pair values are read-only so far")
+reject(array_index_scalar "Main() { int x = 1\nPrint(x[0]) }" "only arrays and pairs can be indexed")
+reject(array_float_index "Main() { int [3] a\nPrint(a[1.5]) }" "an array index must be an integer, not float")
+reject(array_zero_length "Main() { int [0] a }" "a fixed array needs at least one element")
+reject(array_of_collections "Main() { int queue [3] a }" "arrays of collections are not supported yet")
+reject(array_multidimensional "Main() { int [3] [2] a }" "multidimensional arrays are a later item")
+reject(array_constant "Main() { #int [3] a = Make()\na[0] = 1 }\nint [3] Make() { int [3] r\nreturn r }" "cannot modify constant 'a'")
+reject(array_member "Main() { int [3] a\nPrint(a.Size) }" "int \\[3\\] has no member 'Size'; an array has Len")
+file(WRITE "${WORK}/property_library.dk" "Person\n{\n    -int Years = 20\n    Show() { Print(Title) }\n}\n@{\n    Age: Years\n    Title: \"person\"\n}\n={\n    Age: Years = value\n}\n")
+file(WRITE "${WORK}/property_client.dk" "Kid : Person { int Toys = 1 }\n@{ Title: \"kid\" }\nMain()\n{\n    Kid k()\n    k.Age += 2\n    Print(k.Age)\n    k.Show()\n}\n")
+execute_process(COMMAND "${COMPILER}" --library "${WORK}/property_library.dk" -o "${WORK}/property_library.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "property_library: compilation failed: ${errors}")
+endif()
+execute_process(COMMAND "${COMPILER}" --dependency "${WORK}/property_library.dk" "${WORK}/property_client.dk" -o "${WORK}/property_client.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "property_client: compilation failed: ${errors}")
+endif()
+execute_process(COMMAND "${CLANG}" "${WORK}/property_library.ll" "${WORK}/property_client.ll" -o "${WORK}/property_client.exe" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "property_client: link failed: ${errors}")
+endif()
+execute_process(COMMAND "${WORK}/property_client.exe" RESULT_VARIABLE status OUTPUT_VARIABLE actual)
+if(NOT status EQUAL 0 OR NOT actual STREQUAL "22\nkid\n")
+  message(FATAL_ERROR "property_client: exit=${status}, actual=[${actual}]")
+endif()
+file(WRITE "${WORK}/interface_library.dk" "Animal\n{\n    string Speak() { return \"...\" }\n}\nTalk(Animal& a) { Print(a.Speak()) }\n")
+file(WRITE "${WORK}/interface_client.dk" "Cat : Animal\n{\n    string Speak() { return \"meow\" }\n}\nMain()\n{\n    Animal a()\n    Talk(a)\n    Cat c()\n    Talk(c)\n}\n")
+execute_process(COMMAND "${COMPILER}" --library "${WORK}/interface_library.dk" -o "${WORK}/interface_library.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "interface_library: compilation failed: ${errors}")
+endif()
+execute_process(COMMAND "${COMPILER}" --dependency "${WORK}/interface_library.dk" "${WORK}/interface_client.dk" -o "${WORK}/interface_client.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "interface_client: compilation failed: ${errors}")
+endif()
+execute_process(COMMAND "${CLANG}" "${WORK}/interface_library.ll" "${WORK}/interface_client.ll" -o "${WORK}/interface_client.exe" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "interface_client: link failed: ${errors}")
+endif()
+execute_process(COMMAND "${WORK}/interface_client.exe" RESULT_VARIABLE status OUTPUT_VARIABLE actual)
+if(NOT status EQUAL 0 OR NOT actual STREQUAL "...\nmeow\n")
+  message(FATAL_ERROR "interface_client: exit=${status}, actual=[${actual}]")
+endif()
+# An importing module derives from a library container and overrides a
+# method the library's own code calls on this.
+file(WRITE "${WORK}/override_library.dk" "Animal\n{\n    int Legs = 4\n    string Speak() { return \"...\" }\n    Describe()\n    {\n        Print(Speak())\n        Print(Legs)\n    }\n}\nShow()\n{\n    Animal a()\n    a.Describe()\n}\n")
+file(WRITE "${WORK}/override_client.dk" "Cat : Animal\n{\n    string Speak() { return \"meow\" }\n}\nMain()\n{\n    Show()\n    Cat c()\n    c.Describe()\n}\n")
+execute_process(COMMAND "${COMPILER}" --library "${WORK}/override_library.dk" -o "${WORK}/override_library.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "override_library: compilation failed: ${errors}")
+endif()
+execute_process(COMMAND "${COMPILER}" --dependency "${WORK}/override_library.dk" "${WORK}/override_client.dk" -o "${WORK}/override_client.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "override_client: compilation failed: ${errors}")
+endif()
+execute_process(COMMAND "${CLANG}" "${WORK}/override_library.ll" "${WORK}/override_client.ll" -o "${WORK}/override_client.exe" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "override_client: link failed: ${errors}")
+endif()
+execute_process(COMMAND "${WORK}/override_client.exe" RESULT_VARIABLE status OUTPUT_VARIABLE actual)
+if(NOT status EQUAL 0 OR NOT actual STREQUAL "...\n4\nmeow\n4\n")
+  message(FATAL_ERROR "override_client: exit=${status}, actual=[${actual}]")
+endif()
 reject(inheritance_parent_name_member "A { int x }\nB : A { int A }\nMain() {}" "has the name of parent container 'A'")
 reject(inheritance_protected_outside "A { -int x }\nB : A { int y }\nMain() { B b()\nPrint(b.x) }" "'x' is a protected member of 'A'")
 reject(inheritance_parent_view_outside "A { F() {} }\nB : A { int y }\nMain() { B b()\nb.A.F() }" "'A' is a protected member of 'B'")

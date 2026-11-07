@@ -8,6 +8,8 @@
 namespace duck {
 namespace {
 std::string irType(Type t) {
+  if (fixedArray(t)) return "[" + std::to_string(t.extent) + " x " + irType(*t.element) + "]";
+  if (collectionValue(t) || dynamicArray(t)) return "ptr";
   if (integral(t))
     return "i" + std::to_string(integerWidth(t));
   if (t.depth) return "ptr";
@@ -122,12 +124,34 @@ std::string recordConstant(const Symbols &symbols, const std::string &record) {
   }
   return value + " }";
 }
+std::string tableSymbol(const DispatchTable &table) {
+  std::string symbol = "@\"duck$vt." + table.first;
+  for (auto index : table.second) symbol += "$" + std::to_string(index);
+  return symbol + "\"";
+}
+std::string tableType(const Symbols &symbols, const std::string &record) {
+  std::string type = "{ i64, i64";
+  for (size_t i = 0; i < symbols.records.at(record).parents.size(); ++i) type += ", ptr";
+  for (size_t i = 0; i < symbols.dispatchNames(record).size(); ++i) type += ", ptr, i64, ptr";
+  return type + " }";
+}
+// The byte offset of the parent state at path within record, as a constant.
+std::string pathOffset(const std::string &record, const std::vector<size_t> &path) {
+  if (path.empty()) return "0";
+  std::string indices;
+  for (auto index : path) indices += ", i32 " + std::to_string(index);
+  return "ptrtoint (ptr getelementptr (%struct." + record + ", ptr null, i32 0" + indices + ") to i64)";
+}
 struct Binding {
   Type type;
   std::string value;
   bool constant = false;
   bool owned = false;
   bool scopedBorrow = false;
+  size_t order = 0; // Declaration order; cleanup runs in reverse.
+  // For this and container reference parameters: the dispatch table of the
+  // object the storage belongs to.
+  std::string table;
 };
 class Generator {
   const Symbols &functions;
@@ -154,7 +178,186 @@ class Generator {
   int next = 0, strings = 0, tasks = 0;
   bool usesTextRuntime = false, usesHeapRuntime = false, usesTaskRuntime = false;
   bool usesCalendarRuntime = false, usesWideRuntime = false;
-  bool usesBigRuntime = false, usesDecimalRuntime = false;
+  bool usesBigRuntime = false, usesDecimalRuntime = false, usesCollectionRuntime = false;
+  std::set<std::string> cleanups, destroys;
+  std::set<DispatchTable> tables;
+  // The receiver's container inside a method, and whether the method takes
+  // a dispatch table (%vt); constructors and destructors use their own
+  // container's table, so their calls on this never reach an override.
+  std::string selfRecord;
+  bool dispatching = false;
+  std::string table(const DispatchTable &t) {
+    tables.insert(t);
+    return tableSymbol(t);
+  }
+  std::string selfTable() { return dispatching ? "%vt" : table({selfRecord, {}}); }
+  // The table of the parent state at path below a table of `record`.
+  std::string childTable(std::string vt, std::string record, const std::vector<size_t> &path) {
+    for (auto index : path) {
+      auto slot = fresh(), child = fresh();
+      emit(slot + " = getelementptr " + tableType(functions, record) + ", ptr " + vt + ", i32 0, i32 " +
+           std::to_string(2 + index));
+      emit(child + " = load ptr, ptr " + slot);
+      vt = child;
+      record = functions.records.at(record).fields[index].type.record;
+    }
+    return vt;
+  }
+  // The table-carrying binding (this, or a container reference parameter)
+  // an expression starts at, and the parent-view path it takes from there,
+  // as in this.Animal; false for storage of a known exact type.
+  bool tableRoot(const Expr &e, std::vector<size_t> &path, Binding &root) {
+    if (e.kind == "name") {
+      if (analysis.staticFields.count(&e)) return false;
+      root = variable(e.token);
+      return !root.table.empty() && recordValue(root.type);
+    }
+    if (e.kind != "." || analysis.staticFields.count(&e)) return false;
+    const auto base = analysis.expressionTypes.find(e.args[0].get());
+    if (base == analysis.expressionTypes.end() || !recordValue(base->second)) return false;
+    if (!tableRoot(*e.args[0], path, root)) return false;
+    MemberPath member;
+    const auto &record = base->second.record;
+    if (!functions.findField(record, e.token.text, member) || !member.field->parentView) return false;
+    path.insert(path.end(), member.indices.begin(), member.indices.end());
+    return true;
+  }
+  // A method's receiver, evaluated once: its storage, or a temporary copy of
+  // a value, and the table-carrying binding it starts at, if any.
+  struct Receiver {
+    std::string address;
+    bool rooted = false;
+    Binding root;
+    std::vector<size_t> view;
+    Value temporary{Type::Void, ""};
+  };
+  Receiver receiver(const Expr *e, const Token &at) {
+    Receiver r;
+    if (!e) {
+      Token self = at;
+      self.text = "this";
+      r.root = variable(self);
+      r.rooted = true;
+      r.address = r.root.value;
+      return r;
+    }
+    r.rooted = tableRoot(*e, r.view, r.root);
+    if (analysis.expressionTypes.at(e).depth) r.address = dereference(*e).value;
+    else if (e->addressable() && !analysis.properties.count(e)) r.address = location(*e).value;
+    else {
+      auto temporary = expression(*e);
+      r.address = fresh();
+      allocations << "  " << r.address << " = alloca " << irType(temporary.type) << '\n';
+      emit("store " + irType(temporary.type) + " " + temporary.value + ", ptr " + r.address);
+      r.temporary = {temporary.type, r.address};
+    }
+    return r;
+  }
+  // The receiver and dispatch-table arguments for calling method `target`
+  // on r. A call on this, or on a container reference parameter, runs the
+  // final overrider for the object: its slot in the table gives the
+  // function (set as callee), its receiver's offset within the object, and
+  // its table. Other calls are direct: the receiver's exact type is known,
+  // or a base call through this.Parent bypasses the overrides below it.
+  // `inherited` is the receiver's container and the parent-view path to the
+  // method's declaring state, for an inherited method.
+  std::string receiverArguments(const Receiver &r, const std::string &target,
+                                const std::pair<std::string, std::vector<size_t>> *inherited,
+                                std::string &callee) {
+    if (r.rooted && r.view.empty() && dispatched(target, true)) {
+      const auto &record = r.root.type.record;
+      const auto type = tableType(functions, record);
+      const auto names = functions.dispatchNames(record);
+      const auto first = 2 + functions.records.at(record).parents.size() +
+                         3 * (std::find(names.begin(), names.end(), memberName(target)) - names.begin());
+      auto field = [&](size_t index, const std::string &ir) {
+        auto slot = fresh(), value = fresh();
+        emit(slot + " = getelementptr " + type + ", ptr " + r.root.table + ", i32 0, i32 " +
+             std::to_string(index));
+        emit(value + " = load " + ir + ", ptr " + slot);
+        return value;
+      };
+      const auto own = field(0, "i64"), function = field(first, "ptr"), offset = field(first + 1, "i64"),
+                 table = field(first + 2, "ptr");
+      auto back = fresh(), base = fresh(), self = fresh();
+      emit(back + " = sub i64 0, " + own);
+      emit(base + " = getelementptr i8, ptr " + r.root.value + ", i64 " + back);
+      emit(self + " = getelementptr i8, ptr " + base + ", i64 " + offset);
+      callee = function;
+      return "ptr " + self + ", ptr " + table;
+    }
+    // An inherited method receives the declaring parent's embedded state.
+    auto address = r.address;
+    if (inherited && !inherited->second.empty()) {
+      Type owner = Type::Record;
+      owner.record = inherited->first;
+      auto adjusted = fresh();
+      emit(adjusted + " = getelementptr " + irType(owner) + ", ptr " + address + ", i32 0" +
+           indexList(inherited->second));
+      address = adjusted;
+    }
+    std::string args = "ptr " + address;
+    if (!dispatched(target, true)) return args;
+    std::vector<size_t> path;
+    if (inherited) path = inherited->second;
+    if (r.rooted) {
+      auto view = r.view;
+      view.insert(view.end(), path.begin(), path.end());
+      return args + ", ptr " + childTable(r.root.table, r.root.type.record, view);
+    }
+    const auto owner = inherited ? inherited->first : target.substr(0, target.rfind('.'));
+    return args + ", ptr " + table({owner, path});
+  }
+  // Calls a property accessor on r, passing `value` to a setter.
+  Value accessorCall(const Receiver &r, const std::string &owner, const std::string &key,
+                     const std::vector<size_t> &path, const Value *value = nullptr) {
+    const auto &f = functions.at(key);
+    std::string callee = "@duck." + key;
+    const std::pair<std::string, std::vector<size_t>> inherited{owner, path};
+    auto args = receiverArguments(r, key, &inherited, callee);
+    if (value) args += ", " + irType(value->type) + " " + value->value;
+    auto id = f.result == Type::Void ? "" : fresh();
+    emit((id.empty() ? "" : id + " = ") + "call " + irType(f.result) + " " + callee + "(" + args + ")");
+    return {f.result, id};
+  }
+  // A reference argument: its address and, for a container parameter, the
+  // table of the object it belongs to. A derived container passes the
+  // state of the parameter's parent, with that state's table.
+  std::string referenceArgument(const Expr &argument, const Parameter &parameter, bool native) {
+    const auto storage = location(argument);
+    auto address = storage.value;
+    const bool tabled = carriesTable(parameter) && !native;
+    std::string vt;
+    if (tabled) {
+      std::vector<size_t> path;
+      Binding root;
+      vt = tableRoot(argument, path, root) ? childTable(root.table, root.type.record, path)
+                                           : table({storage.type.record, {}});
+    }
+    if (auto up = analysis.upcasts.find(&argument); up != analysis.upcasts.end()) {
+      auto adjusted = fresh();
+      emit(adjusted + " = getelementptr " + irType(storage.type) + ", ptr " + address + ", i32 0" +
+           indexList(up->second));
+      address = adjusted;
+      if (tabled) vt = childTable(vt, storage.type.record, up->second);
+    }
+    return "ptr " + address + (tabled ? ", ptr " + vt : "");
+  }
+  // Replacing a whole object through a reference that may hold only a
+  // parent's state of a larger object would leave the rest inconsistent,
+  // so it traps unless the table describes a whole object.
+  void requireWhole(const Binding &binding) {
+    if (binding.table.empty() || binding.table[0] != '%' || !recordValue(binding.type)) return;
+    auto slot = fresh(), depth = fresh(), whole = fresh();
+    emit(slot + " = getelementptr " + tableType(functions, binding.type.record) + ", ptr " + binding.table +
+         ", i32 0, i32 1");
+    emit(depth + " = load i64, ptr " + slot);
+    emit(whole + " = icmp eq i64 " + depth + ", 0");
+    require(whole);
+  }
+  // A generated initializer writes storage that was never constructed, so
+  // overwriting it destroys nothing.
+  bool initializer = false;
   std::string fresh() { return "%v" + std::to_string(next++); }
   std::string label() { return "b" + std::to_string(next++); }
   void emit(const std::string &s) { code << "  " << s << '\n'; }
@@ -188,16 +391,131 @@ class Generator {
     usesTextRuntime = true;
     emit("call void @duck.text.retain(ptr " + value.value + ")");
   }
+  void destroyAt(const std::string &record, const std::string &address) {
+    destroys.insert(record);
+    usesCollectionRuntime = true; // Destroy routines may free collection fields.
+    emit("call void @duck$destroy." + record + "(ptr " + address + ")");
+  }
+  // The allocation size of a type, as a constant.
+  static std::string sizeOf(const Type &type) {
+    return "ptrtoint (ptr getelementptr (" + irType(type) + ", ptr null, i32 1) to i64)";
+  }
+  // The release function for collection slots of a type, or null.
+  std::string slotRelease(const Type &type) {
+    if (!managedValue(type)) return "null";
+    usesTextRuntime = true;
+    return "@duck$slot.release";
+  }
+  // How a pair compares keys of a type: null compares bytewise.
+  std::string keyEquality(const Type &type) {
+    if (type == Type::String) return "@duck$key.string";
+    if (type == Type::Name) return "@duck$key.name";
+    if (bigInteger(type)) {
+      usesBigRuntime = true;
+      return "@duck$key.big";
+    }
+    return "null";
+  }
+  // The function that cleans up one array element in place, or null:
+  // releasing text and big values, or a container's heap cleanup, which runs
+  // its destructor and releases its fields.
+  std::string elementCleanup(const Type &type) {
+    if (managedValue(type)) return slotRelease(type);
+    if (recordValue(type) && functions.needsCleanup(type)) {
+      cleanups.insert(type.record);
+      usesTextRuntime = true;
+      return "@duck$cleanup." + type.record;
+    }
+    return "null";
+  }
+  void freeArray(const std::string &value, const Type &type) {
+    usesCollectionRuntime = true;
+    emit("call void @duck.seq$free(ptr " + value + ", ptr " + elementCleanup(*type.element) + ")");
+  }
+  // Cleans up each element of the fixed array at address.
+  void cleanupElements(const std::string &address, const Type &type) {
+    usesCollectionRuntime = true;
+    emit("call void @duck.array$each(ptr " + address + ", i64 " + std::to_string(type.extent) + ", i64 " +
+         sizeOf(*type.element) + ", ptr " + elementCleanup(*type.element) + ")");
+  }
+  // Gives each element of a zeroed fixed array its default when zero bits
+  // are not one: empty text, a zero big, or a container's constant default.
+  void fillDefaults(const std::string &address, const Type &type) {
+    const auto &element = *type.element;
+    std::string source;
+    if (managedValue(element)) {
+      Value empty;
+      if (bigInteger(element)) empty = bigLiteral("0", element);
+      else {
+        Token text;
+        empty = {element, "@str." + symbolPrefix + "." + std::to_string(strings++)};
+        globals << managedTextGlobal(empty.value, text, element);
+      }
+      source = fresh();
+      allocations << "  " << source << " = alloca ptr\n";
+      emit("store ptr " + empty.value + ", ptr " + source);
+    } else if (recordValue(element) && hasDefaults(functions, element.record))
+      source = "@duck$default." + element.record;
+    else return;
+    usesCollectionRuntime = true;
+    emit("call void @duck.array$fill(ptr " + address + ", i64 " + std::to_string(type.extent) + ", i64 " +
+         sizeOf(element) + ", ptr " + source + ")");
+  }
+  void freeCollection(const std::string &value, const Type &type) {
+    usesCollectionRuntime = true;
+    if (type.base == Type::Pair)
+      emit("call void @duck.pair$free(ptr " + value + ", ptr " + slotRelease(*type.key) + ", ptr " +
+           slotRelease(*type.element) + ")");
+    else emit("call void @duck.seq$free(ptr " + value + ", ptr " + slotRelease(*type.element) + ")");
+  }
+  // A zero-filled copy of a key, so its padding compares equal bytewise.
+  std::string keySlot(const Value &key) {
+    auto slot = fresh();
+    allocations << "  " << slot << " = alloca " << irType(key.type) << '\n';
+    emit("call void @duck.mem$zero(ptr " + slot + ", i64 " + sizeOf(key.type) + ")");
+    emit("store " + irType(key.type) + " " + key.value + ", ptr " + slot);
+    return slot;
+  }
+  // Reads a collection slot as a value of its own.
+  Value loadSlot(const std::string &slot, const Type &type) {
+    auto value = fresh();
+    emit(value + " = load " + irType(type) + ", ptr " + slot);
+    retain({type, value});
+    return {type, value};
+  }
   void release(Value value) {
+    if (collectionValue(value.type)) return freeCollection(value.value, value.type);
+    if (dynamicArray(value.type)) return freeArray(value.value, value.type);
+    if (fixedArray(value.type)) {
+      if (!functions.needsCleanup(value.type)) return;
+      auto slot = fresh();
+      allocations << "  " << slot << " = alloca " << irType(value.type) << '\n';
+      emit("store " + irType(value.type) + " " + value.value + ", ptr " + slot);
+      return cleanupElements(slot, value.type);
+    }
+    if (recordValue(value.type) && functions.destructible(value.type.record)) {
+      auto slot = fresh();
+      allocations << "  " << slot << " = alloca " << irType(value.type) << '\n';
+      emit("store " + irType(value.type) + " " + value.value + ", ptr " + slot);
+      destroyAt(value.type.record, slot);
+      if (!functions.managed(value.type)) return;
+      value.value = fresh();
+      emit(value.value + " = load " + irType(value.type) + ", ptr " + slot);
+    }
     if (recordValue(value.type) && functions.managed(value.type)) return eachManaged(value, "release");
     if (!managedValue(value.type)) return;
     usesTextRuntime = true;
     emit("call void @duck.text.release(ptr " + value.value + ")");
   }
   // Evaluates the runtime defaults of the record at address in layout order,
-  // through nested containers and parents, except for skipped field paths.
+  // except for skipped field paths. Parents come first in the layout, so each
+  // parent is defaulted and then runs its own parts from `calls` (the plan of
+  // the record being constructed, at `relative` within it) before the
+  // container's fields; nested fields are fully built in place.
   void runDefaults(const std::string &record, const std::string &address,
-                   const std::set<std::vector<size_t>> &skip, std::vector<size_t> path) {
+                   const std::set<std::vector<size_t>> &skip, std::vector<size_t> path,
+                   const std::vector<PartCall> &calls = {}, const Expr *call = nullptr,
+                   std::vector<size_t> relative = {}) {
     Type type = Type::Record;
     type.record = record;
     const auto &fields = functions.records.at(record).fields;
@@ -212,7 +530,16 @@ class Generator {
         auto part = fresh();
         emit(part + " = getelementptr " + irType(type) + ", ptr " + address + ", i32 0, i32 " +
              std::to_string(i));
-        runDefaults(field.type.record, part, skip, path);
+        if (field.parentView) {
+          relative.push_back(i);
+          runDefaults(field.type.record, part, skip, path, calls, call, relative);
+          runOwnParts(field.type, part, calls, call, relative);
+          relative.pop_back();
+        } else {
+          const auto own = automaticParts(field.type.record);
+          runDefaults(field.type.record, part, skip, path, own, nullptr, {});
+          runOwnParts(field.type, part, own, nullptr, {});
+        }
       }
       path.pop_back();
     }
@@ -220,14 +547,80 @@ class Generator {
   // A record's default value: zero, or its constant defaults, then its
   // runtime defaults evaluated in place. Skipped fields keep the constant base.
   std::string defaultValue(const Type &type, const std::set<std::vector<size_t>> &skip = {}) {
-    if (!recordValue(type) || !hasDefaults(functions, type.record)) return "zeroinitializer";
+    if (!recordValue(type)) return "zeroinitializer";
+    if (!hasDefaults(functions, type.record)) {
+      if (!functions.runtimeDefaults(type.record)) return "zeroinitializer";
+      return constructRecord(type, automaticParts(type.record), nullptr, skip);
+    }
     auto id = fresh();
     emit(id + " = load " + irType(type) + ", ptr @duck$default." + type.record);
     if (!functions.runtimeDefaults(type.record)) return id;
+    return constructRecord(type, automaticParts(type.record), nullptr, skip, id);
+  }
+  // The zero-argument overload of every part that has one; a declared local
+  // may be left missing the others.
+  std::vector<PartCall> automaticParts(const std::string &record) const {
+    std::vector<PartCall> calls;
+    for (const auto &part : functions.parts(record))
+      if (!part.automatic.empty()) calls.push_back({part.path, part.automatic, 0, 0});
+    return calls;
+  }
+  // Runs construction parts on the record at address, each on the parent
+  // state its path selects, with its slice of call's arguments.
+  void runParts(const Type &type, const std::string &address, const std::vector<PartCall> &calls,
+                const Expr *call) {
+    for (const auto &part : calls) {
+      auto self = address;
+      if (!part.path.empty()) {
+        self = fresh();
+        emit(self + " = getelementptr " + irType(type) + ", ptr " + address + ", i32 0" + indexList(part.path));
+      }
+      const auto &parameters = functions.at(part.key).parameters;
+      std::string args = "ptr " + self;
+      std::vector<Value> values;
+      for (size_t i = 0; i < part.count; ++i) {
+        const auto &argument = *call->args[part.first + i];
+        if (parameters[i + 1].reference) {
+          args += ", " + referenceArgument(argument, parameters[i + 1], false);
+          continue;
+        }
+        auto v = expression(argument);
+        values.push_back(v);
+        args += ", " + irType(v.type) + " " + v.value;
+      }
+      emit("call void @duck." + part.key + "(" + args + ")");
+      for (const auto &v : values) release(v);
+    }
+  }
+  // Runs the parts in calls that belong to the record at `relative` itself,
+  // on that record's storage at address.
+  void runOwnParts(const Type &type, const std::string &address, const std::vector<PartCall> &calls,
+                   const Expr *call, const std::vector<size_t> &relative) {
+    std::vector<PartCall> own;
+    for (const auto &part : calls)
+      if (part.path == relative) {
+        own.push_back(part);
+        own.back().path.clear();
+      }
+    runParts(type, address, own, call);
+  }
+  // Builds a record in fresh storage: its constant defaults, then its runtime
+  // defaults and fully built nested containers in layout order, then its
+  // construction parts: parents' first, then its own partial and regular.
+  std::string constructRecord(const Type &type, const std::vector<PartCall> &calls, const Expr *call,
+                              const std::set<std::vector<size_t>> &skip = {}, std::string base = "") {
+    if (base.empty()) {
+      base = "zeroinitializer";
+      if (hasDefaults(functions, type.record)) {
+        base = fresh();
+        emit(base + " = load " + irType(type) + ", ptr @duck$default." + type.record);
+      }
+    }
     auto slot = fresh();
     allocations << "  " << slot << " = alloca " << irType(type) << '\n';
-    emit("store " + irType(type) + " " + id + ", ptr " + slot);
-    runDefaults(type.record, slot, skip, {});
+    emit("store " + irType(type) + " " + base + ", ptr " + slot);
+    runDefaults(type.record, slot, skip, {}, calls, call, {});
+    runOwnParts(type, slot, calls, call, {});
     auto value = fresh();
     emit(value + " = load " + irType(type) + ", ptr " + slot);
     return value;
@@ -247,23 +640,57 @@ class Generator {
     emit(word + " = call ptr @duck.heap$alias(ptr " + binding.value + ", i1 " + ownerFlag(binding.type) + ")");
     return word;
   }
-  void releaseBinding(const Binding &binding) {
+  // destroy is false for a value moved out by `return local`: its storage
+  // still drops its references, but the object lives on in the caller.
+  void releaseBinding(const Binding &binding, bool destroy = true) {
     if (binding.scopedBorrow) return;
     if (binding.type.role != Type::Raw) {
-      emit("call void @duck.heap$drop(ptr " + binding.value + ", i1 " + ownerFlag(binding.type) + ")");
+      // An owner frees the payload, so it supplies the payload's cleanup.
+      std::string cleanup = "null";
+      const auto payload = binding.type.pointee();
+      if (binding.type.role == Type::Owner && recordValue(payload) &&
+          (functions.managed(payload) || functions.destructible(payload.record))) {
+        cleanups.insert(payload.record);
+        usesTextRuntime = true;
+        usesCollectionRuntime = true; // Its destroy routine may free collection fields.
+        cleanup = "@duck$cleanup." + payload.record;
+      }
+      emit("call void @duck.heap$drop(ptr " + binding.value + ", i1 " + ownerFlag(binding.type) +
+           ", ptr " + cleanup + ")");
       return;
     }
+    if (collectionValue(binding.type) || dynamicArray(binding.type)) {
+      if (!destroy) return;
+      auto old = fresh();
+      emit(old + " = load ptr, ptr " + binding.value);
+      if (dynamicArray(binding.type)) return freeArray(old, binding.type);
+      return freeCollection(old, binding.type);
+    }
+    if (fixedArray(binding.type)) {
+      if (destroy && functions.needsCleanup(binding.type)) cleanupElements(binding.value, binding.type);
+      return;
+    }
+    const bool destructible = recordValue(binding.type) && functions.destructible(binding.type.record);
+    if (destroy && destructible) destroyAt(binding.type.record, binding.value);
     if (!functions.managed(binding.type)) return;
     auto old = fresh();
     emit(old + " = load " + irType(binding.type) + ", ptr " + binding.value);
-    release({binding.type, old});
+    // The object was destroyed in place; only its references remain to drop.
+    if (destructible) eachManaged({binding.type, old}, "release");
+    else release({binding.type, old});
   }
-  void cleanupScopes(size_t first) {
-    for (size_t i = scopes.size(); i > first; --i)
+  void cleanupScopes(size_t first, const std::string &moved = "") {
+    // Locals die in reverse declaration order, innermost scope first.
+    for (size_t i = scopes.size(); i > first; --i) {
+      std::vector<const Binding *> owned;
       for (const auto &[name, binding] : scopes[i - 1]) {
         (void)name;
-        if (binding.owned) releaseBinding(binding);
+        if (binding.owned) owned.push_back(&binding);
       }
+      std::sort(owned.begin(), owned.end(),
+                [](const Binding *a, const Binding *b) { return a->order > b->order; });
+      for (const auto *binding : owned) releaseBinding(*binding, binding->value != moved);
+    }
   }
   // Loads the underlying value of an enum member index. A constant index
   // selects the constant directly.
@@ -571,8 +998,9 @@ class Generator {
     throw std::logic_error(
         "lowering requires a successfully analyzed function");
   }
+  size_t declarations = 0;
   void bind(const Token &t, Binding binding) {
-
+    binding.order = declarations++;
     scopes.back()[t.text] = binding;
   }
   void declare(const Token &t, Value value, bool constant = false, bool scopedBorrow = false) {
@@ -580,10 +1008,15 @@ class Generator {
     allocations << "  " << address << " = alloca " << irType(value.type)
                 << '\n';
     if (recordValue(value.type) && value.value.empty()) value.value = defaultValue(value.type);
-    if (managedValue(value.type) && value.value.empty()) value.value = "null";
+    if ((managedValue(value.type) || collectionValue(value.type) || dynamicArray(value.type)) &&
+        value.value.empty())
+      value.value = "null";
+    const bool defaults = fixedArray(value.type) && value.value.empty();
+    if (defaults) value.value = "zeroinitializer";
     if (!value.value.empty())
       emit("store " + irType(value.type) + " " + value.value + ", ptr " +
            address);
+    if (defaults) fillDefaults(address, value.type);
     bind(t, {value.type, address, constant, true, scopedBorrow});
   }
   std::string textConstant(const std::string &value) {
@@ -637,6 +1070,26 @@ class Generator {
     if (e.kind == "name") return variable(e.token);
     auto type = analysis.expressionTypes.at(&e);
     if (e.kind == "unary") return {type, dereference(*e.args[0]).value};
+    if (e.kind == "index") {
+      // The array and the index are evaluated once; an index outside the
+      // array traps.
+      const auto array = analysis.expressionTypes.at(e.args[0].get());
+      const auto holder = location(*e.args[0]).value;
+      const auto index = expression(*e.args[1]);
+      auto slot = fresh();
+      if (array.extent) {
+        auto valid = fresh();
+        emit(valid + " = icmp ult i64 " + index.value + ", " + std::to_string(array.extent));
+        require(valid);
+        emit(slot + " = getelementptr " + irType(array) + ", ptr " + holder + ", i64 0, i64 " + index.value);
+      } else {
+        usesCollectionRuntime = true;
+        auto c = fresh();
+        emit(c + " = load ptr, ptr " + holder);
+        emit(slot + " = call ptr @duck.seq$index(ptr " + c + ", i64 " + index.value + ")");
+      }
+      return {type, slot};
+    }
     const auto &base = *e.args[0];
     auto record = analysis.expressionTypes.at(&base);
     std::string address;
@@ -710,6 +1163,51 @@ class Generator {
       }
       return {analysis.expressionTypes.at(&e), location(*e.args[0]).value};
     }
+    if (auto property = analysis.properties.find(&e); property != analysis.properties.end()) {
+      const auto &access = property->second;
+      const auto r = receiver(e.kind == "." ? e.args[0].get() : nullptr, e.token);
+      auto v = accessorCall(r, access.owner, access.getter, access.getterPath);
+      if (!r.temporary.value.empty()) releaseBinding({r.temporary.type, r.temporary.value});
+      return v;
+    }
+    if (auto member = analysis.collectionMembers.find(&e); member != analysis.collectionMembers.end()) {
+      usesCollectionRuntime = true;
+      const auto type = analysis.expressionTypes.at(e.args[0].get());
+      auto c = fresh();
+      if (!fixedArray(type)) emit(c + " = load ptr, ptr " + location(*e.args[0]).value);
+      const auto &name = member->second;
+      if (fixedArray(type)) return {Type::Long, std::to_string(type.extent)};
+      if (name == "Len") {
+        auto n = fresh();
+        emit(n + " = call i64 @duck." + std::string(type.base == Type::Pair ? "pair" : "seq") + "$length(ptr " + c +
+             ")");
+        return {Type::Long, n};
+      }
+      auto slot = fresh();
+      if (type.base == Type::Pair) {
+        auto entry = fresh();
+        emit(entry + " = call ptr @duck.pair$last(ptr " + c + ")");
+        if (name == "LastKey") return loadSlot(entry, *type.key);
+        emit(slot + " = call ptr @duck.pair$value(ptr " + c + ", ptr " + entry + ")");
+      } else
+        emit(slot + " = call ptr @duck.seq$at(ptr " + c + ", i1 " + (name == "Top" ? "1" : "0") + ")");
+      return loadSlot(slot, *type.element);
+    }
+    if (e.kind == "index" && analysis.expressionTypes.at(e.args[0].get()).base == Type::Pair &&
+        !analysis.expressionTypes.at(e.args[0].get()).depth) {
+      usesCollectionRuntime = true;
+      const auto type = analysis.expressionTypes.at(e.args[0].get());
+      auto c = fresh(), entry = fresh(), found = fresh(), slot = fresh();
+      emit(c + " = load ptr, ptr " + location(*e.args[0]).value);
+      const auto key = expression(*e.args[1]);
+      emit(entry + " = call ptr @duck.pair$find(ptr " + c + ", ptr " + keySlot(key) + ", ptr " +
+           keyEquality(*type.key) + ")");
+      release(key);
+      emit(found + " = icmp ne ptr " + entry + ", null");
+      require(found);
+      emit(slot + " = call ptr @duck.pair$value(ptr " + c + ", ptr " + entry + ")");
+      return loadSlot(slot, *type.element);
+    }
     if (e.addressable()) {
       auto v = location(e);
       auto id = fresh();
@@ -723,6 +1221,58 @@ class Generator {
       return {v.type, id};
     }
     if (e.kind == "call") {
+      if (auto constructed = analysis.constructions.find(&e); constructed != analysis.constructions.end()) {
+        const auto type = analysis.expressionTypes.at(&e);
+        if (functions.parts(type.record).empty()) return {type, defaultValue(type)};
+        return {type, constructRecord(type, constructed->second, &e)};
+      }
+      if (auto re = analysis.reinitializations.find(&e); re != analysis.reinitializations.end()) {
+        const auto &target = re->second;
+        // The new state is built first, so its arguments may read the old one.
+        const auto value = functions.parts(target.type.record).empty()
+                               ? defaultValue(target.type)
+                               : constructRecord(target.type, target.calls, &e);
+        std::string address;
+        if (e.receiver) {
+          const auto &base = *e.receiver;
+          address = analysis.expressionTypes.at(&base).depth ? dereference(base).value : location(base).value;
+          Type owner = Type::Record;
+          owner.record = target.owner;
+          auto field = fresh();
+          emit(field + " = getelementptr " + irType(owner) + ", ptr " + address + ", i32 0" +
+               indexList(target.field));
+          address = field;
+        } else {
+          const auto binding = variable(e.token);
+          requireWhole(binding);
+          address = binding.value;
+          if (binding.type.depth) {
+            address = fresh();
+            emit(address + " = load ptr, ptr " + binding.value);
+            if (binding.type.role != Type::Raw) {
+              if (!binding.scopedBorrow) {
+                auto payload = fresh();
+                emit(payload + " = call ptr @duck.heap$payload(ptr " + address + ", i1 " +
+                     ownerFlag(binding.type) + ")");
+                address = payload;
+              }
+              auto valid = fresh();
+              emit(valid + " = icmp ne ptr " + address + ", null");
+              require(valid);
+            }
+          }
+        }
+        // The old object is destroyed and releases its fields in place; the
+        // storage, and so every alias and reference to it, stays the same.
+        releaseBinding({target.type, address});
+        emit("store " + irType(target.type) + " " + value + ", ptr " + address);
+        return {Type::Void, ""};
+      }
+      if (auto completed = analysis.completions.find(&e); completed != analysis.completions.end()) {
+        const auto binding = variable(e.token);
+        runParts(binding.type, binding.value, completed->second, &e);
+        return {Type::Void, ""};
+      }
       if (op == "Length" || op == "CodeUnitAt") {
         usesTextRuntime = true;
         auto text = expression(*e.args[0]);
@@ -817,34 +1367,14 @@ class Generator {
 
       const auto &f = found->second;
 
-      std::string args;
+      std::string args, callee = "@" + (f.nativeSymbol.empty() ? "duck." + target : f.nativeSymbol);
       Value temporaryReceiver{Type::Void, ""};
       if (f.method) {
-        std::string address;
-        if (!e.receiver) {
-          address = "%arg0";
-        } else if (analysis.expressionTypes.at(e.receiver.get()).depth)
-          address = dereference(*e.receiver).value;
-        else if (e.receiver->addressable())
-          address = location(*e.receiver).value;
-        else {
-          auto temporary = expression(*e.receiver);
-          address = fresh();
-          allocations << "  " << address << " = alloca " << irType(temporary.type) << '\n';
-          emit("store " + irType(temporary.type) + " " + temporary.value + ", ptr " + address);
-          temporaryReceiver = {temporary.type, address};
-        }
-        // An inherited method receives the declaring parent's embedded state.
-        auto inherited = analysis.receiverPaths.find(&e);
-        if (inherited != analysis.receiverPaths.end()) {
-          Type self = Type::Record;
-          self.record = inherited->second.first;
-          auto adjusted = fresh();
-          emit(adjusted + " = getelementptr " + irType(self) + ", ptr " + address + ", i32 0" +
-               indexList(inherited->second.second));
-          address = adjusted;
-        }
-        args = "ptr " + address;
+        const auto r = receiver(e.receiver.get(), e.token);
+        const auto inherited = analysis.receiverPaths.find(&e);
+        args = receiverArguments(r, target, inherited != analysis.receiverPaths.end() ? &inherited->second : nullptr,
+                                 callee);
+        temporaryReceiver = r.temporary;
       }
       std::vector<Value> arguments;
       for (size_t i = 0; i < e.args.size(); ++i) {
@@ -853,10 +1383,7 @@ class Generator {
         if (!args.empty())
           args += ", ";
         if (parameter.reference) {
-
-          auto binding = location(argument);
-
-          args += "ptr " + binding.value;
+          args += referenceArgument(argument, parameter, !f.nativeSymbol.empty());
         } else {
           auto v = expression(argument);
           arguments.push_back(v);
@@ -869,8 +1396,7 @@ class Generator {
         }
       }
       auto id = f.result == Type::Void ? "" : fresh();
-      emit((id.empty() ? "" : id + " = ") + "call " + irType(f.result) +
-           " @" + (f.nativeSymbol.empty() ? "duck." + target : f.nativeSymbol) + "(" + args + ")");
+      emit((id.empty() ? "" : id + " = ") + "call " + irType(f.result) + " " + callee + "(" + args + ")");
       for (auto argument : arguments) release(argument);
       // A temporary receiver dies after the call, holding whatever the method left in it.
       if (!temporaryReceiver.value.empty()) releaseBinding({temporaryReceiver.type, temporaryReceiver.value});
@@ -1157,7 +1683,7 @@ class Generator {
     }
     if (s.kind == "return") {
       Value v = s.expr ? expression(*s.expr) : Value{Type::Void, ""};
-      cleanupScopes(0);
+      cleanupScopes(0, analysis.moves.count(&s) ? variable(s.expr->token).value : "");
       emit("ret " + irType(v.type) +
            (v.type == Type::Void ? "" : " " + v.value));
       return true;
@@ -1255,6 +1781,98 @@ class Generator {
                s.kind == "/=" || s.kind == "%=" || s.kind == "&=" ||
                s.kind == "|=" || s.kind == "^=" ||
                s.kind == "<<=" || s.kind == ">>=") {
+      if (const auto type = analysis.expressionTypes.at(s.target.get()); dynamicArray(type) && s.kind != "assign") {
+        usesCollectionRuntime = true;
+        if (s.kind == "--") {
+          auto c = fresh();
+          emit(c + " = load ptr, ptr " + location(*s.target).value);
+          emit("call void @duck.seq$drop(ptr " + c + ", i1 1, ptr " + elementCleanup(*type.element) + ")");
+          return false;
+        }
+        // The value moves into the new last slot; growing moves the
+        // existing elements bytewise into the larger buffer.
+        const auto value = expression(*s.expr);
+        const auto holder = location(*s.target).value;
+        auto slot = fresh();
+        emit(slot + " = call ptr @duck.seq$push(ptr " + holder + ", i64 " + sizeOf(*type.element) + ")");
+        emit("store " + irType(value.type) + " " + value.value + ", ptr " + slot);
+        return false;
+      }
+      if (const auto type = analysis.expressionTypes.at(s.target.get()); collectionValue(type) && s.kind != "assign") {
+        usesCollectionRuntime = true;
+        if (s.kind == "--") {
+          auto c = fresh();
+          emit(c + " = load ptr, ptr " + location(*s.target).value);
+          if (type.base == Type::Pair)
+            emit("call void @duck.pair$dropLast(ptr " + c + ", ptr " + slotRelease(*type.key) + ", ptr " +
+                 slotRelease(*type.element) + ")");
+          else
+            emit("call void @duck.seq$drop(ptr " + c + ", i1 " + (type.base == Type::Stack ? "1" : "0") +
+                 ", ptr " + slotRelease(*type.element) + ")");
+          return false;
+        }
+        if (type.base != Type::Pair) {
+          const auto value = expression(*s.expr);
+          const auto holder = location(*s.target).value;
+          auto slot = fresh();
+          emit(slot + " = call ptr @duck.seq$push(ptr " + holder + ", i64 " + sizeOf(*type.element) + ")");
+          emit("store " + irType(value.type) + " " + value.value + ", ptr " + slot);
+          return false;
+        }
+        // A new key is appended with its value; an existing key keeps its
+        // place and gets the new value, and the duplicate key is released.
+        const auto key = expression(*s.expr->args[0]);
+        const auto value = expression(*s.expr->args[1]);
+        const auto holder = location(*s.target).value;
+        const auto probe = keySlot(key);
+        auto c = fresh(), found = fresh(), missing = fresh();
+        emit(c + " = load ptr, ptr " + holder);
+        emit(found + " = call ptr @duck.pair$find(ptr " + c + ", ptr " + probe + ", ptr " +
+             keyEquality(*type.key) + ")");
+        emit(missing + " = icmp eq ptr " + found + ", null");
+        auto add = label(), replace = label(), join = label();
+        emit("br i1 " + missing + ", label %" + add + ", label %" + replace);
+        startBlock(add);
+        auto added = fresh();
+        emit(added + " = call ptr @duck.pair$append(ptr " + holder + ", i64 " + sizeOf(*type.key) + ", i64 " +
+             sizeOf(*type.element) + ")");
+        emit("call void @duck.mem$copy(ptr " + added + ", ptr " + probe + ", i64 " + sizeOf(*type.key) + ")");
+        const auto addEnd = currentBlock;
+        emit("br label %" + join);
+        startBlock(replace);
+        release(key);
+        if (managedValue(*type.element)) {
+          auto previous = fresh(), old = fresh();
+          emit(previous + " = call ptr @duck.pair$value(ptr " + c + ", ptr " + found + ")");
+          emit(old + " = load ptr, ptr " + previous);
+          release({*type.element, old});
+        }
+        const auto replaceEnd = currentBlock;
+        emit("br label %" + join);
+        startBlock(join);
+        auto entry = fresh(), current = fresh(), slot = fresh();
+        emit(entry + " = phi ptr [" + added + ", %" + addEnd + "], [" + found + ", %" + replaceEnd + "]");
+        emit(current + " = load ptr, ptr " + holder);
+        emit(slot + " = call ptr @duck.pair$value(ptr " + current + ", ptr " + entry + ")");
+        emit("store " + irType(value.type) + " " + value.value + ", ptr " + slot);
+        return false;
+      }
+      if (auto property = analysis.properties.find(s.target.get()); property != analysis.properties.end()) {
+        const auto &access = property->second;
+        const auto &target = *s.target;
+        const auto r = receiver(target.kind == "." ? target.args[0].get() : nullptr, target.token);
+        Value v;
+        if (s.kind == "assign") v = expression(*s.expr);
+        else {
+          const auto old = accessorCall(r, access.owner, access.getter, access.getterPath);
+          const auto type = analysis.expressionTypes.at(&target);
+          auto operand = s.expr ? expression(*s.expr) : convert({Type::Int, "1"}, type);
+          v = binary(s.kind.substr(0, s.kind.size() - 1), old, operand);
+        }
+        accessorCall(r, access.owner, access.setter, access.setterPath, &v);
+        release(v);
+        return false;
+      }
       auto address = location(*s.target);
       if (address.type.role != Type::Raw) {
         auto word = aliasWord(*s.expr); // Retain first, including on self-assignment.
@@ -1264,8 +1882,10 @@ class Generator {
       }
       Value v;
 
-      if (s.kind == "assign")
+      if (s.kind == "assign") {
         v = expression(*s.expr);
+        requireWhole(address);
+      }
       else {
         auto old = fresh();
         emit(old + " = load " + irType(address.type) + ", ptr " +
@@ -1276,7 +1896,7 @@ class Generator {
         v = binary(s.kind.substr(0, s.kind.size() - 1),
                    {address.type, old}, operand);
       }
-      releaseBinding(address);
+      releaseBinding(address, !initializer);
       emit("store " + irType(v.type) + " " + v.value + ", ptr " +
            address.value);
     } else
@@ -1289,6 +1909,11 @@ public:
             const std::string &name)
       : functions(symbols), analysis(analysis), symbolPrefix(name) {}
   FunctionIR generate(const Function &f) {
+    initializer = f.generated;
+    if (f.method) {
+      selfRecord = f.params.front().type.record;
+      dispatching = !f.generated && dispatched(f.name.text, true);
+    }
     scopes.emplace_back();
     if (f.method && !f.generated) {
       const auto &self = f.params.front().type;
@@ -1308,8 +1933,19 @@ public:
       auto arg = "%arg" + std::to_string(i);
       output << (parameter.reference ? "ptr" : irType(parameter.type)) << " "
              << arg;
-      if (parameter.reference)
-        bind(parameter.name, {parameter.type, arg});
+      std::string vt;
+      if (i == 0 && f.method) {
+        if (dispatching) output << ", ptr %vt";
+        vt = selfTable();
+      } else if (carriesTable(parameter)) {
+        vt = "%vt" + std::to_string(i);
+        output << ", ptr " << vt;
+      }
+      if (parameter.reference) {
+        Binding binding{parameter.type, arg};
+        binding.table = vt;
+        bind(parameter.name, binding);
+      }
       else {
         retain({parameter.type, arg});
         declare(parameter.name, {parameter.type, arg});
@@ -1322,7 +1958,8 @@ public:
     }
     output << ") {\nentry:\n" << allocations.str() << code.str() << "}\n\n" << thunks.str();
     return {globals.str(), output.str(), usesTextRuntime, usesHeapRuntime, usesTaskRuntime,
-            usesCalendarRuntime, usesWideRuntime, usesBigRuntime, usesDecimalRuntime};
+            usesCalendarRuntime, usesWideRuntime, usesBigRuntime, usesDecimalRuntime, usesCollectionRuntime,
+            cleanups, destroys, tables};
   }
 };
 } // namespace
@@ -1396,6 +2033,114 @@ std::string emitEnums(const Symbols &symbols) {
   }
   return ir.str();
 }
+namespace {
+// Releases each managed value inside `value`, a loaded record of `record`.
+void releaseFields(const Symbols &symbols, const std::string &record, const std::string &value,
+                   int &next, std::string &ir) {
+  Type type = Type::Record;
+  type.record = record;
+  const auto &fields = symbols.records.at(record).fields;
+  for (size_t i = 0; i < fields.size(); ++i) {
+    if (!symbols.managed(fields[i].type)) continue;
+    const auto part = "%v" + std::to_string(next++);
+    ir += "  " + part + " = extractvalue " + irType(type) + " " + value + ", " + std::to_string(i) + "\n";
+    if (recordValue(fields[i].type)) releaseFields(symbols, fields[i].type.record, part, next, ir);
+    else ir += "  call void @duck.text.release(ptr " + part + ")\n";
+  }
+}
+} // namespace
+std::string emitCleanups(const Symbols &symbols, const std::set<std::string> &containers) {
+  std::string ir;
+  for (const auto &record : containers) {
+    ir += "define internal void @duck$cleanup." + record + "(ptr %payload) {\nentry:\n";
+    if (symbols.destructible(record)) ir += "  call void @duck$destroy." + record + "(ptr %payload)\n";
+    if (!symbols.managedRecord(record)) {
+      ir += "  ret void\n}\n";
+      continue;
+    }
+    ir += "  %value = load %struct." + record + ", ptr %payload\n";
+    int next = 0;
+    releaseFields(symbols, record, "%value", next, ir);
+    ir += "  ret void\n}\n";
+  }
+  return ir;
+}
+std::string emitDestroys(const Symbols &symbols, std::set<std::string> containers) {
+  std::string ir;
+  std::set<std::string> emitted;
+  while (!containers.empty()) {
+    const auto record = *containers.begin();
+    containers.erase(containers.begin());
+    if (!emitted.insert(record).second) continue;
+    ir += "define internal void @duck$destroy." + record + "(ptr %self) {\nentry:\n";
+    if (symbols.count(destructorKey(record)))
+      ir += "  call void @duck." + destructorKey(record) + "(ptr %self)\n";
+    const auto &fields = symbols.records.at(record).fields;
+    for (size_t i = fields.size(); i-- > 0;) {
+      const auto &field = fields[i];
+      if (dynamicArray(field.type)) {
+        const auto part = "%field" + std::to_string(i), held = "%held" + std::to_string(i);
+        const auto &element = *field.type.element;
+        const std::string cleanup = managedValue(element) ? "@duck$slot.release"
+                                    : recordValue(element) && symbols.needsCleanup(element)
+                                        ? "@duck$cleanup." + element.record
+                                        : "null";
+        ir += "  " + part + " = getelementptr %struct." + record + ", ptr %self, i32 0, i32 " +
+              std::to_string(i) + "\n  " + held + " = load ptr, ptr " + part + "\n  call void @duck.seq$free(ptr " +
+              held + ", ptr " + cleanup + ")\n  store ptr null, ptr " + part + "\n";
+        continue;
+      }
+      if (collectionValue(field.type)) {
+        const auto part = "%field" + std::to_string(i), held = "%held" + std::to_string(i);
+        auto release = [](const Type &t) { return managedValue(t) ? "@duck$slot.release" : "null"; };
+        ir += "  " + part + " = getelementptr %struct." + record + ", ptr %self, i32 0, i32 " +
+              std::to_string(i) + "\n  " + held + " = load ptr, ptr " + part + "\n";
+        if (field.type.base == Type::Pair)
+          ir += "  call void @duck.pair$free(ptr " + held + ", ptr " + release(*field.type.key) + ", ptr " +
+                release(*field.type.element) + ")\n";
+        else
+          ir += "  call void @duck.seq$free(ptr " + held + ", ptr " + release(*field.type.element) + ")\n";
+        ir += "  store ptr null, ptr " + part + "\n";
+        continue;
+      }
+      if (!recordValue(field.type) || !symbols.destructible(field.type.record)) continue;
+      const auto part = "%field" + std::to_string(i);
+      ir += "  " + part + " = getelementptr %struct." + record + ", ptr %self, i32 0, i32 " +
+            std::to_string(i) + "\n";
+      ir += "  call void @duck$destroy." + field.type.record + "(ptr " + part + ")\n";
+      containers.insert(field.type.record);
+    }
+    ir += "  ret void\n}\n";
+  }
+  return ir;
+}
+std::string emitTables(const Symbols &symbols, std::set<DispatchTable> tables) {
+  std::string ir;
+  std::set<DispatchTable> emitted;
+  while (!tables.empty()) {
+    const auto table = *tables.begin();
+    tables.erase(tables.begin());
+    if (!emitted.insert(table).second) continue;
+    const auto &[record, path] = table;
+    const auto seen = symbols.recordAt(record, path);
+    ir += tableSymbol(table) + " = internal constant " + tableType(symbols, seen) + " { i64 " +
+          pathOffset(record, path) + ", i64 " + std::to_string(path.size());
+    for (size_t i = 0; i < symbols.records.at(seen).parents.size(); ++i) {
+      auto parent = path;
+      parent.push_back(i);
+      ir += ", ptr " + tableSymbol({record, parent});
+      tables.insert({record, parent});
+    }
+    for (const auto &name : symbols.dispatchNames(seen)) {
+      const auto [key, receiver] = symbols.overrider(record, path, name);
+      ir += ", ptr @duck." + key + ", i64 " + pathOffset(record, receiver) + ", ptr " +
+            tableSymbol({record, receiver});
+      tables.insert({record, receiver});
+    }
+    ir += " }\n";
+  }
+  return ir;
+}
 std::string emitStatics(const Symbols &symbols) {
   std::string ir;
   for (const auto &[name, info] : symbols.statics) {
@@ -1458,6 +2203,10 @@ std::string emitDeclarations(const Symbols &symbols) {
         declarations += ", ";
       const auto &p = signature.parameters[i];
       declarations += p.reference ? "ptr" : irType(p.type);
+      if (i == 0 && signature.method) {
+        if (dispatched(item.first, true)) declarations += ", ptr";
+      } else if (signature.nativeSymbol.empty() && carriesTable(p))
+        declarations += ", ptr";
     }
     declarations += ")\n";
   }

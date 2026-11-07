@@ -7,6 +7,11 @@ class Parser {
   std::vector<Token> tokens;
   size_t pos = 0;
   const std::set<std::string> &containerNames;
+  // The qualified container whose declarations or member bodies are being
+  // parsed, such as "Name.Space", or empty at file scope.
+  std::string scope;
+  // The using directives visible here, outermost scope first.
+  Usings usings = std::make_shared<const std::vector<Using>>();
   bool returnsOwner = false;
   const Token &peek() const { return tokens[pos]; }
   bool at(const std::string &s) const {
@@ -38,12 +43,74 @@ class Parser {
         t.text == "return" || t.text == "if" || t.text == "else" ||
         t.text == "while" || t.text == "for" || t.text == "break" ||
         t.text == "continue" || t.text == "do" || t.text == "extern" ||
-        t.text == "null")
+        t.text == "null" || t.text == "using")
       fail(t, "reserved keyword cannot be an identifier");
     return pop();
   }
-  bool namedType() const {
-    return !peek().string && containerNames.count(peek().text);
+  // The tokens a container or enum type path at `at` spans, or 0. A path
+  // such as `Space` or `Name.Space` resolves like a relative function name:
+  // from the innermost enclosing container outward, then at file scope,
+  // longest path first. `qualified` receives the type's full name.
+  size_t typePath(size_t at, std::string *qualified = nullptr) const {
+    std::vector<std::string> paths;
+    for (size_t k = at;; k += 2) {
+      const auto &t = tokens[k];
+      if (t.string || t.text.empty() ||
+          !(std::isalpha(static_cast<unsigned char>(t.text[0])) || t.text[0] == '_'))
+        break;
+      paths.push_back(paths.empty() ? t.text : paths.back() + "." + t.text);
+      if (tokens[k + 1].string || tokens[k + 1].text != ".") break;
+    }
+    for (auto enclosing = scope; !paths.empty();) {
+      for (size_t n = paths.size(); n-- > 0;) {
+        const auto name = enclosing.empty() ? paths[n] : enclosing + "." + paths[n];
+        if (containerNames.count(name)) {
+          if (qualified) *qualified = name;
+          return 2 * n + 1;
+        }
+      }
+      // Then the containers this scope imports. Two imports providing the
+      // path make it ambiguous.
+      std::string found, via;
+      size_t length = 0;
+      for (const auto &directive : *usings) {
+        if (directive.level != enclosing) continue;
+        for (size_t n = paths.size(); n-- > 0;) {
+          const auto name = directive.target + "." + paths[n];
+          if (!containerNames.count(name)) continue;
+          if (!found.empty() && found != name)
+            fail(tokens[at], "'" + paths[n] + "' is ambiguous between '" + found + "' (using " +
+                                 via + ") and '" + name + "' (using " + directive.target + ")");
+          found = name;
+          via = directive.target;
+          length = 2 * n + 1;
+          break;
+        }
+      }
+      if (!found.empty()) {
+        if (qualified) *qualified = found;
+        return length;
+      }
+      if (enclosing.empty()) break;
+      const auto dot = enclosing.rfind('.');
+      enclosing = dot == std::string::npos ? "" : enclosing.substr(0, dot);
+    }
+    return 0;
+  }
+  bool namedType() const { return typePath(pos) != 0; }
+  // `Space s` where Space is only a nested type outside this scope: name the
+  // qualified path instead of reporting a generic syntax error.
+  void unreachableNestedType() const {
+    const auto &t = peek(), &next = tokens.at(pos + 1);
+    auto word = [](const Token &w) {
+      return !w.string && !w.text.empty() &&
+             (std::isalpha(static_cast<unsigned char>(w.text[0])) || w.text[0] == '_');
+    };
+    if (!word(t) || !word(next)) return;
+    for (const auto &name : containerNames)
+      if (name[0] != '#' && name.size() > t.text.size() &&
+          name.compare(name.size() - t.text.size() - 1, std::string::npos, "." + t.text) == 0)
+        fail(t, "unknown type '" + t.text + "'; did you mean '" + name + "'?");
   }
   // int.Max, i3.Min, double.Max: a built-in type followed by a member.
   bool typeMember() const {
@@ -51,10 +118,26 @@ class Parser {
     return isType() && !next.string && next.text == ".";
   }
   bool declarationType() const {
-    if (!namedType()) return isType() && !typeMember();
-    const auto &next = tokens.at(pos + 1);
-    return !next.string && (next.text == "*" || next.text == "&" ||
+    const auto length = typePath(pos);
+    if (!length) return isType() && !typeMember();
+    const auto &next = tokens.at(pos + length);
+    return !next.string && (next.text == "*" || next.text == "&" || arraySuffix(pos + length) ||
            std::isalpha(static_cast<unsigned char>(next.text[0])) || next.text[0] == '_');
+  }
+  // `[]` or `[N]` after an element type, followed by a name or `&`.
+  bool arraySuffix(size_t at) const {
+    auto punct = [&](size_t k, const char *text) {
+      return k < tokens.size() && !tokens[k].string && tokens[k].text == text;
+    };
+    if (!punct(at, "[")) return false;
+    size_t close = at + 1;
+    if (close < tokens.size() && !tokens[close].string && std::isdigit(static_cast<unsigned char>(tokens[close].text[0])))
+      ++close;
+    if (!punct(close, "]") || close + 1 >= tokens.size()) return false;
+    const auto &next = tokens[close + 1];
+    // A following `[` is a further dimension, reported once the type is read.
+    return !next.string && (next.text == "&" || next.text == "[" ||
+                            std::isalpha(static_cast<unsigned char>(next.text[0])) || next.text[0] == '_');
   }
   // iN and uN name an N-byte integer. Every i/u + digits word is reserved so
   // that out-of-range widths get a precise diagnostic.
@@ -81,6 +164,52 @@ class Parser {
            !next.string && next.text == "(";
   }
   Type type() {
+    Type t = plainType();
+    // `T [N]` is a fixed array of N elements and `T []` a dynamic array.
+    if (arraySuffix(pos)) {
+      pop();
+      unsigned long long extent = 0;
+      if (!at("]")) {
+        const auto count = pop();
+        if (integerLiteralBase(count.text) != 10 || count.text.find_first_not_of("0123456789") != std::string::npos)
+          fail(count, "a fixed array's length must be a decimal integer literal");
+        try {
+          extent = std::stoull(count.text);
+        } catch (const std::exception &) {
+          fail(count, "fixed array length is too large");
+        }
+        if (extent == 0) fail(count, "a fixed array needs at least one element; use T [] for a dynamic array");
+      }
+      expect("]");
+      if (arraySuffix(pos) || collectionWord())
+        fail(peek(), "arrays of arrays or collections are not supported yet; multidimensional arrays are a later item");
+      return Type::array(t, extent);
+    }
+    // `K, V pair` names a pair keyed by K.
+    if (at(",")) {
+      const auto saved = pos;
+      pop();
+      if (declarationType() || isType()) {
+        const auto value = plainType();
+        if (collectionWord() && peek().text == "pair") {
+          pop();
+          return Type::collection(Type::Pair, value, t);
+        }
+      }
+      pos = saved;
+    }
+    if ((at("queue") || at("stack") || at("pair")) && arraySuffix(pos + 1))
+      fail(peek(), "arrays of collections are not supported yet");
+    // `T queue`, `T stack`, and `T pair` (keyed by name).
+    if (collectionWord()) {
+      const auto word = pop().text;
+      if (word == "queue") return Type::collection(Type::Queue, t);
+      if (word == "stack") return Type::collection(Type::Stack, t);
+      return Type::collection(Type::Pair, t, Type::Name);
+    }
+    return t;
+  }
+  Type plainType() {
     Type t = baseType();
     while (accept("*")) t = t.pointerTo();
     if (t.depth && (t.base == Type::String || t.base == Type::Name ||
@@ -88,10 +217,21 @@ class Parser {
       fail(peek(), "pointers to managed text or big integers are unsupported");
     return t;
   }
+  // `queue`, `stack`, or `pair` after an element type, followed by the
+  // declared name or a reference marker; elsewhere they are ordinary names.
+  bool collectionWord() const {
+    if (!at("queue") && !at("stack") && !at("pair")) return false;
+    const auto &next = tokens.at(pos + 1);
+    return !next.string && (next.text == "&" || std::isalpha(static_cast<unsigned char>(next.text[0])) ||
+                            next.text[0] == '_');
+  }
   Type baseType() {
-    if (namedType()) {
-      Type t = containerNames.count("#@" + peek().text) ? Type::Enum : Type::Record;
-      t.record = identifier().text;
+    std::string qualified;
+    if (const auto length = typePath(pos, &qualified)) {
+      Type t = containerNames.count("#@" + qualified) ? Type::Enum : Type::Record;
+      t.record = qualified;
+      identifier();
+      for (size_t k = 1; k < length; ++k) pop();
       return t;
     }
     if (byteWidthType()) {
@@ -173,7 +313,7 @@ class Parser {
     } else if (accept("(")) {
       lines();
       if ((isType() && !constructorType() && !typeMember()) ||
-          (namedType() && tokens[pos + 1].text == "*")) {
+          (namedType() && tokens[pos + typePath(pos)].text == "*")) {
         e->kind = "cast";
         e->castType = type();
         lines();
@@ -237,7 +377,20 @@ class Parser {
       e->kind = "name";
     }
     std::string path = e->kind == "name" ? e->token.text : "";
-    while (at(".") || at("(")) {
+    while (at(".") || at("(") || at("[")) {
+      if (at("[")) {
+        auto index = std::make_unique<Expr>();
+        index->kind = "index";
+        index->token = pop();
+        index->args.push_back(std::move(e));
+        lines();
+        index->args.push_back(expression());
+        lines();
+        expect("]");
+        e = std::move(index);
+        path.clear();
+        continue;
+      }
       if (accept(".")) {
         auto member = std::make_unique<Expr>();
         member->kind = ".";
@@ -379,6 +532,19 @@ class Parser {
     body.push_back(statement());
     return body;
   }
+  // The arguments of a call after its '(' has been read, through ')'.
+  std::vector<std::unique_ptr<Expr>> callArguments() {
+    std::vector<std::unique_ptr<Expr>> arguments;
+    lines();
+    if (!at(")"))
+      do {
+        lines();
+        arguments.push_back(expression());
+        lines();
+      } while (accept(","));
+    expect(")");
+    return arguments;
+  }
   std::unique_ptr<Stmt> simpleStatement() {
     auto s = std::make_unique<Stmt>();
     s->token = peek();
@@ -392,11 +558,29 @@ class Parser {
         fail(s->token, "variable cannot have void type");
       s->name = identifier().text;
       if (accept("(")) {
-        expect(")");
-        if (recordValue(s->type)) return s;
+        // `Gun g(5)` and `Gun* p(5)` construct with arguments, like `Gun(5)`.
+        auto arguments = callArguments();
+        auto construction = [&](const Type &record) {
+          auto call = std::make_unique<Expr>();
+          call->kind = "call";
+          call->token = s->token;
+          call->token.text = record.record;
+          call->castType = record; // Already resolved; names the constructed type.
+          call->args = std::move(arguments);
+          return call;
+        };
+        if (recordValue(s->type)) {
+          if (!arguments.empty()) s->expr = construction(s->type);
+          return s;
+        }
         if (s->type.depth != 1 || !heapValue(s->type.pointee()))
           fail(s->token, "heap construction requires a typed pointer");
         s->kind = "own";
+        if (!arguments.empty()) {
+          if (!recordValue(s->type.pointee()))
+            fail(s->token, "heap construction arguments require a container type");
+          s->expr = construction(s->type.pointee());
+        }
       } else if (s->constant) {
         if (!accept("="))
           fail(peek(), "constant '" + s->name + "' requires an initializer, as in #int age = 5");
@@ -404,6 +588,7 @@ class Parser {
       } else if (accept("="))
         s->expr = expression();
     } else {
+      unreachableNestedType();
       auto target = expression();
       if (at(":") || at("::")) {
         if (target->kind != "name") fail(target->token, "expected local name");
@@ -417,6 +602,15 @@ class Parser {
         s->kind = op == "=" ? "assign" : op;
         s->target = std::move(target);
         if (op != "++" && op != "--") s->expr = expression();
+        // `p += key : value` adds an entry to a pair.
+        if (op == "+=" && at(":")) {
+          auto entry = std::make_unique<Expr>();
+          entry->kind = "entry";
+          entry->token = pop();
+          entry->args.push_back(std::move(s->expr));
+          entry->args.push_back(expression());
+          s->expr = std::move(entry);
+        }
       } else {
         s->kind = "expr";
         s->expr = std::move(target);
@@ -428,6 +622,7 @@ class Parser {
   Function function(Token name, Type result, bool external, const std::string &nativeName,
                     const std::string &receiver = "") {
     Function f{std::move(name), result, {}, {}, !receiver.empty(), {}};
+    f.usings = usings;
     if (f.method) {
       Type self = Type::Record;
       self.record = receiver;
@@ -488,19 +683,53 @@ class Parser {
     return sign.text == "-";
   }
   // One instance body. Members accumulate across the chain's instance bodies.
-  void containerBody(Program &program, Record &record, std::set<std::string> &members) {
+  // `bare` is the container's own name; the record carries its qualified one.
+  void containerBody(Program &program, Record &record, std::set<std::string> &members,
+                     const std::string &bare) {
     const auto &tag = record.name;
+    const auto enclosing = scope;
+    scope = tag.text;
     expect("{");
     lines();
     while (!accept("}")) {
+      const auto modifier = peek();
       const bool isProtected = accessModifier();
+      // ~Name() declares the container's destructor.
+      if (at("~")) {
+        const auto tilde = pop();
+        auto name = identifier();
+        if (name.text != bare || tilde.line != name.line || tilde.column + 1 != name.column)
+          fail(tilde, "a destructor is written ~" + bare + "()");
+        if (isProtected) fail(modifier, "a destructor cannot be protected");
+        if (!members.insert("~").second) fail(name, "container '" + tag.text + "' already declares a destructor");
+        name.text = destructorKey(tag.text);
+        program.push_back(function(std::move(name), Type::Void, false, "", tag.text));
+        if (program.back().params.size() != 1) fail(tilde, "a destructor takes no parameters");
+        if (!at("}") && !at("\n")) fail(peek(), "expected member terminator");
+        lines();
+        continue;
+      }
       bool typed = declarationType();
       Type t = typed ? type() : Type(Type::Void);
       auto name = identifier();
+      // Name(...) declares a constructor, keyed by its parameter types;
+      // -Name(...) declares a partial constructor.
+      if (name.text == bare && at("(")) {
+        if (typed) fail(name, "a constructor has no result type");
+        auto constructor = function(name, Type::Void, false, "", tag.text);
+        const std::vector<Parameter> params(constructor.params.begin() + 1, constructor.params.end());
+        constructor.name.text = constructorKey(tag.text, params, isProtected);
+        if (!members.insert(constructor.name.text).second)
+          fail(name, "container '" + tag.text + "' already declares a " +
+                         (isProtected ? "partial " : "") + "constructor with these parameter types");
+        program.push_back(std::move(constructor));
+        if (!at("}") && !at("\n")) fail(peek(), "expected member terminator");
+        lines();
+        continue;
+      }
       if (!members.insert(name.text).second) fail(name, "duplicate container member");
       if (name.text == "this") fail(name, "this is reserved for the receiver");
       if (at("(")) {
-        if (name.text == tag.text) fail(name, "custom constructors are not implemented");
         name.text = methodKey(tag.text, name.text);
         program.push_back(function(std::move(name), t, false, "", tag.text));
         program.back().protectedAccess = isProtected;
@@ -510,21 +739,88 @@ class Parser {
         std::shared_ptr<Expr> initializer;
         if (accept("=")) initializer = expression();
         record.fields.push_back({name, t, false, isProtected, false, std::move(initializer)});
+        record.fields.back().usings = usings;
       }
       if (!at("}") && !at("\n")) fail(peek(), "expected member terminator");
       lines();
     }
+    scope = enclosing;
   }
   // `#{` starts a static body.
   bool staticBody() const {
     return at("#") && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == "{";
+  }
+  // `@{` starts a getter block and `={` a setter block.
+  bool accessorBody() const {
+    return (at("@") || at("=")) && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == "{";
+  }
+  // A getter block, `@{ Age: Years }`, or a setter block, `={ Age: Years =
+  // value }`. Each entry declares one accessor of a property: an optional
+  // type, the name, ':', and a getter expression or a setter statement, or a
+  // `{ ... }` body. A setter reads the assigned value as `value`. Accessors
+  // are instance methods named get-Name and set-Name.
+  void accessorBlock(Program &program, const std::string &record, std::set<std::string> &members) {
+    const bool getter = pop().text == "@";
+    const auto enclosing = scope;
+    scope = record;
+    expect("{");
+    lines();
+    while (!accept("}")) {
+      const bool isProtected = accessModifier();
+      const bool typed = declarationType();
+      const Type t = typed ? type() : Type(Type::Void);
+      if (typed && t == Type::Void) fail(peek(), "a property requires a value type");
+      auto name = identifier();
+      if (name.text == "this") fail(name, "this is reserved for the receiver");
+      expect(":");
+      // A `{ ... }` body may start on the next line.
+      if (const auto saved = pos; (lines(), !at("{"))) pos = saved;
+      Function f{name, getter ? t : Type(Type::Void), {}, {}, true, {}};
+      f.name.text = getter ? getterKey(record, name.text) : setterKey(record, name.text);
+      if (!members.insert(f.name.text).second)
+        fail(name, "property '" + name.text + "' already has a " + (getter ? "getter" : "setter"));
+      f.usings = usings;
+      f.protectedAccess = isProtected;
+      f.inferred = !typed;
+      Type self = Type::Record;
+      self.record = record;
+      Token receiver = name;
+      receiver.text = "this";
+      f.params.push_back({receiver, self, true});
+      if (getter) {
+        if (at("{")) {
+          if (!typed)
+            fail(peek(), "a getter with a block body needs a type, as in int " + name.text + ": { ... }");
+          f.body = block();
+        } else {
+          auto result = std::make_unique<Stmt>();
+          result->kind = "return";
+          result->token = peek();
+          result->expr = expression();
+          f.body.push_back(std::move(result));
+        }
+      } else {
+        Token value = name;
+        value.text = "value";
+        f.params.push_back({value, t, false});
+        if (at("{")) f.body = block();
+        else f.body.push_back(statement());
+      }
+      program.push_back(std::move(f));
+      if (!accept(",") && !at("}") && !at("\n")) fail(peek(), "expected newline, ',' or '}' after a property accessor");
+      lines();
+    }
+    scope = enclosing;
   }
   // A container name followed by adjacent bodies in any order: `{ ... }`
   // holds instance members and `#{ ... }` static ones. Bodies are separated
   // by at most one newline; a blank line ends the chain and is rejected.
   void containerChain(Program &program, const Token &tag, std::vector<Token> parents,
                       const std::string &prefix, bool nested) {
-    Record record{tag, {}, std::move(parents)};
+    // A container nested in a static body is named by its enclosing path.
+    Token qualified = tag;
+    qualified.text = prefix + tag.text;
+    Record record{qualified, {}, std::move(parents)};
     std::set<std::string> members;
     bool instance = false;
     for (bool first = true;; first = false) {
@@ -533,10 +829,10 @@ class Parser {
         accept("\n");
         if (at("\n")) {
           lines();
-          if (at("{") || staticBody())
+          if (at("{") || staticBody() || accessorBody())
             fail(peek(), "chained container bodies must be adjacent, without a blank line");
         }
-        if (!at("{") && !staticBody()) {
+        if (!at("{") && !staticBody() && !accessorBody()) {
           pos = saved;
           break;
         }
@@ -545,8 +841,11 @@ class Parser {
         declarations(program, prefix + tag.text + ".", true, true);
         continue;
       }
-      if (nested) fail(tag, "instance containers must be declared at file scope");
-      containerBody(program, record, members);
+      if (accessorBody()) {
+        accessorBlock(program, qualified.text, members);
+        continue;
+      }
+      containerBody(program, record, members, tag.text);
       instance = true;
     }
     if (instance) program.records.push_back(std::move(record));
@@ -604,9 +903,15 @@ class Parser {
   // With braced, reads one `{ ... }` static body; otherwise reads to <eof>.
   void declarations(Program &functions, const std::string &prefix,
                     bool nested, bool braced = false) {
+    const auto enclosing = scope;
+    const auto outer = usings;
+    scope = prefix.empty() ? "" : prefix.substr(0, prefix.size() - 1);
     if (braced) expect("{");
     lines();
+    usingDirectives();
     while (!at("<eof>") && !(nested && at("}"))) {
+      if (at("using"))
+        fail(peek(), "using directives must come before the other declarations in their scope");
       const auto modifier = peek();
       const bool modified = at("+") || at("-");
       if (modified && !nested) fail(modifier, "access modifiers apply only to container members");
@@ -625,10 +930,9 @@ class Parser {
           if (modified) fail(modifier, "access modifiers on nested containers are not supported");
           std::vector<Token> parents;
           if (accept(":")) {
-            if (nested) fail(tag, "instance containers must be declared at file scope");
             do {
               lines();
-              parents.push_back(identifier());
+              parents.push_back(parentName());
               lines();
             } while (accept(","));
           }
@@ -656,6 +960,7 @@ class Parser {
         if (result == Type::Void) fail(name, "static field cannot have void type");
         name.text = prefix + name.text;
         StaticField field{name, result, constant, isProtected, nullptr};
+        field.usings = usings;
         if (accept("="))
           field.initializer = expression();
         else if (constant)
@@ -686,6 +991,53 @@ class Parser {
       lines();
     }
     if (braced) expect("}");
+    scope = enclosing;
+    usings = outer;
+  }
+  // `using Name.Space` lines at the top of a file or static body. The target
+  // resolves like a type path, from the innermost container outward.
+  void usingDirectives() {
+    if (!at("using")) return;
+    auto visible = *usings;
+    while (at("using")) {
+      const auto keyword = pop();
+      auto start = peek();
+      std::string path = identifier().text;
+      while (accept(".")) path += "." + identifier().text;
+      start.text = path;
+      std::string target;
+      for (auto enclosing = scope;;) {
+        const auto candidate = enclosing.empty() ? path : enclosing + "." + path;
+        if (containerNames.count("#{" + candidate) || containerNames.count(candidate)) {
+          target = candidate;
+          break;
+        }
+        if (enclosing.empty()) break;
+        const auto dot = enclosing.rfind('.');
+        enclosing = dot == std::string::npos ? "" : enclosing.substr(0, dot);
+      }
+      if (target.empty()) fail(start, "unknown container '" + path + "' in using directive");
+      for (const auto &directive : visible)
+        if (directive.level == scope && directive.target == target)
+          fail(start, "duplicate using directive for '" + target + "'");
+      visible.push_back({start, scope, target});
+      (void)keyword;
+      if (!at("\n") && !at("<eof>") && !at("}")) fail(peek(), "expected newline after using directive");
+      lines();
+    }
+    usings = std::make_shared<const std::vector<Using>>(std::move(visible));
+  }
+  // A parent in a parent list, resolved like any type path. An unknown name
+  // is kept as written for the inheritance check to report.
+  Token parentName() {
+    std::string qualified;
+    const auto length = typePath(pos, &qualified);
+    auto token = identifier();
+    if (length) {
+      for (size_t k = 1; k < length; ++k) pop();
+      token.text = qualified;
+    }
+    return token;
   }
 
 public:
@@ -703,65 +1055,86 @@ Program parse(std::vector<Token> tokens) {
   collectContainerNames(tokens, names);
   return parse(std::move(tokens), names);
 }
-void collectContainerNames(const std::vector<Token> &tokens, std::set<std::string> &names) {
-  int depth = 0;
-  for (size_t i = 0; i < tokens.size(); ++i) {
+namespace {
+bool punctuation(const std::vector<Token> &tokens, size_t k, const char *text) {
+  return k < tokens.size() && !tokens[k].string && tokens[k].text == text;
+}
+// The '}' matching the '{' at open, or the end of the tokens.
+size_t closingBrace(const std::vector<Token> &tokens, size_t open) {
+  int nesting = 0;
+  for (size_t k = open; k < tokens.size(); ++k) {
+    if (tokens[k].string) continue;
+    if (tokens[k].text == "{") ++nesting;
+    else if (tokens[k].text == "}" && --nesting == 0) return k;
+  }
+  return tokens.size();
+}
+// Collects the type names declared in [begin, end), one declaration level,
+// qualified by prefix. Static bodies are scanned with the container's name
+// appended to the prefix, so `Name #{ Space { } }` registers Name.Space.
+void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
+                  const std::string &prefix, std::set<std::string> &names) {
+  for (size_t i = begin; i < end; ++i) {
     const auto &t = tokens[i];
     if (t.string) continue;
-    if (t.text == "{") ++depth;
-    else if (t.text == "}") --depth;
-    else if (depth == 0 && (std::isalpha(static_cast<unsigned char>(t.text[0])) || t.text[0] == '_')) {
-      size_t next = i + 1;
-      while (next < tokens.size() && tokens[next].text == "\n" && !tokens[next].string) ++next;
-      if (next >= tokens.size() || tokens[next].string) continue;
-      const auto &after = tokens[next].text;
-      // A chain of `#{...}` bodies names a type once it reaches a `{...}` body.
-      auto body = [&](size_t k) {
-        if (k >= tokens.size() || tokens[k].string) return std::string::npos;
-        if (tokens[k].text == "{") return k;
-        if (tokens[k].text == "#" && k + 1 < tokens.size() && !tokens[k + 1].string &&
-            tokens[k + 1].text == "{")
-          return k + 1;
-        return std::string::npos;
-      };
-      bool chainedInstance = false;
-      for (size_t k = next, open; !chainedInstance && (open = body(k)) != std::string::npos;) {
-        if (open == k) {
-          chainedInstance = true;
-          break;
-        }
-        int nesting = 0;
-        size_t close = open;
-        for (; close < tokens.size(); ++close) {
-          if (tokens[close].string) continue;
-          if (tokens[close].text == "{") ++nesting;
-          else if (tokens[close].text == "}" && --nesting == 0) break;
-        }
-        k = close + 1;
-        if (k < tokens.size() && !tokens[k].string && tokens[k].text == "\n") ++k;
-      }
-      if (chainedInstance)
-        names.insert(t.text);
-      // ':' after a file-scope name starts an enum's underlying type or a
-      // container's parent list; an enum extension may omit it. A parent list
-      // reaches '{' before any '#'. Skip the list or type so its words are
-      // never taken as declared names.
-      else if (after == ":" || (after == "#" && next + 1 < tokens.size() &&
-                                !tokens[next + 1].string && tokens[next + 1].text == "@")) {
-        size_t end = next;
-        while (end < tokens.size() && (tokens[end].string || (tokens[end].text != "#" &&
-               tokens[end].text != "{" && tokens[end].text != "<eof>")))
-          ++end;
-        names.insert(t.text);
-        const bool parents = after == ":" && end < tokens.size() &&
-            (tokens[end].text == "{" || (tokens[end].text == "#" && end + 1 < tokens.size() &&
-                                         !tokens[end + 1].string && tokens[end + 1].text == "{"));
-        if (!parents)
-          names.insert("#@" + t.text);
-        i = end - 1;
-      }
+    // Function bodies and other blocks declare no types.
+    if (t.text == "{") {
+      i = closingBrace(tokens, i);
+      continue;
     }
+    if (!(std::isalpha(static_cast<unsigned char>(t.text[0])) || t.text[0] == '_')) continue;
+    size_t next = i + 1;
+    while (punctuation(tokens, next, "\n")) ++next;
+    if (next >= end) continue;
+    size_t chain = next;
+    // ':' after a name starts an enum's underlying type or a container's
+    // parent list; an enum extension may omit it. A parent list reaches '{'
+    // or '#{' before any other '#'. Skip the list or type so its words are
+    // never taken as declared names.
+    if (punctuation(tokens, next, ":") ||
+        (punctuation(tokens, next, "#") && punctuation(tokens, next + 1, "@"))) {
+      size_t stop = next;
+      while (stop < end && (tokens[stop].string || (tokens[stop].text != "#" && tokens[stop].text != "{")))
+        ++stop;
+      const bool parents = punctuation(tokens, next, ":") && stop < end &&
+                           (punctuation(tokens, stop, "{") ||
+                            (punctuation(tokens, stop, "#") && punctuation(tokens, stop + 1, "{")));
+      if (!parents) {
+        names.insert(prefix + t.text);
+        names.insert("#@" + prefix + t.text);
+        i = stop - 1;
+        continue;
+      }
+      chain = stop;
+    }
+    // A chain of `{...}` and `#{...}` bodies; any instance body names a type.
+    bool instance = false;
+    size_t last = std::string::npos;
+    for (size_t k = chain;;) {
+      size_t open;
+      if (punctuation(tokens, k, "{")) open = k;
+      else if (punctuation(tokens, k, "#") && punctuation(tokens, k + 1, "{")) open = k + 1;
+      else break;
+      const size_t close = closingBrace(tokens, open);
+      if (open == k) instance = true;
+      else {
+        names.insert("#{" + prefix + t.text);
+        collectScope(tokens, open + 1, close, prefix + t.text + ".", names);
+      }
+      last = close;
+      k = close + 1;
+      if (punctuation(tokens, k, "\n")) ++k;
+    }
+    if (last == std::string::npos) continue;
+    // A parent list also names a type, so the parser can report a chain
+    // that lacks the instance body the list requires.
+    if (instance || chain != next) names.insert(prefix + t.text);
+    i = last;
   }
+}
+} // namespace
+void collectContainerNames(const std::vector<Token> &tokens, std::set<std::string> &names) {
+  collectScope(tokens, 0, tokens.size(), "", names);
 }
 Program parse(std::vector<Token> tokens, const std::set<std::string> &names) {
   return Parser(std::move(tokens), names).parse();

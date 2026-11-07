@@ -1,5 +1,6 @@
 #pragma once
 #include "Syntax.h"
+#include <cctype>
 #include <map>
 #include <set>
 
@@ -7,8 +8,9 @@ namespace duck {
 // Stage artifacts belong to the caller. No stage uses global mutable state.
 std::vector<Token> lex(const std::string &source,
                        const std::string &sourceName = "");
-// Collects file-scope type names across all units. An enum name is recorded
-// both as Name and as #@Name so the parser can tell enums from containers.
+// Collects type names across all units, qualified by the static bodies that
+// enclose them (`Name.Space`). An enum name is recorded both as Name and as
+// #@Name so the parser can tell enums from containers.
 void collectContainerNames(const std::vector<Token> &tokens, std::set<std::string> &names);
 Program parse(std::vector<Token> tokens);
 Program parse(std::vector<Token> tokens, const std::set<std::string> &names);
@@ -16,6 +18,76 @@ Program parse(std::vector<Token> tokens, const std::set<std::string> &names);
 // collection.
 Program combineUnits(std::vector<Program> units);
 
+std::string typeName(Type type);
+// A constructor is an instance method keyed by its parameter types, as in
+// `Gun.$$new$int` for Gun(int ammo) and `Gun.$$new` for Gun(); a partial
+// constructor, `-Entity(World w)`, is `Entity.$$part$World`; the destructor
+// is `Gun.$$destroy`. Source identifiers cannot contain '$', so these never
+// collide with user members. Type names are escaped so the key has no '.'.
+inline std::string constructorKey(const std::string &record, const std::vector<Parameter> &params,
+                                  bool partial = false) {
+  std::string member = partial ? "$part" : "$new";
+  for (const auto &p : params) {
+    member += '$';
+    for (unsigned char c : typeName(p.type)) {
+      if (std::isalnum(c)) member += char(c);
+      else if (c == '_') member += "__";
+      else if (c == '.') member += "_d";
+      else if (c == '*') member += "_p";
+      else member += "_x" + std::to_string(int(c));
+    }
+    if (p.reference) member += "_r";
+  }
+  return methodKey(record, member);
+}
+inline std::string destructorKey(const std::string &record) { return methodKey(record, "$destroy"); }
+// An instance method written in source, as opposed to a constructor,
+// destructor, or generated initializer. It can be overridden, and it takes
+// its receiver's dispatch table as a hidden parameter after the receiver.
+inline bool dispatched(const std::string &key, bool method) {
+  return method && memberName(key).find('$') == std::string::npos;
+}
+// A reference parameter of container type, outside native functions, takes
+// the dispatch table of the object it refers to as a hidden parameter after
+// it, so calls through it reach the object's overrides.
+inline bool carriesTable(const Parameter &parameter) {
+  return parameter.reference && recordValue(parameter.type);
+}
+// A dispatch table describes one object of dynamic type `record` as seen
+// through the parent state at `path` (empty for the object itself). Its
+// layout, for the container B at path, is:
+//   i64 the byte offset of path within record,
+//   i64 the length of path, zero only for the whole object,
+//   ptr the table for each of B's parents, in order,
+//   then, for each name of dispatchNames(B): ptr the final overrider,
+//   i64 the byte offset of the overrider's receiver within record, and
+//   ptr the overrider's own table.
+using DispatchTable = std::pair<std::string, std::vector<size_t>>;
+// One construction part of a container: the partial or regular
+// constructors of the container or of a parent embedded at `path`. Any one
+// overload completes the part; `automatic` is the zero-argument overload,
+// which runs when no other is chosen, or empty.
+struct ConstructionPart {
+  std::vector<size_t> path;
+  std::string record;
+  bool partial = false;
+  std::vector<std::string> overloads;
+  std::string automatic;
+  std::string id() const {
+    std::string text;
+    for (auto index : path) text += std::to_string(index) + ".";
+    return text + (partial ? "partial" : "regular");
+  }
+  // How diagnostics name the part, such as -Entity(...) or Gun(...).
+  std::string text() const { return (partial ? "-" : "") + record + "(...)"; }
+};
+// One constructor run during a construction or completion: the overload,
+// the parent path it applies to, and the call arguments it takes.
+struct PartCall {
+  std::vector<size_t> path;
+  std::string key;
+  size_t first = 0, count = 0;
+};
 struct Signature {
   Type result;
   std::vector<Parameter> parameters;
@@ -24,7 +96,21 @@ struct Signature {
   std::set<size_t> nonescapingParameters;
   bool method = false;
   bool protectedAccess = false;
+  bool inferred = false; // An accessor whose property type is not known yet.
 };
+// Property accessors are instance methods named get-Name and set-Name, so
+// they override, dispatch, and inherit like other methods.
+inline std::string getterKey(const std::string &record, const std::string &property) {
+  return methodKey(record, "get-" + property);
+}
+inline std::string setterKey(const std::string &record, const std::string &property) {
+  return methodKey(record, "set-" + property);
+}
+// The property an accessor key belongs to, or empty for other functions.
+inline std::string propertyName(const std::string &key) {
+  const auto member = memberName(key);
+  return member.rfind("get-", 0) == 0 || member.rfind("set-", 0) == 0 ? member.substr(4) : "";
+}
 // A merged enum. Values are in member order: signed decimal integers, LLVM
 // hexadecimal floating constants, or UTF-8 text, depending on the type.
 struct EnumInfo {
@@ -56,6 +142,7 @@ struct StaticInfo {
   std::string value;                 // LLVM constant, set by resolveStaticInitializers.
   size_t order = 0;                  // Declaration order within its module.
   bool runtime = false;              // Initialized by a generated $eval before Main.
+  Usings usings;                     // Visible where the field was declared.
 };
 struct Symbols : std::map<std::string, Signature> {
   std::map<std::string, Record> records;
@@ -67,6 +154,20 @@ struct Symbols : std::map<std::string, Signature> {
   const_iterator findMethod(const std::string &record, const std::string &name,
                             MemberPath &path) const;
   bool derivesFrom(const std::string &record, const std::string &ancestor) const;
+  // How many times base occurs among record's parents, transitively, and
+  // the parent-view path to its first occurrence, left to right, depth first.
+  size_t parentPath(const std::string &record, const std::string &base, std::vector<size_t> &path) const;
+  // The container whose state sits at a parent-view path within record.
+  std::string recordAt(std::string record, const std::vector<size_t> &path) const;
+  // Overridable method names visible in a container, its own and inherited,
+  // sorted: the order of its dispatch table's method slots.
+  std::vector<std::string> dispatchNames(const std::string &record) const;
+  // The method `name` runs for an object of type record seen through the
+  // parent state at path: the most derived declaration on the path, else
+  // what that parent state's own lookup finds. Returns its key and the path
+  // of its receiver within record.
+  DispatchTable overrider(const std::string &record, const std::vector<size_t> &path,
+                          const std::string &name) const;
   // Fields an instance method may name directly, inherited ones included,
   // with each name bound to its highest-priority declaration.
   std::vector<MemberPath> visibleFields(const std::string &record) const;
@@ -76,25 +177,94 @@ struct Symbols : std::map<std::string, Signature> {
   // A container whose construction evaluates defaults at run time, in its
   // own fields, nested containers, or parents.
   bool runtimeDefaults(const std::string &record) const;
+  // The container's own constructor keys, not inherited ones, regular or partial.
+  std::vector<std::string> constructors(const std::string &record, bool partial = false) const;
+  // Construction parts in run order: each parent's parts, left to right and
+  // depth first, then the container's partial part, then its regular part.
+  std::vector<ConstructionPart> parts(const std::string &record) const;
+  // The zero-argument constructor's key, or empty when there is none.
+  std::string defaultConstructor(const std::string &record) const {
+    const auto key = constructorKey(record, {});
+    return count(key) ? key : "";
+  }
+  // A container with a destructor, or with one anywhere in its layout
+  // (fields and parents). Such values are move-only and destroyed once.
+  bool destructible(const std::string &record) const;
   bool managed(const Type &type) const {
     return managedValue(type) || (recordValue(type) && managedRecord(type.record));
   }
+  // Storage that must release, destroy, or free something when it dies.
+  bool needsCleanup(const Type &type) const {
+    return managedValue(type) || collectionValue(type) || dynamicArray(type) ||
+           (fixedArray(type) && needsCleanup(*type.element)) ||
+           (recordValue(type) && (managedRecord(type.record) || destructible(type.record)));
+  }
+  // Values that cannot be copied, only moved: they own heap storage or
+  // something destroyed exactly once.
+  bool moveOnly(const Type &type) const {
+    return collectionValue(type) || dynamicArray(type) || (fixedArray(type) && needsCleanup(*type.element)) ||
+           (recordValue(type) && destructible(type.record));
+  }
+  // Values whose default is all zero bits: plain scalars, and containers
+  // without constructors, defaults, or anything to clean up.
+  bool zeroDefault(const Type &type) const;
   void validateType(const Type &type, const Token &token) const {
+    if (arrayValue(type)) {
+      const auto &element = *type.element;
+      const bool plain = !element.depth && (numeric(element) || element == Type::Bool || element == Type::Char ||
+                                            enumValue(element) || managedValue(element) ||
+                                            decimalValue(element) || calendarValue(element));
+      if (!plain && !recordValue(element))
+        fail(token, "an array cannot hold " + typeName(element) +
+                        "; elements are numbers, bool, char, enums, string, name, big, tiny, dates and times, "
+                        "and containers");
+      validateType(element, token);
+      return;
+    }
+    if (collectionValue(type)) {
+      // Elements are plain values or reference-counted text and big
+      // integers; keys must also compare by value.
+      auto element = [](const Type &t) {
+        return !t.depth && (numeric(t) || t == Type::Bool || t == Type::Char || enumValue(t) ||
+                            managedValue(t) || decimalValue(t) || calendarValue(t));
+      };
+      auto key = [](const Type &t) {
+        return !t.depth && (integral(t) || t == Type::Bool || t == Type::Char || enumValue(t) ||
+                            managedValue(t) || calendarValue(t));
+      };
+      if (!element(*type.element))
+        fail(token, "a collection cannot hold " + typeName(*type.element) +
+                        "; elements are numbers, bool, char, enums, string, name, big, tiny, and dates and times");
+      if (type.key && !key(*type.key))
+        fail(token, "a pair cannot be keyed by " + typeName(*type.key) +
+                        "; keys are integers, bool, char, enums, string, name, big, and dates and times");
+      validateType(*type.element, token);
+      if (type.key) validateType(*type.key, token);
+      return;
+    }
     if (type.base == Type::Record && !records.count(type.record))
       fail(token, "unknown container '" + type.record + "'");
     if (type.base == Type::Enum && !enums.count(type.record))
       fail(token, "unknown enum '" + type.record + "'");
   }
 };
-std::string typeName(Type type);
 // Merges fragments by name in input order, then assigns implicit values.
 std::map<std::string, EnumInfo> resolveEnums(const std::vector<EnumFragment> &fragments);
 bool borrowsOnly(const Stmt &statement, const std::string &name);
 Symbols collectSymbols(const Program &program, bool requireEntry = true);
-// Checks parent lists, rejects inheritance cycles and redeclared inherited
-// members, and embeds each parent as a leading field. Runs once all
+// Checks parent lists, rejects inheritance cycles, redeclared inherited
+// fields, and overrides whose signatures differ from an inherited method,
+// and embeds each parent as a leading field. Runs once all
 // containers, imported ones included, are known.
 void resolveInheritance(Symbols &symbols);
+// Gives each untyped property the type of its getter expression, checks
+// property names and accessor types, and updates the accessor functions in
+// both programs and every symbol table that holds them.
+void resolveProperties(Symbols &symbols, const std::vector<const Program *> &programs,
+                       const std::vector<Symbols *> &tables);
+// Checks that every override keeps its overridden methods' signatures.
+// Runs once property types are known.
+void validateOverrides(const Symbols &symbols);
 void validateLayouts(const Symbols &symbols);
 // Static storage is initialized before Main from compile-time constants
 // only, so no initialization order exists to observe. Fills each value.
@@ -111,6 +281,10 @@ inline std::string defaultKey(const std::string &record, const std::string &fiel
   return methodKey(record, "default$" + field);
 }
 void validateNativeSymbols(const Symbols &symbols);
+// Checks that every container field and parent with constructors can be
+// default-constructed, and that values with destructors are never copied
+// into by-value parameters or held in static storage.
+void validateLifetimes(const Symbols &symbols);
 
 // Expression pointers refer to the input AST, which must outlive this artifact.
 // Each function gets its own analysis, suitable for independent worker tasks.
@@ -131,6 +305,38 @@ struct FunctionAnalysis {
   std::map<const Expr *, std::string> staticFields;
   // Enum member constants such as Day.Monday: the member's index.
   std::map<const Expr *, size_t> enumMembers;
+  // Container constructions (`Gun(5)`, `Gun g(w, 5)`, `Gun()`): the parts
+  // run in order, automatic ones included. Empty without constructors.
+  std::map<const Expr *, std::vector<PartCall>> constructions;
+  // `g(w)` calls supplying the parts a local is still missing.
+  std::map<const Expr *, std::vector<PartCall>> completions;
+  // Reference arguments of a derived container passed for a parent
+  // parameter: the parent-view path to the parameter's container.
+  std::map<const Expr *, std::vector<size_t>> upcasts;
+  // Property reads (`p.Age`, or `Age` inside a method) and assignment
+  // targets: the receiver's container and the accessors used, with the
+  // parent-view path from the receiver to each accessor's declaring state.
+  struct PropertyAccess {
+    std::string owner, getter, setter;
+    std::vector<size_t> getterPath, setterPath;
+  };
+  std::map<const Expr *, PropertyAccess> properties;
+  // Collection members read through `.`: Len, Front, Top, Last, LastKey.
+  std::map<const Expr *, std::string> collectionMembers;
+  // `g(5)`, `p(5)`, and `box.Inner(5)` calling a constructor on a complete
+  // object: the new state is built first, then the old one is destroyed and
+  // the new state moves into the same storage. A field target names the
+  // receiver's record and the field's indices within it.
+  struct Reinitialization {
+    Type type;
+    std::vector<PartCall> calls;
+    std::string owner;
+    std::vector<size_t> field;
+  };
+  std::map<const Expr *, Reinitialization> reinitializations;
+  // `return local` statements that move a value with a destructor out of the
+  // function instead of destroying it.
+  std::set<const Stmt *> moves;
   // Calls resolved to a calendar built-in such as Year or AddDays.
   std::set<const Expr *> calendarCalls;
   std::map<const Stmt *, Type> localTypes;
@@ -164,6 +370,13 @@ struct FunctionIR {
   bool usesWideRuntime = false;
   bool usesBigRuntime = false;
   bool usesDecimalRuntime = false;
+  bool usesCollectionRuntime = false;
+  // Containers whose heap cleanup functions this function's owners use.
+  std::set<std::string> cleanups;
+  // Containers whose @duck$destroy.<container> routines this function calls.
+  std::set<std::string> destroys;
+  // Dispatch tables this function passes to methods.
+  std::set<DispatchTable> tables;
 };
 FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
                          const FunctionAnalysis &analysis);
@@ -173,6 +386,8 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
                            bool entry = true,
                            const std::set<std::string> &nativeSymbols = {});
 std::string textRuntimeIR();
+std::string collectionRuntimeIR();
+std::string collectionBigKeyIR();
 std::string heapRuntimeIR();
 std::string calendarRuntimeIR();
 std::string wideRuntimeIR();
@@ -184,6 +399,16 @@ std::string emitEnums(const Symbols &symbols);
 std::string emitDeclarations(const Symbols &symbols);
 // Defines this module's static storage and declares imported storage.
 std::string emitStatics(const Symbols &symbols);
+// Defines @duck$cleanup.<container>, releasing a heap payload's string, name,
+// and big fields before the heap runtime frees it.
+// A destructible payload runs @duck$destroy.<container> first.
+std::string emitCleanups(const Symbols &symbols, const std::set<std::string> &containers);
+// Defines @duck$destroy.<container> for each container and every
+// destructible container in their layouts: the user destructor, then the
+// fields in reverse layout order, so parents are destroyed last.
+std::string emitDestroys(const Symbols &symbols, std::set<std::string> containers);
+// Module-private dispatch tables, with every table they reference.
+std::string emitTables(const Symbols &symbols, std::set<DispatchTable> tables);
 
 // Sequential orchestration. Analysis finishes before lowering begins.
 // parallel = false keeps every call on the calling thread.

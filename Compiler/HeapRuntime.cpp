@@ -4,6 +4,8 @@ namespace duck {
 // Heap bindings are function-local. The low bit on an owner distinguishes
 // malloc-aligned payloads from promoted blocks. An alias holds the untagged
 // block address. The count includes the owner until it closes the block.
+// Only the owner frees the payload; its drop passes the payload type's
+// cleanup function (or null), which releases managed fields first.
 std::string heapRuntimeIR() {
   return R"IR(
 %duck.heap.block = type { ptr, i64 }
@@ -68,7 +70,17 @@ retain:
   ret ptr %block
 }
 
-define internal void @duck.heap$drop(ptr %slot, i1 %owner) {
+define internal void @duck.heap$clean(ptr %cleanup, ptr %payload) {
+  %none = icmp eq ptr %cleanup, null
+  br i1 %none, label %done, label %call
+call:
+  call void %cleanup(ptr %payload)
+  br label %done
+done:
+  ret void
+}
+
+define internal void @duck.heap$drop(ptr %slot, i1 %owner, ptr %cleanup) {
   %word = load ptr, ptr %slot
   store ptr null, ptr %slot
   %nil = icmp eq ptr %word, null
@@ -80,6 +92,7 @@ classify:
   %raw = and i1 %owner, %direct
   br i1 %raw, label %freeRaw, label %indirect
 freeRaw:
+  call void @duck.heap$clean(ptr %cleanup, ptr %word)
   call void @free(ptr %word)
   br label %done
 indirect:
@@ -89,6 +102,7 @@ indirect:
 close:
   %p = load ptr, ptr %block
   store ptr null, ptr %block
+  call void @duck.heap$clean(ptr %cleanup, ptr %p)
   call void @free(ptr %p)
   br label %release
 release:

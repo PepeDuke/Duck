@@ -1,3 +1,4 @@
+#include <functional>
 #include "Pipeline.h"
 #include "WideInteger.h"
 #include <cmath>
@@ -249,11 +250,16 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
         }
       auto existing = symbols.find(f.name.text);
       if (existing != symbols.end())
-        fail(f.name, "'" + member + "' is already declared in container '" + record + "' at " +
+        fail(f.name, (member[0] != '$' ? "'" + member + "'"
+                      : member == "$destroy" ? std::string("a destructor")
+                      : member.rfind("$part", 0) == 0
+                          ? std::string("a partial constructor with these parameter types")
+                          : std::string("a constructor with these parameter types")) +
+                         " is already declared in container '" + record + "' at " +
                          where(existing->second.declaration));
     }
     if (f.name.text == "Print" || f.name.text == "Length" || f.name.text == "CodeUnitAt" ||
-        !symbols.emplace(f.name.text, Signature{f.result, f.params, f.nativeSymbol, f.name, {}, f.method, f.protectedAccess}).second)
+        !symbols.emplace(f.name.text, Signature{f.result, f.params, f.nativeSymbol, f.name, {}, f.method, f.protectedAccess, f.inferred}).second)
       fail(f.name, "duplicate or reserved function '" + f.name.text + "'");
     if (f.nativeSymbol.empty()) {
       auto &safe = symbols.at(f.name.text).nonescapingParameters;
@@ -276,6 +282,7 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
     }
     StaticInfo info{field.name, field.type, field.constant, field.protectedAccess, field.initializer.get()};
     info.order = symbols.statics.size();
+    info.usings = field.usings;
     if (clash || !symbols.statics.emplace(name, info).second)
       fail(field.name, "duplicate static field or member '" + name + "'");
     const auto &t = field.type;
@@ -284,6 +291,15 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
       fail(field.name, "static fields of type " + typeName(t) +
                            " are not supported yet; use a number, bool, enum, string, name, big, "
                            "void*, or container");
+  }
+  // A type and a function or static field must not share a qualified name,
+  // or `Name.Space()` and `Name.Space` would be ambiguous.
+  for (const auto &[name, record] : symbols.records) {
+    auto function = symbols.find(name);
+    auto field = symbols.statics.find(name);
+    if (function != symbols.end() || field != symbols.statics.end())
+      fail(function != symbols.end() ? function->second.declaration : field->second.declaration,
+           "'" + name + "' is already declared as a container at " + where(record.name));
   }
   auto main = symbols.find("Main");
   if (requireEntry && main == symbols.end())
@@ -336,7 +352,59 @@ bool Symbols::managedRecord(const std::string &record) const {
     if (managed(field.type)) return true;
   return false;
 }
+std::vector<std::string> Symbols::constructors(const std::string &record, bool partial) const {
+  std::vector<std::string> keys;
+  const auto prefix = methodKey(record, partial ? "$part" : "$new");
+  for (auto it = lower_bound(prefix); it != end() && it->first.compare(0, prefix.size(), prefix) == 0; ++it)
+    keys.push_back(it->first);
+  return keys;
+}
+namespace {
+void collectParts(const Symbols &symbols, const std::string &record, const std::vector<size_t> &path,
+                  std::vector<ConstructionPart> &parts) {
+  const auto &fields = symbols.records.at(record).fields;
+  for (size_t i = 0; i < fields.size(); ++i)
+    if (fields[i].parentView) {
+      auto nested = path;
+      nested.push_back(i);
+      collectParts(symbols, fields[i].type.record, nested, parts);
+    }
+  for (bool partial : {true, false}) {
+    const auto overloads = symbols.constructors(record, partial);
+    if (overloads.empty()) continue;
+    const auto automatic = constructorKey(record, {}, partial);
+    parts.push_back({path, record, partial, overloads, symbols.count(automatic) ? automatic : ""});
+  }
+}
+} // namespace
+std::vector<ConstructionPart> Symbols::parts(const std::string &record) const {
+  std::vector<ConstructionPart> result;
+  collectParts(*this, record, {}, result);
+  return result;
+}
+bool Symbols::zeroDefault(const Type &type) const {
+  if (fixedArray(type)) return zeroDefault(*type.element);
+  if (!recordValue(type))
+    return !type.depth && (numeric(type) || type == Type::Bool || type == Type::Char || enumValue(type) ||
+                           decimalValue(type) || calendarValue(type));
+  if (!constructors(type.record).empty() || !constructors(type.record, true).empty() || destructible(type.record))
+    return false;
+  for (const auto &field : records.at(type.record).fields)
+    if (field.initializer || !zeroDefault(field.type)) return false;
+  return true;
+}
+bool Symbols::destructible(const std::string &record) const {
+  if (count(destructorKey(record))) return true;
+  for (const auto &field : records.at(record).fields)
+    if (collectionValue(field.type) || dynamicArray(field.type) ||
+        (recordValue(field.type) && destructible(field.type.record)))
+      return true;
+  return false;
+}
+// Constructors run during construction, so a container with any, in itself,
+// a nested container, or a parent, is built at run time.
 bool Symbols::runtimeDefaults(const std::string &record) const {
+  if (!constructors(record).empty() || !constructors(record, true).empty()) return true;
   for (const auto &field : records.at(record).fields)
     if (field.runtimeDefault ||
         (recordValue(field.type) && !field.initializer && runtimeDefaults(field.type.record)))
@@ -349,6 +417,54 @@ bool Symbols::derivesFrom(const std::string &record, const std::string &ancestor
   for (const auto &parent : found->second.parents)
     if (parent.text == ancestor || derivesFrom(parent.text, ancestor)) return true;
   return false;
+}
+size_t Symbols::parentPath(const std::string &record, const std::string &base,
+                           std::vector<size_t> &path) const {
+  size_t count = 0;
+  const auto &fields = records.at(record).fields;
+  for (size_t i = 0; i < fields.size() && fields[i].parentView; ++i) {
+    std::vector<size_t> below;
+    size_t found = fields[i].type.record == base ? 1 : 0;
+    found += parentPath(fields[i].type.record, base, below);
+    if (found && !count) {
+      path = {i};
+      if (fields[i].type.record != base) path.insert(path.end(), below.begin(), below.end());
+    }
+    count += found;
+  }
+  return count;
+}
+std::string Symbols::recordAt(std::string record, const std::vector<size_t> &path) const {
+  for (auto index : path) record = records.at(record).fields[index].type.record;
+  return record;
+}
+std::vector<std::string> Symbols::dispatchNames(const std::string &record) const {
+  std::set<std::string> names;
+  std::function<void(const std::string &)> collect = [&](const std::string &current) {
+    const auto prefix = methodKey(current, "");
+    for (auto it = lower_bound(prefix); it != end() && it->first.compare(0, prefix.size(), prefix) == 0; ++it)
+      if (dispatched(it->first, it->second.method)) names.insert(memberName(it->first));
+    for (const auto &field : records.at(current).fields)
+      if (field.parentView) collect(field.type.record);
+  };
+  collect(record);
+  return {names.begin(), names.end()};
+}
+DispatchTable Symbols::overrider(const std::string &record, const std::vector<size_t> &path,
+                                 const std::string &name) const {
+  auto current = record;
+  for (size_t length = 0;; ++length) {
+    const auto key = methodKey(current, name);
+    if (auto found = find(key); found != end() && found->second.method)
+      return {key, {path.begin(), path.begin() + length}};
+    if (length == path.size()) break;
+    current = records.at(current).fields[path[length]].type.record;
+  }
+  MemberPath member;
+  const auto found = findMethod(current, name, member);
+  auto full = path;
+  full.insert(full.end(), member.indices.begin(), member.indices.end());
+  return {found->first, full};
 }
 namespace {
 void collectVisible(const Symbols &symbols, const std::string &record, std::vector<size_t> prefix,
@@ -410,26 +526,80 @@ void resolveInheritance(Symbols &symbols) {
     }
     record.fields.insert(record.fields.begin(), views.begin(), views.end());
   }
-  // A container may not redeclare an inherited member. Overrides need
-  // virtual dispatch, which is not implemented yet.
-  auto requireNew = [&](const Record &record, const std::string &member, const Token &token) {
+  // A field may not redeclare an inherited member, and a method may only
+  // redeclare inherited methods, overriding each of them; it must keep their
+  // parameter types, references, result, and access.
+  auto requireNew = [&](const Record &record, const std::string &member, const Token &token, bool field) {
     for (const auto &parent : record.parents) {
       if (parent.text == member)
         fail(token, "member '" + member + "' has the name of parent container '" + member + "'");
       MemberPath path;
-      if (symbols.findField(parent.text, member, path) ||
-          symbols.findMethod(parent.text, member, path) != symbols.end())
+      if (symbols.findField(parent.text, member, path))
         fail(token, "'" + member + "' is already inherited from '" + path.declaring +
-                        "'; overriding inherited members is not implemented yet");
+                        "' as a field; fields cannot be overridden");
+      if (field && symbols.findMethod(parent.text, member, path) != symbols.end())
+        fail(token, "'" + member + "' is already inherited from '" + path.declaring +
+                        "' as a method; only a method can override it");
+      if (field && (symbols.findMethod(parent.text, "get-" + member, path) != symbols.end() ||
+                    symbols.findMethod(parent.text, "set-" + member, path) != symbols.end()))
+        fail(token, "'" + member + "' is already inherited from '" + path.declaring +
+                        "' as a property; only a property can override it");
     }
   };
+  for (const auto &[key, signature] : symbols)
+    if (dispatched(key, signature.method)) {
+      const auto &owner = symbols.records.at(key.substr(0, key.rfind('.')));
+      const auto property = propertyName(key);
+      requireNew(owner, property.empty() ? memberName(key) : property, signature.declaration, false);
+    }
   for (const auto &[name, record] : symbols.records)
     for (const auto &field : record.fields)
-      if (!field.parentView) requireNew(record, field.name.text, field.name);
-  for (const auto &[name, signature] : symbols) {
-    if (!signature.method) continue;
-    requireNew(symbols.records.at(name.substr(0, name.rfind('.'))), memberName(name),
-               signature.declaration);
+      if (!field.parentView) requireNew(record, field.name.text, field.name, true);
+}
+void validateOverrides(const Symbols &symbols) {
+  auto describe = [](const std::string &owner, const std::string &key, const Signature &signature) {
+    const auto property = propertyName(key);
+    std::string text = (signature.protectedAccess ? "-" : "") + owner;
+    if (!property.empty()) {
+      const bool getter = memberName(key)[0] == 'g';
+      const auto type = getter ? signature.result : signature.parameters.back().type;
+      return text + property + " (" + (getter ? "getter" : "setter") + " of " + typeName(type) + ")";
+    }
+    text += memberName(key) + "(";
+    for (size_t i = 1; i < signature.parameters.size(); ++i)
+      text += (i > 1 ? ", " : "") + typeName(signature.parameters[i].type) +
+              (signature.parameters[i].reference ? "&" : "");
+    return text + ")" + (signature.result == Type::Void ? "" : " -> " + typeName(signature.result));
+  };
+  auto same = [](const Signature &a, const Signature &b) {
+    if (a.result != b.result || a.protectedAccess != b.protectedAccess ||
+        a.parameters.size() != b.parameters.size())
+      return false;
+    for (size_t i = 1; i < a.parameters.size(); ++i)
+      if (a.parameters[i].type != b.parameters[i].type || a.parameters[i].reference != b.parameters[i].reference)
+        return false;
+    return true;
+  };
+  for (const auto &[key, signature] : symbols) {
+    // Constructors and destructors belong to their own container only.
+    if (!dispatched(key, signature.method)) continue;
+    const auto &owner = symbols.records.at(key.substr(0, key.rfind('.')));
+    const auto member = memberName(key);
+    std::set<std::string> visited;
+    std::function<void(const std::string &)> check = [&](const std::string &ancestor) {
+      if (!visited.insert(ancestor).second) return;
+      const auto inherited = symbols.find(methodKey(ancestor, member));
+      if (inherited != symbols.end() && inherited->second.method && !same(signature, inherited->second))
+        fail(signature.declaration, (propertyName(key).empty() ? "'" + member + "'" : "property '" + propertyName(key) + "'") +
+                                        " overrides " +
+                                        describe(ancestor + ".", inherited->first, inherited->second) +
+                                        " but is declared as " + describe("", key, signature) +
+                                        "; an override must keep the " +
+                                        (propertyName(key).empty() ? "parameter types, result, and access"
+                                                                   : "property type and access"));
+      for (const auto &parent : symbols.records.at(ancestor).parents) check(parent.text);
+    };
+    for (const auto &parent : owner.parents) check(parent.text);
   }
 }
 namespace {
@@ -439,9 +609,11 @@ void validateLayout(const Symbols &symbols, const Record &record,
   active.insert(record.name.text);
   for (const auto &field : record.fields) {
     symbols.validateType(field.type, field.name);
-    if (recordValue(field.type)) {
-      if (active.count(field.type.record)) fail(field.name, "recursive container field requires a pointer");
-      validateLayout(symbols, symbols.records.at(field.type.record), active, complete);
+    // A fixed array stores its elements inline, like a nested container.
+    const auto inline_ = fixedArray(field.type) ? *field.type.element : field.type;
+    if (recordValue(inline_)) {
+      if (active.count(inline_.record)) fail(field.name, "recursive container field requires a pointer");
+      validateLayout(symbols, symbols.records.at(inline_.record), active, complete);
     }
   }
   active.erase(record.name.text);
@@ -478,5 +650,61 @@ void validateNativeSymbols(const Symbols &symbols) {
     if (!same)
       fail(signature.declaration, "conflicting native declarations for '" + signature.nativeSymbol + "'");
   }
+}
+void validateLifetimes(const Symbols &symbols) {
+  for (const auto &[name, record] : symbols.records)
+    for (const auto &field : record.fields) {
+      // A field without a default is built from the zero-argument overload
+      // of every part. Parents are parts of the container's own construction.
+      if (!recordValue(field.type) || field.initializer || field.parentView) continue;
+      for (const auto &part : symbols.parts(field.type.record))
+        if (part.automatic.empty())
+          fail(field.name, "field '" + field.name.text + "' needs a default: '" + field.type.record +
+                               "' cannot be constructed without arguments; " + part.text() +
+                               " has no zero-argument overload");
+    }
+  for (const auto &[name, signature] : symbols) {
+    (void)name;
+    for (const auto &parameter : signature.parameters)
+      if (!parameter.reference && collectionValue(parameter.type))
+        fail(parameter.name, "parameter '" + parameter.name.text + "' must take " + typeName(parameter.type) +
+                                 " by reference (&): collections are move-only");
+      else if (!parameter.reference && arrayValue(parameter.type) && symbols.moveOnly(parameter.type))
+        fail(parameter.name, "parameter '" + parameter.name.text + "' must take " + typeName(parameter.type) +
+                                 " by reference (&): " +
+                                 (dynamicArray(parameter.type) ? "dynamic arrays are move-only"
+                                                               : "its elements cannot be copied implicitly"));
+    for (const auto &parameter : signature.parameters)
+      if (!parameter.reference && recordValue(parameter.type) &&
+          symbols.records.count(parameter.type.record) && symbols.destructible(parameter.type.record))
+        fail(parameter.name, "parameter '" + parameter.name.text + "' must take '" + parameter.type.record +
+                                 "' by reference (&): it has a destructor, so it cannot be copied");
+  }
+  for (const auto &[name, info] : symbols.statics)
+    if (recordValue(info.type) && !info.initializer)
+      for (const auto &part : symbols.parts(info.type.record))
+        if (part.automatic.empty())
+          fail(info.declaration, "static field '" + name + "' needs an initializer: '" + info.type.record +
+                                     "' cannot be constructed without arguments; " + part.text() +
+                                     " has no zero-argument overload");
+  // A fixed array field starts zeroed inside its container's constant
+  // default, so its elements must be valid as zero bits.
+  for (const auto &[name, record] : symbols.records)
+    for (const auto &field : record.fields)
+      if (fixedArray(field.type) && !symbols.zeroDefault(*field.type.element))
+        fail(field.name, "field '" + field.name.text + "' cannot hold " + typeName(field.type) +
+                             " yet: its elements need defaults or cleanup; use a dynamic array (" +
+                             typeName(*field.type.element) + " [])");
+  for (const auto &[name, info] : symbols.statics)
+    if (arrayValue(info.type))
+      fail(info.declaration, "static field '" + name + "' cannot hold an array yet");
+  for (const auto &[name, info] : symbols.statics)
+    if (collectionValue(info.type))
+      fail(info.declaration, "static field '" + name + "' cannot hold a collection yet: static storage is "
+                                 "never destroyed, so its elements would never be released");
+  for (const auto &[name, info] : symbols.statics)
+    if (recordValue(info.type) && symbols.destructible(info.type.record))
+      fail(info.declaration, "static field '" + name + "' cannot hold '" + info.type.record +
+                                 "': it has a destructor, and static storage is never destroyed");
 }
 } // namespace duck

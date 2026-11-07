@@ -22,13 +22,15 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
   std::string module =
       "; Duck bootstrap LLVM IR\ndeclare i32 @printf(ptr, ...)\n"
       "declare double @llvm.floor.f64(double)\ndeclare void @llvm.trap()\n";
-  bool needsText = false, needsBig = false, needsDecimal = false;
+  bool needsText = false, needsBig = false, needsDecimal = false, needsCollections = false;
   for (const auto &f : functions) {
     needsBig = needsBig || f.usesBigRuntime;
     needsDecimal = needsDecimal || f.usesDecimalRuntime;
+    needsCollections = needsCollections || f.usesCollectionRuntime;
   }
-  // big storage shares the text reference count and the wide digit printer.
-  for (const auto &f : functions) needsText = needsText || f.usesTextRuntime || needsBig;
+  // big storage shares the text reference count and the wide digit printer;
+  // collections release text and big elements through it.
+  for (const auto &f : functions) needsText = needsText || f.usesTextRuntime || needsBig || needsCollections;
   bool needsHeap = false;
   for (const auto &f : functions) needsHeap = needsHeap || f.usesHeapRuntime;
   if (needsText || needsHeap) module += "declare ptr @malloc(i64)\ndeclare void @free(ptr)\n";
@@ -37,6 +39,8 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
   for (const auto &f : functions) needsTasks = needsTasks || f.usesTaskRuntime;
   if (needsTasks) module += taskRuntimeIR(nativeSymbols);
   if (needsText) module += textRuntimeIR();
+  if (needsCollections) module += collectionRuntimeIR();
+  if (needsCollections && needsBig) module += collectionBigKeyIR();
   bool needsCalendar = false;
   for (const auto &f : functions) needsCalendar = needsCalendar || f.usesCalendarRuntime;
   if (needsCalendar) module += calendarRuntimeIR();
@@ -72,7 +76,7 @@ std::string compileModule(const Program &program, const Program &imports,
     for (const auto &f : program)
       if (f.name.text == "Main")
         fail(f.name, "library module cannot define Main");
-  const auto imported = collectSymbols(imports, false);
+  auto imported = collectSymbols(imports, false);
   // Only the defining module may add instance members; an importer that
   // extended the container would disagree about its layout.
   for (auto [name, record] : imported.records)
@@ -96,7 +100,10 @@ std::string compileModule(const Program &program, const Program &imports,
       fail(info.declaration, "duplicate static field '" + name + "'");
   }
   resolveInheritance(symbols);
+  resolveProperties(symbols, {&program, &imports}, {&symbols, &imported});
+  validateOverrides(symbols);
   validateLayouts(symbols);
+  validateLifetimes(symbols);
   for (const auto &[name, info] : symbols.statics) symbols.validateType(info.type, info.declaration);
   resolveFieldDefaults(symbols);
   resolveStaticInitializers(symbols);
@@ -130,7 +137,37 @@ std::string compileModule(const Program &program, const Program &imports,
   // Generated initializers run sequentially; they are never task candidates.
   for (const auto &function : generated)
     fragments.push_back(lowerFunction(function, symbols, analyzeFunction(function, symbols)));
-  return emitRecords(symbols) + emitEnums(symbols) + emitStatics(symbols) +
+  std::set<std::string> cleanups, destroys;
+  std::set<DispatchTable> tables;
+  for (const auto &fragment : fragments) {
+    tables.insert(fragment.tables.begin(), fragment.tables.end());
+    cleanups.insert(fragment.cleanups.begin(), fragment.cleanups.end());
+    destroys.insert(fragment.destroys.begin(), fragment.destroys.end());
+  }
+  // A destructible heap payload's cleanup destroys it first, and a destroy
+  // routine frees dynamic arrays whose container elements use their cleanup.
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (const auto &record : cleanups)
+      if (symbols.destructible(record)) changed |= destroys.insert(record).second;
+    std::set<std::string> pending = destroys;
+    while (!pending.empty()) {
+      const auto record = *pending.begin();
+      pending.erase(pending.begin());
+      for (const auto &field : symbols.records.at(record).fields) {
+        if (recordValue(field.type) && symbols.destructible(field.type.record) &&
+            destroys.insert(field.type.record).second) {
+          pending.insert(field.type.record);
+          changed = true;
+        }
+        if (dynamicArray(field.type) && recordValue(*field.type.element) &&
+            symbols.needsCleanup(*field.type.element))
+          changed |= cleanups.insert(field.type.element->record).second;
+      }
+    }
+  }
+  return emitRecords(symbols) + emitEnums(symbols) + emitStatics(symbols) + emitCleanups(symbols, cleanups) +
+         emitDestroys(symbols, destroys) + emitTables(symbols, tables) +
          emitDeclarations(declarations) + assembleModule(fragments, entry, nativeSymbols);
 }
 } // namespace duck

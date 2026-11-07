@@ -6,11 +6,20 @@
 #include <iomanip>
 #include <limits>
 #include <locale>
+#include <algorithm>
+#include <functional>
 #include <optional>
 #include <sstream>
 
 namespace duck {
 std::string typeName(Type type) {
+  if (arrayValue(type))
+    return typeName(*type.element) + " [" + (type.extent ? std::to_string(type.extent) : "") + "]";
+  if (collectionValue(type)) {
+    if (type.base == Type::Queue) return typeName(*type.element) + " queue";
+    if (type.base == Type::Stack) return typeName(*type.element) + " stack";
+    return typeName(*type.key) + ", " + typeName(*type.element) + " pair";
+  }
   if (type.depth) {
     auto prefix = type.role == Type::Owner ? "owning " : type.role == Type::Alias ? "tracked " : "";
     return prefix + typeName(type.pointee()) + "*";
@@ -138,6 +147,11 @@ struct Local {
   bool constant;
   bool initialized = true;
   bool receiver = false;
+  bool borrowed = false; // A reference parameter: the caller owns the storage.
+  // Construction parts a container local may (on some path) or must (on
+  // every path) still be missing, by ConstructionPart::id.
+  std::set<std::string> mayMiss, mustMiss;
+  Token declaration;
 };
 class Analyzer {
   const Symbols &symbols;
@@ -146,18 +160,27 @@ class Analyzer {
   struct LoopFlow {
     std::vector<Scopes> continues;
     std::vector<Scopes> breaks;
+    size_t depth = 0; // Scopes at or past this index belong to the loop body.
   };
   std::vector<LoopFlow> loops;
   FunctionAnalysis analysis;
   Type result;
   const Expr *ownerDestination = nullptr;
   std::string container;
+  Usings usings; // Directives visible where the analyzed code was written.
   bool method = false;
+  // The construction a local declaration may leave incomplete, and what it left.
+  const Expr *incompleteAllowed = nullptr;
+  std::set<std::string> incompleteMissing;
+  // The local a `return` statement may move instead of copying.
+  const Expr *movable = nullptr;
   // Set in a generated static $eval: the static it initializes, and the
   // assignment target that may write it.
   std::string initializing;
   const Expr *initializationTarget = nullptr;
   bool initializerScope = false; // Analyzing a default or static initializer.
+  // Inferring an untyped getter's type: its return sets the result.
+  bool inferring = false;
 
   void require(Type actual, Type expected, const Token &token) {
     if (actual != expected)
@@ -195,6 +218,18 @@ class Analyzer {
         for (const auto &state : incoming)
           initialized = initialized && state.at(i).at(entry.first).initialized;
         entry.second.initialized = initialized;
+        if (incoming.empty()) continue;
+        std::set<std::string> may, must = incoming.front().at(i).at(entry.first).mustMiss;
+        for (const auto &state : incoming) {
+          const auto &other = state.at(i).at(entry.first);
+          may.insert(other.mayMiss.begin(), other.mayMiss.end());
+          std::set<std::string> both;
+          for (const auto &id : must)
+            if (other.mustMiss.count(id)) both.insert(id);
+          must = both;
+        }
+        entry.second.mayMiss = may;
+        entry.second.mustMiss = must;
       }
     return visible;
   }
@@ -242,13 +277,40 @@ class Analyzer {
     return type;
   }
   Type expression(const Expr &e, Type expected = Type::Void) {
+    requireComplete(e);
     auto type = checkExpression(e, expected);
     analysis.expressionTypes.emplace(&e, type);
+    // Reading stored container state as a value copies it. A container
+    // with a destructor is destroyed exactly once, so it is move-only.
+    if (recordValue(type) && e.addressable() && !analysis.properties.count(&e) && &e != movable &&
+        symbols.destructible(type.record))
+      fail(e.token, "cannot copy '" + type.record + "': " +
+                        (moveOnlyByCollection(type.record) ? "it holds a collection, so it is move-only"
+                                                           : "it has a destructor") +
+                        "; pass it by reference (&), or return a local to move it");
+    if (collectionValue(type) && e.addressable() && !analysis.properties.count(&e) && &e != movable)
+      fail(e.token, "cannot copy " + typeName(type) + " '" + e.token.text +
+                        "': collections are move-only; pass it by reference (&), or return a local to move it");
+    if (arrayValue(type) && symbols.moveOnly(type) && e.addressable() && !analysis.properties.count(&e) &&
+        &e != movable)
+      fail(e.token, "cannot copy " + typeName(type) + " '" + e.token.text + "': " +
+                        (dynamicArray(type) ? "dynamic arrays are move-only"
+                                            : "its elements cannot be copied implicitly, so it is move-only") +
+                        "; pass it by reference (&), or return a local to move it");
     if (expected != Type::Void) {
       convert(e, type, expected);
       return expected;
     }
     return type;
+  }
+  // A container that is move-only only because collections live in it.
+  bool moveOnlyByCollection(const std::string &record) const {
+    if (symbols.count(destructorKey(record))) return false;
+    for (const auto &field : symbols.records.at(record).fields)
+      if (recordValue(field.type) && symbols.destructible(field.type.record) &&
+          !moveOnlyByCollection(field.type.record))
+        return false;
+    return true;
   }
   // A protected member is visible inside its declaring container, the
   // static containers nested in it, and containers that derive from it.
@@ -264,20 +326,307 @@ class Analyzer {
     const auto &name = function->first;
     const auto dot = name.rfind('.');
     if (dot != std::string::npos)
-      requireAccess(function->second.protectedAccess, name.substr(0, dot), memberName(name), token);
+      requireAccess(function->second.protectedAccess, name.substr(0, dot),
+                    propertyName(name).empty() ? memberName(name) : propertyName(name), token);
   }
-  Symbols::const_iterator resolve(const std::string &op) const {
-    auto found = symbols.end();
-    // Resolve relative names from the innermost static container outward.
-    auto scope = container;
-    while (!scope.empty() && found == symbols.end()) {
-      found = symbols.find(scope + "." + op);
-      auto dot = scope.rfind('.');
+  std::string constructorText(const std::string &key) const {
+    const auto &params = symbols.at(key).parameters;
+    const bool partial = memberName(key).rfind("$part", 0) == 0;
+    std::string text = (partial ? "-" : "") + key.substr(0, key.rfind('.')) + "(";
+    for (size_t i = 1; i < params.size(); ++i)
+      text += (i > 1 ? ", " : "") + typeName(params[i].type) + (params[i].reference ? "&" : "");
+    return text + ")";
+  }
+  std::string partsText(const std::string &record, const std::set<std::string> &ids) const {
+    std::string text;
+    for (const auto &part : symbols.parts(record))
+      if (ids.count(part.id())) text += (text.empty() ? "" : ", ") + part.text();
+    return text;
+  }
+  // Splits a call's arguments across construction parts in order. Each part
+  // takes the arguments of one of its overloads (none for its automatic
+  // overload), or, when it has no automatic overload, may be left missing.
+  // The split leaving the fewest parts missing wins, then one whose
+  // overloads match the argument types exactly; others are ambiguous.
+  std::vector<PartCall> plan(const Expr &e, const std::string &record,
+                             const std::vector<ConstructionPart> &parts, std::set<std::string> &missing) {
+    const auto savedAnalysis = analysis;
+    const auto savedScopes = scopes;
+    auto restore = [&] {
+      analysis = savedAnalysis;
+      scopes = savedScopes;
+    };
+    // Argument types without a target type. Addressable arguments are read
+    // as storage, so reference parameters and move-only values compare too.
+    std::vector<Type> natural;
+    std::vector<bool> addressable;
+    for (const auto &argument : e.args) {
+      addressable.push_back(storage(*argument));
+      natural.push_back(addressable.back() ? location(*argument).type : expression(*argument));
+    }
+    restore();
+    std::map<std::pair<std::string, size_t>, std::pair<bool, bool>> checked;
+    auto check = [&](const std::string &key, size_t first) {
+      auto found = checked.find({key, first});
+      if (found != checked.end()) return found->second;
+      const auto &params = symbols.at(key).parameters;
+      bool exact = true, viable = true;
+      for (size_t i = 1; i < params.size(); ++i)
+        exact = exact && natural[first + i - 1] == params[i].type &&
+                (!params[i].reference || addressable[first + i - 1]);
+      try {
+        arguments(e, symbols.at(key), 1, first, params.size() - 1);
+      } catch (const std::runtime_error &) {
+        viable = false;
+      }
+      restore();
+      return checked[{key, first}] = {viable, exact};
+    };
+    struct Split {
+      std::vector<PartCall> calls;
+      std::set<std::string> missing;
+      bool exact = true;
+    };
+    std::vector<Split> splits;
+    Split current;
+    std::function<void(size_t, size_t)> search = [&](size_t index, size_t position) {
+      if (index == parts.size()) {
+        if (position == e.args.size()) splits.push_back(current);
+        return;
+      }
+      const auto &part = parts[index];
+      for (const auto &key : part.overloads) {
+        const size_t count = symbols.at(key).parameters.size() - 1;
+        if (position + count > e.args.size()) continue;
+        const auto [viable, exact] = count ? check(key, position) : std::pair<bool, bool>{true, true};
+        if (!viable) continue;
+        const auto saved = current;
+        current.calls.push_back({part.path, key, position, count});
+        current.exact = current.exact && exact;
+        search(index + 1, position + count);
+        current = saved;
+      }
+      if (part.automatic.empty()) {
+        const auto saved = current;
+        current.missing.insert(part.id());
+        search(index + 1, position);
+        current = saved;
+      }
+    };
+    search(0, 0);
+    std::string given;
+    for (size_t i = 0; i < natural.size(); ++i) given += (i ? ", " : "") + typeName(natural[i]);
+    if (splits.empty()) {
+      std::string list;
+      for (const auto &part : parts)
+        for (const auto &key : part.overloads) list += (list.empty() ? "" : ", ") + constructorText(key);
+      fail(e.token, "no constructor of '" + record + "' accepts (" + given + "); candidates: " + list);
+    }
+    size_t fewest = splits.front().missing.size();
+    for (const auto &split : splits) fewest = std::min(fewest, split.missing.size());
+    std::vector<Split> best, exact;
+    for (const auto &split : splits)
+      if (split.missing.size() == fewest) {
+        best.push_back(split);
+        if (split.exact) exact.push_back(split);
+      }
+    if (best.size() > 1 && exact.size() == 1) best = exact;
+    auto describe = [&](const Split &split) {
+      std::string text;
+      for (const auto &call : split.calls)
+        if (call.count) text += (text.empty() ? "" : " + ") + constructorText(call.key);
+      return text.empty() ? std::string("no arguments") : text;
+    };
+    if (best.size() > 1)
+      fail(e.token, "constructor call " + record + "(" + given + ") is ambiguous between " +
+                        describe(best[0]) + " and " + describe(best[1]));
+    for (const auto &call : best.front().calls)
+      if (call.count) arguments(e, symbols.at(call.key), 1, call.first, call.count);
+    missing = best.front().missing;
+    return best.front().calls;
+  }
+  // Construction of `record` from a call's arguments. Only a declared local
+  // may be left incomplete; it is completed later with `local(...)`.
+  Type construction(const Expr &e, const std::string &record) {
+    Type type = Type::Record;
+    type.record = record;
+    const auto parts = symbols.parts(record);
+    if (parts.empty()) {
+      if (!e.args.empty())
+        fail(e.token, "'" + record + "' declares no constructors; default container construction takes no arguments");
+      analysis.constructions[&e] = {};
+      return type;
+    }
+    std::set<std::string> missing;
+    analysis.constructions[&e] = plan(e, record, parts, missing);
+    if (&e == incompleteAllowed) incompleteMissing = missing;
+    else if (!missing.empty()) incomplete(e.token, record, missing);
+    return type;
+  }
+  [[noreturn]] void incomplete(const Token &token, const std::string &record,
+                               const std::set<std::string> &missing) const {
+    fail(token, "this construction of '" + record + "' leaves " + partsText(record, missing) +
+                    " missing; pass arguments for every part, or declare a local (" + record +
+                    " x(...)) and complete it later with x(...)");
+  }
+  // The parts a default construction leaves missing: those without an
+  // automatic overload.
+  std::set<std::string> defaultMissing(const std::string &record) const {
+    std::set<std::string> missing;
+    for (const auto &part : symbols.parts(record))
+      if (part.automatic.empty()) missing.insert(part.id());
+    return missing;
+  }
+  // A local that may still miss construction parts cannot be used as a
+  // whole: no method calls, references, copies, moves, or assignment.
+  void requireComplete(const Expr &e) const {
+    if (e.kind != "name") return;
+    for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope) {
+      auto local = scope->find(e.token.text);
+      if (local == scope->end()) continue;
+      if (!local->second.mayMiss.empty())
+        fail(e.token, "'" + e.token.text + "' may be incomplete: " +
+                          partsText(local->second.type.record, local->second.mayMiss) +
+                          " may still be missing; complete it with " + e.token.text + "(...) first");
+      return;
+    }
+  }
+  // Every local in scopes[first..] must be complete where they end.
+  void requireCompleteScopes(size_t first) const {
+    for (size_t i = first; i < scopes.size(); ++i)
+      for (const auto &[name, local] : scopes[i])
+        if (!local.mayMiss.empty())
+          fail(local.declaration, "'" + name + "' may be incomplete when its scope ends: " +
+                                      partsText(local.type.record, local.mayMiss) +
+                                      " may still be missing; complete it with " + name +
+                                      "(...) on every path");
+  }
+  // `g(w)` supplies parts the local g is missing on every path.
+  Type completion(const Expr &e) {
+    size_t depth = scopes.size();
+    while (depth > 0 && !scopes[depth - 1].count(e.token.text)) --depth;
+    --depth; // The scope index holding the local; findLocal found it.
+    // plan() restores the scopes after each trial, so look the local up again
+    // after it rather than holding a pointer across it.
+    auto local = [&]() -> Local & { return scopes[depth].at(e.token.text); };
+    const auto record = local().type.record;
+    if (!loops.empty() && depth < loops.back().depth)
+      fail(e.token, "complete '" + e.token.text + "' outside the loop; a loop body can run more than "
+                    "once, which would construct a part twice");
+    std::vector<ConstructionPart> parts;
+    for (const auto &part : symbols.parts(record))
+      if (local().mustMiss.count(part.id())) parts.push_back(part);
+    if (parts.empty())
+      fail(e.token, "'" + e.token.text + "' was completed on some paths but not others; " +
+                        partsText(record, local().mayMiss) + " may already have run");
+    std::set<std::string> missing;
+    auto calls = plan(e, record, parts, missing);
+    if (calls.empty()) fail(e.token, "completing '" + e.token.text + "' requires arguments for " +
+                                         partsText(record, local().mustMiss));
+    for (const auto &call : calls)
+      for (const auto &part : parts)
+        if (part.path == call.path && std::find(part.overloads.begin(), part.overloads.end(), call.key) !=
+                                          part.overloads.end()) {
+          local().mayMiss.erase(part.id());
+          local().mustMiss.erase(part.id());
+        }
+    analysis.completions[&e] = std::move(calls);
+    return Type::Void;
+  }
+  // `g(5)` on a complete object of `record` (a local, a reference, a
+  // pointer's payload, or owner's field at `field`) constructs a new state,
+  // which must be complete, and replaces the old one in the same storage.
+  // Takes names by value: plan() restores the scopes, which may hold them.
+  Type reinitialization(const Expr &e, const std::string record, const std::string owner = "",
+                        const std::vector<size_t> field = {}) {
+    const auto saved = incompleteAllowed;
+    incompleteAllowed = &e;
+    const auto type = construction(e, record);
+    incompleteAllowed = saved;
+    if (!incompleteMissing.empty()) {
+      const auto missing = incompleteMissing;
+      incompleteMissing.clear();
+      fail(e.token, "reinitializing '" + e.token.text + "' leaves " + partsText(record, missing) +
+                        " missing; a reinitialization must pass arguments for every part");
+    }
+    auto calls = std::move(analysis.constructions.at(&e));
+    analysis.constructions.erase(&e);
+    analysis.reinitializations[&e] = {type, std::move(calls), owner, field};
+    return Type::Void;
+  }
+  // Checks a call's arguments [first, first + count) against a signature's
+  // parameters from offset.
+  void arguments(const Expr &e, const Signature &signature, size_t offset, size_t first = 0,
+                 size_t count = std::string::npos) {
+    if (count == std::string::npos) count = e.args.size();
+    for (size_t i = 0; i < count; ++i) {
+      const auto &argument = *e.args[first + i];
+      const auto &parameter = signature.parameters[i + offset];
+      if (parameter.reference) {
+        requireComplete(argument);
+        auto local = location(argument);
+        if (heapStorage(argument)) fail(argument.token, "cannot expose tracked heap storage by reference");
+        if (growableElement(argument))
+          fail(argument.token, "cannot pass an element of a dynamic array by reference: adding elements can "
+                               "move it; copy it into a local first");
+        if (local.constant) fail(argument.token, "cannot pass a constant to a mutable reference");
+        // A derived container passes its state for the parameter's parent.
+        std::vector<size_t> path;
+        if (recordValue(local.type) && recordValue(parameter.type) && local.type != parameter.type) {
+          const auto count = symbols.parentPath(local.type.record, parameter.type.record, path);
+          if (count > 1)
+            fail(argument.token, "'" + local.type.record + "' contains '" + parameter.type.record +
+                                     "' through more than one parent, so the reference would be ambiguous");
+          if (count) {
+            analysis.upcasts[&argument] = path;
+            continue;
+          }
+        }
+        require(local.type, parameter.type, argument.token);
+      } else if (argument.kind == "name" && lookup(argument.token).type.role != Type::Raw) {
+        auto tracked = expression(argument);
+        tracked.role = Type::Raw;
+        if (!signature.nonescapingParameters.count(i + offset) || tracked != parameter.type)
+          fail(argument.token, "tracked pointer requires a proven nonescaping parameter of matching type");
+        analysis.conversions[&argument] = parameter.type;
+      } else
+        expression(argument, parameter.type);
+    }
+  }
+  // The qualified name a relative name or path denotes, or empty. Each scope
+  // from the innermost container outward, then file scope, is searched for
+  // its own member first and then through the using directives declared in
+  // it; two directives that both provide the name make it ambiguous.
+  template <class Exists>
+  std::string qualify(const std::string &op, const Token &token, Exists exists) const {
+    for (auto scope = container;;) {
+      const auto direct = scope.empty() ? op : scope + "." + op;
+      if (exists(direct)) return direct;
+      std::string found, via;
+      if (usings)
+        for (const auto &directive : *usings) {
+          const auto candidate = directive.target + "." + op;
+          if (directive.level != scope || !exists(candidate) || candidate == found) continue;
+          if (!found.empty())
+            fail(token, "'" + op + "' is ambiguous between '" + found + "' (using " + via +
+                            ") and '" + candidate + "' (using " + directive.target + ")");
+          found = candidate;
+          via = directive.target;
+        }
+      if (!found.empty()) return found;
+      if (scope.empty()) return "";
+      const auto dot = scope.rfind('.');
       scope = dot == std::string::npos ? "" : scope.substr(0, dot);
     }
-    if (found == symbols.end())
-      found = symbols.find(op);
-    return found;
+  }
+  Symbols::const_iterator resolve(const std::string &op, const Token &token) const {
+    const auto name = qualify(op, token, [&](const std::string &n) { return symbols.count(n) != 0; });
+    return name.empty() ? symbols.end() : symbols.find(name);
+  }
+  // The qualified container a construction call such as `Space()` or
+  // `Name.Space()` names, resolved like a function, or empty.
+  std::string resolveRecord(const std::string &op, const Token &token) const {
+    return qualify(op, token, [&](const std::string &n) { return symbols.records.count(n) != 0; });
   }
   // The qualified static field a name or dotted path denotes, resolved from
   // the innermost static container outward, or empty. Locals shadow statics.
@@ -290,13 +639,7 @@ class Analyzer {
     }
     if (root->kind != "name" || findLocal(root->token)) return "";
     path = root->token.text + path;
-    for (auto scope = container;; ) {
-      const auto candidate = scope.empty() ? path : scope + "." + path;
-      if (symbols.statics.count(candidate)) return candidate;
-      if (scope.empty()) return "";
-      const auto dot = scope.rfind('.');
-      scope = dot == std::string::npos ? "" : scope.substr(0, dot);
-    }
+    return qualify(path, e.token, [&](const std::string &n) { return symbols.statics.count(n) != 0; });
   }
   // True when e, or a dotted prefix of it, is static storage.
   bool staticStorage(const Expr &e) {
@@ -304,6 +647,151 @@ class Analyzer {
       if (!staticPath(*part).empty()) return true;
       if (part->kind != ".") return false;
     }
+  }
+  bool accessible(bool isProtected, const std::string &declaring) const {
+    return !isProtected || container == declaring || container.rfind(declaring + ".", 0) == 0 ||
+           symbols.derivesFrom(container, declaring);
+  }
+  // Whether e names a property: `Age` inside a method of a container that
+  // has one and no local or field of that name, or `p.Age` where p's
+  // container has no accessible field Age. A property may share its name
+  // with a protected field, which it then exposes to outside code. Sets
+  // owner to the receiver's container.
+  bool propertyOf(const Expr &e, std::string &owner) {
+    auto has = [&](const std::string &record, const std::string &name) {
+      MemberPath path;
+      return symbols.findMethod(record, "get-" + name, path) != symbols.end() ||
+             symbols.findMethod(record, "set-" + name, path) != symbols.end();
+    };
+    if (e.kind == "name") {
+      if (findLocal(e.token) || !method || !symbols.records.count(container) || !staticPath(e).empty())
+        return false;
+      if (!has(container, e.token.text)) return false;
+      owner = container;
+      return true;
+    }
+    if (e.kind != "." || enumOf(e) || !staticPath(e).empty()) return false;
+    const auto &base = *e.args[0];
+    Type type = storage(base) ? location(base).type : expression(base);
+    if (type.depth) type = type.pointee();
+    if (!recordValue(type)) return false;
+    MemberPath field;
+    if (symbols.findField(type.record, e.token.text, field) &&
+        accessible(field.field->protectedAccess, field.declaring))
+      return false;
+    if (!has(type.record, e.token.text)) return false;
+    owner = type.record;
+    return true;
+  }
+  // q.Front, s.Top, p.Last, p.LastKey, and .Len on stored collections; Void
+  // when e is not such a read.
+  Type collectionMember(const Expr &e) {
+    if (e.kind != "." || enumOf(e) || !staticPath(e).empty() || staticStorage(*e.args[0])) return Type::Void;
+    const auto &base = *e.args[0];
+    if (!storage(base)) return Type::Void;
+    const auto type = location(base).type;
+    if (arrayValue(type)) {
+      if (e.token.text != "Len") fail(e.token, typeName(type) + " has no member '" + e.token.text + "'; an array has Len");
+      requireComplete(base);
+      analysis.collectionMembers[&e] = "Len";
+      analysis.expressionTypes[&e] = Type::Long;
+      return Type::Long;
+    }
+    if (!collectionValue(type)) return Type::Void;
+    const auto &member = e.token.text;
+    Type result = Type::Void;
+    if (member == "Len") result = Type::Long;
+    else if (type.base == Type::Queue && member == "Front") result = *type.element;
+    else if (type.base == Type::Stack && member == "Top") result = *type.element;
+    else if (type.base == Type::Pair && member == "Last") result = *type.element;
+    else if (type.base == Type::Pair && member == "LastKey") result = *type.key;
+    if (result == Type::Void)
+      fail(e.token, typeName(type) + " has no member '" + member + "'; " +
+                        (type.base == Type::Queue   ? "a queue has Front and Len"
+                         : type.base == Type::Stack ? "a stack has Top and Len"
+                                                    : "a pair has Last, LastKey, Len, and p[key]"));
+    requireComplete(base);
+    analysis.collectionMembers[&e] = member;
+    analysis.expressionTypes[&e] = result;
+    return result;
+  }
+  // Existing storage: an addressable expression that is not a property.
+  bool storage(const Expr &e) {
+    std::string owner;
+    return e.addressable() && !propertyOf(e, owner) && !(e.kind == "index" && pairIndex(e));
+  }
+  // p[key] on a stored pair, which reads a copy rather than naming storage.
+  bool pairIndex(const Expr &e) {
+    const auto &base = *e.args[0];
+    if (!storage(base)) return false;
+    const auto type = location(base).type;
+    return !type.depth && type.base == Type::Pair;
+  }
+  // Storage inside a dynamic array, which moves when the array grows, so
+  // it cannot be borrowed by reference or address.
+  bool growableElement(const Expr &e) const {
+    for (const Expr *part = &e; part->kind == "." || part->kind == "index"; part = part->args[0].get())
+      if (part->kind == "index" && dynamicArray(analysis.expressionTypes.at(part->args[0].get()))) return true;
+    return false;
+  }
+  [[noreturn]] void notStorage(const Expr &e) const {
+    fail(e.token, "'" + e.token.text + "' is a property, not storage; it cannot be passed by reference, "
+                  "have its address taken, or be reinitialized");
+  }
+  // A property's receiver: a constant receiver cannot run accessors, which
+  // may modify it, and a setter cannot run on a temporary.
+  void propertyReceiver(const Expr &e, const std::string &verb) {
+    if (e.kind != ".") return;
+    const auto &base = *e.args[0];
+    if (!storage(base)) {
+      const auto type = expression(base);
+      if (verb == "set" && !type.depth)
+        fail(e.token, "cannot set property '" + e.token.text + "' of a temporary");
+      return;
+    }
+    requireComplete(base);
+    const auto local = location(base);
+    if (!local.type.depth && local.constant)
+      fail(e.token, "cannot " + verb + " property '" + e.token.text +
+                        "' of a constant; its accessors may modify it");
+  }
+  struct PendingProperty : std::runtime_error {
+    PendingProperty() : std::runtime_error("property type pending") {}
+  };
+  Symbols::const_iterator accessor(const Expr &e, const std::string &owner, const std::string &kind,
+                                   std::vector<size_t> &path) {
+    MemberPath member;
+    const auto found = symbols.findMethod(owner, kind + "-" + e.token.text, member);
+    if (found == symbols.end())
+      fail(e.token, "property '" + e.token.text + "' of '" + owner + "' has no " +
+                        (kind == "get" ? "getter; it can only be assigned" : "setter; it is read-only"));
+    requireAccess(found, e.token);
+    if (found->second.inferred) throw PendingProperty();
+    path = member.indices;
+    return found;
+  }
+  // `p.Age` calls the getter.
+  Type propertyRead(const Expr &e, const std::string &owner) {
+    propertyReceiver(e, "read");
+    auto &access = analysis.properties[&e];
+    access.owner = owner;
+    const auto getter = accessor(e, owner, "get", access.getterPath);
+    access.getter = getter->first;
+    analysis.expressionTypes[&e] = getter->second.result;
+    return getter->second.result;
+  }
+  // `p.Age = v` calls the setter; `p.Age += v` and `p.Age++` call the getter
+  // and then the setter on a receiver evaluated once.
+  Type propertyWrite(const Expr &e, const std::string &owner, bool read) {
+    propertyReceiver(e, "set");
+    auto &access = analysis.properties[&e];
+    access.owner = owner;
+    const auto setter = accessor(e, owner, "set", access.setterPath);
+    access.setter = setter->first;
+    if (read) access.getter = accessor(e, owner, "get", access.getterPath)->first;
+    const auto type = setter->second.parameters.back().type;
+    analysis.expressionTypes[&e] = type;
+    return type;
   }
   // An addressable expression denotes existing storage. Dot inherits the
   // mutability of its base; dereferencing borrows the pointed-to storage.
@@ -323,9 +811,25 @@ class Analyzer {
       analysis.staticFields[&e] = qualified;
       local = {info.type, info.constant && &e != initializationTarget};
     } else if (e.kind == "name") {
+      if (std::string owner; !findLocal(e.token) && propertyOf(e, owner)) notStorage(e);
       local = lookup(e.token);
       if (local.receiver) analysis.receiverStorage.insert(&e);
       if (read) requireInitialized(e.token);
+    } else if (e.kind == "index") {
+      // a[i] names an element; an index outside the array traps.
+      const auto &base = *e.args[0];
+      if (!storage(base)) fail(e.token, "index a stored array");
+      local = location(base, read);
+      if (!arrayValue(local.type)) {
+        if (!local.type.depth && local.type.base == Type::Pair)
+          fail(e.token, "pair values are read-only so far; p[key] cannot be written or borrowed");
+        fail(e.token, "only arrays and pairs can be indexed; " + typeName(local.type) + " cannot");
+      }
+      requireComplete(base);
+      if (const auto index = expression(*e.args[1]); !integral(index) && !enumValue(index))
+        fail(e.args[1]->token, "an array index must be an integer, not " + typeName(index));
+      expression(*e.args[1], Type::Long);
+      local.type = *local.type.element;
     } else if (e.kind == "unary" && e.token.text == "*") {
       auto ptr = expression(*e.args[0]);
       if (!ptr.depth || ptr == Type::Pointer) fail(e.token, "dereference requires a typed pointer");
@@ -335,7 +839,8 @@ class Analyzer {
         fail(e.token, "enum member '" + e.args[0]->token.text + "." + e.token.text +
                           "' is a constant");
       const auto &base = *e.args[0];
-      if (base.addressable()) local = location(base);
+      if (std::string owner; propertyOf(e, owner)) notStorage(e);
+      if (storage(base)) local = location(base);
       else {
         local.type = expression(base);
         if (recordValue(local.type)) fail(e.token, "field access requires addressable container storage");
@@ -344,6 +849,8 @@ class Analyzer {
         local.type = local.type.pointee();
         local.constant = false; // A constant pointer can point to mutable storage.
       }
+      if (collectionValue(local.type) || arrayValue(local.type))
+        fail(e.token, "'" + e.token.text + "' is a read-only member of " + typeName(local.type));
       if (!recordValue(local.type)) fail(e.token, "field access requires a container or a pointer to a container");
       MemberPath path;
       if (!symbols.findField(local.type.record, e.token.text, path))
@@ -358,7 +865,7 @@ class Analyzer {
   bool heapStorage(const Expr &e) const {
     if (analysis.receiverStorage.count(&e)) return true;
     if (analysis.expressionTypes.at(&e).role != Type::Raw) return true;
-    if (e.kind == "." || (e.kind == "unary" && e.token.text == "*"))
+    if (e.kind == "." || e.kind == "index" || (e.kind == "unary" && e.token.text == "*"))
       return heapStorage(*e.args[0]);
     return false;
   }
@@ -366,6 +873,9 @@ class Analyzer {
     const auto &op = e.token.text;
     if (e.kind == "initializer") {
       if (!recordValue(expected)) fail(e.token, "named initialization requires a container value type");
+      if (!symbols.constructors(expected.record).empty())
+        fail(e.token, "'" + expected.record + "' has constructors; construct it with " + expected.record +
+                          "(...) instead of a { field: value } initializer");
       std::set<std::string> assigned;
       for (const auto &field : e.args) {
         MemberPath path;
@@ -568,10 +1078,24 @@ class Analyzer {
       type.record = e.args[0]->token.text;
       return type;
     }
-    if (e.addressable())
+    if (e.kind == "index" && pairIndex(e)) {
+      // p[key] reads the value stored for key; a missing key traps.
+      const auto &base = *e.args[0];
+      requireComplete(base);
+      const auto type = location(base).type;
+      expression(*e.args[1], *type.key);
+      analysis.expressionTypes[&e] = *type.element;
+      return *type.element;
+    }
+    if (e.addressable()) {
+      if (std::string owner; propertyOf(e, owner)) return propertyRead(e, owner);
+      if (const auto member = collectionMember(e); member != Type::Void) return member;
       return location(e).type;
+    }
+    if (e.kind == "entry") fail(e.token, "key : value entries can only be added to a pair, as p += key : value");
     if (e.kind == "unary" && op == "&") {
       const auto &arg = *e.args[0];
+      requireComplete(arg);
       const Expr *root = &arg;
       std::string suffix;
       while (root->kind == ".") {
@@ -581,7 +1105,7 @@ class Analyzer {
       if (root->kind == "name") {
         bool local = false;
         for (const auto &scope : scopes) local |= scope.count(root->token.text) != 0;
-        auto function = resolve(root->token.text + suffix);
+        auto function = resolve(root->token.text + suffix, arg.token);
         if (!local && function != symbols.end()) {
           const auto &sig = function->second;
           if (sig.method) fail(arg.token, "instance method requires a receiver");
@@ -596,11 +1120,32 @@ class Analyzer {
       }
       auto local = location(arg);
       if (heapStorage(arg)) fail(arg.token, "cannot expose the address of tracked heap storage");
+      if (growableElement(arg))
+        fail(arg.token, "cannot take the address of a dynamic array element: adding elements can move it");
       if (local.constant || managedValue(local.type))
         fail(arg.token, "cannot take the address of constant or managed text storage");
       return local.type.pointerTo();
     }
     if (e.kind == "call") {
+      // `Gun g(5)` and `Gun* p(5)` arrive with the constructed type resolved.
+      if (recordValue(e.castType)) return construction(e, e.castType.record);
+      // `g(w)` on a container local supplies its missing parts; on a
+      // complete one, or on a pointer to one, it reinitializes the object.
+      if (!e.receiver && op.find('.') == std::string::npos)
+        if (const auto *local = findLocal(e.token)) {
+          const bool pointer = local->type.depth == 1 && local->type.base == Type::Record;
+          if ((recordValue(local->type) || pointer) && local->receiver)
+            fail(e.token, "cannot reinitialize the receiver inside its own method");
+          if (recordValue(local->type) && !local->mayMiss.empty()) return completion(e);
+          if (recordValue(local->type)) {
+            if (local->constant) fail(e.token, "cannot reinitialize constant '" + e.token.text + "'");
+            return reinitialization(e, local->type.record);
+          }
+          if (pointer) {
+            requireInitialized(e.token);
+            return reinitialization(e, local->type.record);
+          }
+        }
       if (op == "Length" || op == "CodeUnitAt") {
         if (e.args.size() != (op == "Length" ? 1u : 2u))
           fail(e.token, "wrong argument count for '" + op + "'");
@@ -620,7 +1165,7 @@ class Analyzer {
           fail(e.token, "cannot print an opaque pointer; compare it with null instead");
         return Type::Void;
       }
-      auto found = resolve(op);
+      auto found = resolve(op, e.token);
       // Inside an instance method an unqualified name finds the container's
       // own or inherited methods before static or global functions.
       if (method && !e.receiver && op.find('.') == std::string::npos) {
@@ -638,30 +1183,41 @@ class Analyzer {
         instance = root->kind != "name" || findLocal(root->token) || staticStorage(*e.receiver);
         if (instance) {
           const auto &base = *e.receiver;
+          requireComplete(base);
           Type t;
-          if (base.addressable()) {
+          bool constant = false, stored = true;
+          if (storage(base)) {
             auto local = location(base);
             t = local.type;
-            if (!t.depth && local.constant) fail(base.token, "cannot call a mutable method on a constant");
-          } else t = expression(base);
+            constant = !t.depth && local.constant;
+          } else {
+            t = expression(base);
+            stored = t.depth != 0;
+          }
           if (t.depth) t = t.pointee();
           if (!recordValue(t)) fail(base.token, "method receiver requires a container");
           MemberPath path;
-          found = symbols.findMethod(t.record, op.substr(op.rfind('.') + 1), path);
+          const auto name = op.substr(op.rfind('.') + 1);
+          found = symbols.findMethod(t.record, name, path);
+          // `box.Inner(5)` on a container field reinitializes the field.
+          if (found == symbols.end() && symbols.findField(t.record, name, path) &&
+              recordValue(path.field->type) && !path.field->parentView) {
+            requireAccess(path.field->protectedAccess, path.declaring, name, e.token);
+            if (constant) fail(e.token, "cannot reinitialize field '" + name + "' of a constant");
+            if (!stored) fail(e.token, "cannot reinitialize field '" + name + "' of a temporary");
+            return reinitialization(e, path.field->type.record, t.record, path.indices);
+          }
           if (found == symbols.end()) fail(e.token, "unknown instance method '" + op + "'");
+          if (constant) fail(base.token, "cannot call a mutable method on a constant");
           if (!path.indices.empty()) analysis.receiverPaths[&e] = {t.record, path.indices};
         }
       }
-      if (found == symbols.end() && !e.receiver && !symbols.records.count(op)) {
+      const auto constructed = found == symbols.end() && !instance ? resolveRecord(op, e.token) : "";
+      if (found == symbols.end() && !e.receiver && constructed.empty()) {
         Type builtin;
         if (calendarCall(e, builtin)) return builtin;
       }
-      if (found == symbols.end() && !e.receiver && symbols.records.count(op)) {
-        if (!e.args.empty()) fail(e.token, "default container construction takes no arguments");
-        Type t = Type::Record;
-        t.record = op;
-        return t;
-      }
+      if (!constructed.empty()) return construction(e, constructed);
       if (found == symbols.end()) {
         // Meter.Read() or a bare Read() in a static body naming an instance method.
         const auto dot = op.rfind('.');
@@ -681,23 +1237,7 @@ class Analyzer {
       const size_t offset = signature.method ? 1 : 0;
       if (signature.parameters.size() != e.args.size() + offset)
         fail(e.token, "wrong argument count for '" + op + "'");
-      for (size_t i = 0; i < e.args.size(); ++i) {
-        const auto &argument = *e.args[i];
-        const auto &parameter = signature.parameters[i + offset];
-        if (parameter.reference) {
-          auto local = location(argument);
-          if (heapStorage(argument)) fail(argument.token, "cannot expose tracked heap storage by reference");
-          if (local.constant) fail(argument.token, "cannot pass a constant to a mutable reference");
-          require(local.type, parameter.type, argument.token);
-        } else if (argument.kind == "name" && lookup(argument.token).type.role != Type::Raw) {
-          auto tracked = expression(argument);
-          tracked.role = Type::Raw;
-          if (!signature.nonescapingParameters.count(i + offset) || tracked != parameter.type)
-            fail(argument.token, "tracked pointer requires a proven nonescaping parameter of matching type");
-          analysis.conversions[&argument] = parameter.type;
-        } else
-          expression(argument, parameter.type);
-      }
+      arguments(e, signature, offset);
       return signature.result;
     }
     auto first = expression(*e.args[0],
@@ -953,6 +1493,7 @@ class Analyzer {
   bool block(const std::vector<std::unique_ptr<Stmt>> &statements) {
     scopes.emplace_back();
     bool terminated = sequence(statements);
+    if (!terminated) requireCompleteScopes(scopes.size() - 1);
     scopes.pop_back();
     return terminated;
   }
@@ -962,6 +1503,7 @@ class Analyzer {
     if (s.kind == "break" || s.kind == "continue") {
       if (loops.empty())
         fail(s.token, s.kind + " requires an enclosing loop");
+      requireCompleteScopes(loops.back().depth);
       if (s.kind == "continue")
         loops.back().continues.push_back(scopes);
       else
@@ -969,15 +1511,35 @@ class Analyzer {
       return true;
     }
     if (s.kind == "returnOwner") {
+      requireCompleteScopes(0);
       if (!s.expr || s.expr->kind != "name" || lookup(s.expr->token).constant ||
           expression(*s.expr) != result)
         fail(s.token, "return :: requires a mutable owning local of the declared type");
       return true;
     }
     if (s.kind == "return") {
+      if (inferring) {
+        result = expression(*s.expr);
+        if (result == Type::Void) fail(s.expr->token, "a getter must produce a value");
+        inferring = false;
+        return true;
+      }
       if (result.role == Type::Owner) fail(s.token, "owning function requires return :: on every return");
+      if (s.expr) requireComplete(*s.expr);
+      requireCompleteScopes(0);
+      // `return local` moves a value with a destructor out of the function.
+      if (s.expr && s.expr->kind == "name" &&
+          (collectionValue(result) || (arrayValue(result) && symbols.moveOnly(result)) ||
+           (recordValue(result) && symbols.destructible(result.record)))) {
+        const auto *local = findLocal(s.expr->token);
+        if (local && !local->receiver && !local->borrowed) {
+          movable = s.expr.get();
+          analysis.moves.insert(&s);
+        }
+      }
       require(s.expr ? expression(*s.expr, result) : Type::Void, result,
               s.token);
+      movable = nullptr;
       return true;
     }
     if (s.kind == "if") {
@@ -1001,6 +1563,7 @@ class Analyzer {
     if (s.kind == "do") {
       const auto entry = scopes;
       loops.emplace_back();
+      loops.back().depth = scopes.size();
       bool terminated = block(s.body);
       auto incoming = std::move(loops.back().continues);
       auto exits = std::move(loops.back().breaks);
@@ -1026,6 +1589,7 @@ class Analyzer {
         require(expression(*s.expr), Type::Bool, s.token);
       auto entry = scopes;
       loops.emplace_back();
+      loops.back().depth = scopes.size();
       bool terminated = block(s.body);
       auto incoming = std::move(loops.back().continues);
       loops.pop_back();
@@ -1036,6 +1600,7 @@ class Analyzer {
       if (s.step)
         statement(*s.step);
       scopes = entry; // A precondition loop can execute zero times.
+      requireCompleteScopes(scopes.size() - 1);
       scopes.pop_back();
       return false;
     }
@@ -1050,7 +1615,17 @@ class Analyzer {
                    ? s.type.pointee() : Type(Type::Void);
       }
       if (s.kind == "own") ownerDestination = s.expr.get();
+      std::set<std::string> missing;
+      if (!s.expr && s.kind == "own" && recordValue(s.type.pointee())) {
+        missing = defaultMissing(s.type.pointee().record);
+        if (!missing.empty()) incomplete(s.token, s.type.pointee().record, missing);
+      } else if (!s.expr && recordValue(s.type))
+        missing = defaultMissing(s.type.record);
+      if (s.kind == "let" && s.expr && recordValue(s.expr->castType)) incompleteAllowed = s.expr.get();
+      incompleteMissing.clear();
       auto type = s.expr ? expression(*s.expr, hint) : s.type;
+      if (incompleteAllowed) missing = incompleteMissing;
+      incompleteAllowed = nullptr;
       ownerDestination = nullptr;
       if (s.kind == "let" && s.type.depth && heapValue(s.type.pointee()) && heapValue(type)) {
         convert(*s.expr, type, s.type.pointee());
@@ -1081,18 +1656,34 @@ class Analyzer {
         declared.role = type.role;
         require(type, declared, s.token);
       }
-      if (type.role == Type::Owner && type.depth == 1 && symbols.managed(type.pointee()))
-        fail(s.token, "heap containers with string, name, or big fields are not supported yet");
       analysis.localTypes[&s] = type;
       auto name = s.token;
       name.text = s.name;
-      bind(name, {type, s.constant, s.kind == "own" || s.expr != nullptr || recordValue(type)});
+      // A fixed array without an initializer gives each element its
+      // default, which must not need running code.
+      if (fixedArray(type) && !s.expr && recordValue(*type.element) &&
+          symbols.runtimeDefaults(type.element->record))
+        fail(s.token, "'" + s.name + "' cannot default its elements: '" + type.element->record +
+                          "' is built at run time (constructors or computed defaults); use a dynamic array (" +
+                          type.element->record + " []) and add elements to it");
+      bind(name, {type, s.constant,
+                  s.kind == "own" || s.expr != nullptr || recordValue(type) || collectionValue(type) ||
+                      arrayValue(type)});
+      auto &bound = scopes.back().at(name.text);
+      bound.mayMiss = bound.mustMiss = missing;
+      bound.declaration = name;
     } else if (s.kind == "expr")
       expression(*s.expr);
     else {
-      auto local = location(*s.target, s.kind != "assign");
-      if (local.constant)
-        fail(s.token, "cannot modify constant '" + s.target->token.text + "'");
+      requireComplete(*s.target);
+      std::string owner;
+      auto local = propertyOf(*s.target, owner) ? Local{propertyWrite(*s.target, owner, s.kind != "assign"), false}
+                                                : location(*s.target, s.kind != "assign");
+      if (local.constant) {
+        const Expr *root = s.target.get();
+        while ((root->kind == "." || root->kind == "index") && !root->args.empty()) root = root->args[0].get();
+        fail(s.token, "cannot modify constant '" + root->token.text + "'");
+      }
       if (local.type.role != Type::Raw) {
         if (s.kind != "assign" || (s.expr->kind != "null" &&
             (local.type.role != Type::Alias || s.expr->kind != "name")))
@@ -1101,6 +1692,40 @@ class Analyzer {
         if (s.expr->kind != "null" && (source.role == Type::Raw ||
             source.pointee() != local.type.pointee()))
           fail(s.token, "incompatible tracked alias source");
+        return false;
+      }
+      if (arrayValue(local.type) && s.kind != "assign") {
+        // a += x appends to a dynamic array and a-- removes its last element.
+        if (fixedArray(local.type))
+          fail(s.token, typeName(local.type) + " has a fixed length; '" + s.kind +
+                            "' needs a dynamic array (" + typeName(*local.type.element) + " [])");
+        if (s.kind == "+=") {
+          if (s.expr->kind == "entry")
+            fail(s.expr->token, "key : value entries belong in a pair, not in " + typeName(local.type));
+          expression(*s.expr, *local.type.element);
+        } else if (s.kind != "--")
+          fail(s.token, "'" + s.kind + "' is not supported on " + typeName(local.type) +
+                            " yet; dynamic arrays support += and --");
+        return false;
+      }
+      if (collectionValue(local.type) && s.kind != "assign") {
+        // q += x adds to a queue's back or a stack's top, p += key : value
+        // adds or replaces an entry, and x-- removes the queue's front, the
+        // stack's top, or the pair's last added entry.
+        if (s.kind == "+=") {
+          if (local.type.base == Type::Pair) {
+            if (s.expr->kind != "entry")
+              fail(s.expr->token, "add to a pair as p += key : value");
+            expression(*s.expr->args[0], *local.type.key);
+            expression(*s.expr->args[1], *local.type.element);
+          } else {
+            if (s.expr->kind == "entry")
+              fail(s.expr->token, "key : value entries belong in a pair, not in " + typeName(local.type));
+            expression(*s.expr, *local.type.element);
+          }
+        } else if (s.kind != "--")
+          fail(s.token, "'" + s.kind + "' is not supported on " + typeName(local.type) +
+                            " yet; collections support += and --");
         return false;
       }
       const bool bitwise = s.kind == "&=" || s.kind == "|=" || s.kind == "^=" ||
@@ -1121,7 +1746,8 @@ class Analyzer {
         } else
           expression(*s.expr, local.type);
       }
-      if (s.target->kind == "name" && !analysis.staticFields.count(s.target.get()))
+      if (s.target->kind == "name" && !analysis.staticFields.count(s.target.get()) &&
+          !analysis.properties.count(s.target.get()))
         lookup(s.target->token).initialized = true;
     }
     return false;
@@ -1130,13 +1756,26 @@ class Analyzer {
 public:
   Analyzer(const Symbols &symbols, Type result)
       : symbols(symbols), result(result) {}
+  // The type an untyped getter's expression produces, or Void while it
+  // reads another property whose type is not known yet.
+  Type inferGetter(const Function &getter) {
+    inferring = true;
+    try {
+      run(getter);
+    } catch (const PendingProperty &) {
+      return Type::Void;
+    }
+    return result;
+  }
   // The LLVM constant for a static field initializer. Only literals, type
   // limits, and enum members of the field's type are compile-time constants.
   // Type-checks an initializer in its container's scope, without locals or
   // fields. Returns its LLVM constant, or nothing when it must be evaluated
   // at run time; an empty string is a string/name literal.
-  std::optional<std::string> constant(const std::string &qualified, const Expr &e, Type type) {
+  std::optional<std::string> constant(const std::string &qualified, const Expr &e, Type type,
+                                      Usings visible = nullptr) {
     container = qualified.substr(0, qualified.rfind('.'));
+    usings = std::move(visible);
     initializerScope = true;
     scopes.emplace_back();
     expression(e, type);
@@ -1177,6 +1816,7 @@ public:
     return std::nullopt;
   }
   FunctionAnalysis run(const Function &function) {
+    usings = function.usings;
     auto dot = function.name.text.rfind('.');
     if (dot != std::string::npos)
       container = function.name.text.substr(0, dot);
@@ -1194,11 +1834,14 @@ public:
     symbols.validateType(result, function.name);
     for (const auto &parameter : function.params) {
       symbols.validateType(parameter.type, parameter.name);
-      bind(parameter.name, {parameter.type, false, true, method && &parameter == &function.params.front()});
+      bind(parameter.name, {parameter.type, false, true, method && &parameter == &function.params.front(),
+                            parameter.reference});
     }
     if (!function.nativeSymbol.empty())
       return std::move(analysis);
-    if (!sequence(function.body) && result != Type::Void)
+    const bool terminated = sequence(function.body);
+    if (!terminated) requireCompleteScopes(0);
+    if (!terminated && result != Type::Void)
       fail(function.name, "not all paths return a value");
     return std::move(analysis);
   }
@@ -1208,12 +1851,82 @@ FunctionAnalysis analyzeFunction(const Function &function,
                                  const Symbols &symbols) {
   return Analyzer(symbols, function.result).run(function);
 }
+void resolveProperties(Symbols &symbols, const std::vector<const Program *> &programs,
+                       const std::vector<Symbols *> &tables) {
+  std::vector<const Function *> accessors;
+  for (const auto *program : programs)
+    for (const auto &f : *program)
+      if (f.method && !propertyName(f.name.text).empty()) accessors.push_back(&f);
+  auto update = [&](const Function &f) {
+    for (auto *table : tables)
+      if (auto found = table->find(f.name.text); found != table->end()) {
+        found->second.result = f.result;
+        found->second.parameters = f.params;
+        found->second.inferred = false;
+      }
+  };
+  // Untyped getters take their expression's type. One may read another
+  // untyped property, so repeat until every type is known.
+  for (bool progress = true; progress;) {
+    progress = false;
+    std::string waiting;
+    const Token *at = nullptr;
+    for (const auto *f : accessors) {
+      if (!f->inferred || memberName(f->name.text)[0] != 'g') continue;
+      const auto type = Analyzer(symbols, Type::Void).inferGetter(*f);
+      if (type == Type::Void) {
+        waiting = propertyName(f->name.text);
+        at = &f->name;
+        continue;
+      }
+      f->result = type;
+      f->inferred = false;
+      update(*f);
+      progress = true;
+    }
+    if (!progress && at)
+      fail(*at, "cannot infer the type of property '" + waiting +
+                    "': its getter reads a property whose type is not known yet; declare one of them "
+                    "with a type, as in int " + waiting + ": ...");
+  }
+  // An untyped setter takes its container's getter's type; a typed one
+  // must agree with it.
+  for (const auto *f : accessors) {
+    if (memberName(f->name.text)[0] != 's') continue;
+    const auto record = f->name.text.substr(0, f->name.text.rfind('.'));
+    const auto property = propertyName(f->name.text);
+    const auto getter = symbols.find(getterKey(record, property));
+    auto &value = f->params.back();
+    if (f->inferred) {
+      if (getter == symbols.end())
+        fail(f->name, "setter of property '" + property + "' needs a type, as in int " + property +
+                          ": ..., because '" + record + "' declares no getter for it");
+      value.type = getter->second.result;
+      f->inferred = false;
+      update(*f);
+    } else if (getter != symbols.end() && getter->second.result != value.type)
+      fail(f->name, "the getter and setter of property '" + property + "' disagree on its type: " +
+                        typeName(getter->second.result) + " and " + typeName(value.type));
+  }
+  // A property may share its name only with a protected field of its own
+  // container, which it then exposes.
+  for (const auto *f : accessors) {
+    const auto record = f->name.text.substr(0, f->name.text.rfind('.'));
+    const auto property = propertyName(f->name.text);
+    for (const auto &field : symbols.records.at(record).fields)
+      if (!field.parentView && field.name.text == property && !field.protectedAccess)
+        fail(f->name, "property '" + property + "' has the name of a public field of '" + record +
+                          "'; a property may only share its name with a protected field it exposes");
+    if (symbols.count(methodKey(record, property)))
+      fail(f->name, "property '" + property + "' has the name of a method of '" + record + "'");
+  }
+}
 void resolveFieldDefaults(Symbols &symbols) {
   for (auto &[name, record] : symbols.records)
     for (auto &field : record.fields)
       if (field.initializer) {
         auto value = Analyzer(symbols, Type::Void)
-                         .constant(name + "." + field.name.text, *field.initializer, field.type);
+                         .constant(name + "." + field.name.text, *field.initializer, field.type, field.usings);
         field.runtimeDefault = !value;
         if (value) field.initialValue = *value;
       }
@@ -1226,7 +1939,7 @@ void resolveStaticInitializers(Symbols &symbols) {
       info.runtime = recordValue(info.type) && symbols.runtimeDefaults(info.type.record);
       continue;
     }
-    auto value = Analyzer(symbols, Type::Void).constant(name, *info.initializer, info.type);
+    auto value = Analyzer(symbols, Type::Void).constant(name, *info.initializer, info.type, info.usings);
     info.runtime = !value;
     if (value) info.value = *value;
   }
@@ -1282,6 +1995,7 @@ std::vector<Function> generateInitializers(Symbols &symbols, Symbols &declaratio
       target->args.push_back(std::move(receiver));
       generated.push_back(assignment(key, params, std::move(target), clone(*field.initializer)));
       generated.back().method = true;
+      generated.back().usings = field.usings;
     }
   for (const auto &[name, info] : symbols.statics) {
     if (info.imported || !info.runtime) continue;
@@ -1304,6 +2018,7 @@ std::vector<Function> generateInitializers(Symbols &symbols, Symbols &declaratio
     }
     generated.push_back(assignment(key, {}, std::move(target), std::move(value)));
     generated.back().initializes = name;
+    generated.back().usings = info.usings;
   }
   return generated;
 }

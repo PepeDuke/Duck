@@ -38,31 +38,31 @@ Containers and namespaces
    Proposal: Parse a named container followed by a sequence of adjacent bodies, tagging each body as static or instance. Preserve the existing adjacency rule and resolve member calls using the receiver kind.
 [x] Merge instance container extensions across declarations and files.
    Proposal: Collect fragments by qualified container name before validating layouts. Merge in declared input order, diagnose conflicting members and parent lists at their source locations, and give importing modules the same final field layout.
-[] Support nested instance types and their qualified names.
+[x] Support nested instance types and their qualified names.
    Proposal: During name collection, maintain a stack of enclosing containers and register qualified type names. Resolve type paths in declarations, casts, and construction using the same lookup order.
-[] Support namespace imports with using.
+[x] Support namespace imports with using.
    Proposal: Record using directives in their lexical scope. Expand an unqualified name against visible imports during resolution and report both candidates when imports make a reference ambiguous.
 
 Construction and object model
-[] Support custom constructors and destructors.
-   Proposal: Register constructor overloads and one destructor per container. Resolve construction by argument types and invoke the destructor from lexical or heap cleanup exactly once for each fully constructed object. Use the same per-container cleanup to release string, name, and big fields on heap drop, then allow those containers on the heap.
-[] Support partial and composite constructors and reject use before initialization is complete.
+[x] Support custom constructors and destructors.
+   Proposal: Register constructor overloads and one destructor per container. Resolve construction by argument types and invoke the destructor from lexical or heap cleanup exactly once for each fully constructed object. Heap drops already run a generated per-container cleanup for string, name, and big fields; run the user destructor from that same hook, before the generated release.
+[x] Support partial and composite constructors and reject use before initialization is complete.
    Proposal: Track completed constructor parts in definite-initialization analysis. Compose parent and child parts in a declared order, merge completion facts at branches, and diagnose a method call if any required part may still be missing.
-[] Allow an existing object to be reinitialized by calling its constructor again.
+[x] Allow an existing object to be reinitialized by calling its constructor again.
    Proposal: Resolve a call on an existing mutable object as reinitialization. Define cleanup of its previous field values and preserve receiver identity so aliases still refer to the same object after construction completes.
 [x] Implement inheritance, multiple parents, and left-to-right parent priority.
    Proposal: Store ordered parent lists, reject inheritance cycles, and compute each base's field layout and offset. Search inherited members left to right and retain the declaring parent for explicitly qualified access. Extend Analyzer::requireAccess so a derived container can use its parents' protected members.
-[] Implement method overrides, virtual dispatch, and base member calls.
+[x] Implement method overrides, virtual dispatch, and base member calls.
    Proposal: Identify overridden signatures after the inheritance graph is complete. Emit dispatch slots for overrides and adjust the receiver to the declaring base; lower base calls directly so they bypass the overriding method. Replace the redeclared-member rejection in resolveInheritance with signature matching.
-[] Allow a derived container to satisfy an interface-style parameter.
+[x] Allow a derived container to satisfy an interface-style parameter.
    Proposal: Use the declared parent relationship to check interface arguments. Pass a reference to the compatible base view and dispatch to the concrete implementation so a call through the parameter preserves overrides.
-[] Implement getter and setter blocks.
+[x] Implement getter and setter blocks.
    Proposal: Parse getter and setter bodies as named accessors. Resolve property reads to a getter and assignments to a setter with a typed value parameter; evaluate the receiver once for compound assignment.
 
 Collections
-[] Implement fixed-size and dynamic arrays.
+[x] Implement fixed-size and dynamic arrays.
    Proposal: Represent a fixed array with an element type and compile-time extent. Give dynamic arrays data, length, and capacity fields, and generate element-aware moves and cleanup when storage grows or leaves scope.
-[] Implement queues, stacks, and keyed pair collections.
+[x] Implement queues, stacks, and keyed pair collections.
    Proposal: Use a ring buffer for queues, end insertion/removal for stacks, and keyed storage with insertion order for pairs. Preserve the documented first-out, last-out, and last-added-key behavior in runtime tests.
 [] Support collection literals and collection type inference.
    Proposal: Let the expected type disambiguate record, sequence, and pair literals. Without an expected type, infer compatible element or key/value types and diagnose empty or heterogeneous literals whose type cannot be determined.

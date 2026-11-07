@@ -30,7 +30,9 @@ struct Type {
     IntN, UIntN, // Custom byte-width iN/uN; `bits` holds 8*N.
     Big, UBig,   // Arbitrary-precision integers (reference-counted storage).
     Tiny, UTiny, // 69-digit decimal floating point values.
-    Enum         // A #@ enum member; `record` holds the enum name.
+    Enum,        // A #@ enum member; `record` holds the enum name.
+    Queue, Stack, Pair, // Collections; `element` (and a pair's `key`) hold their types.
+    Array               // `element` holds the element type; `extent` is 0 when dynamic.
   };
   enum Role { Raw, Owner, Alias };
   Role role = Raw;
@@ -38,7 +40,22 @@ struct Type {
   unsigned depth = 0;
   unsigned bits = 0; // Only for IntN and UIntN.
   std::string record;
+  // A collection's element type, or a pair's value type, and a pair's key type.
+  std::shared_ptr<const Type> element, key;
+  unsigned long long extent = 0; // A fixed array's element count.
   Type(Kind kind = Void) : base(kind) {}
+  static Type array(const Type &element, unsigned long long extent) {
+    Type t(Array);
+    t.element = std::make_shared<const Type>(element);
+    t.extent = extent;
+    return t;
+  }
+  static Type collection(Kind kind, const Type &element, const Type &key = Type()) {
+    Type t(kind);
+    t.element = std::make_shared<const Type>(element);
+    if (kind == Pair) t.key = std::make_shared<const Type>(key);
+    return t;
+  }
   // iN/uN for 1, 2, 4, and 8 bytes are the exact host-width types.
   static Type integer(unsigned width, bool isUnsigned) {
     switch (width) {
@@ -56,14 +73,26 @@ struct Type {
   bool operator==(Kind kind) const { return !depth && base == kind; }
   bool operator!=(Kind kind) const { return !(*this == kind); }
   bool operator==(const Type &t) const {
+    auto same = [](const std::shared_ptr<const Type> &a, const std::shared_ptr<const Type> &b) {
+      return a == b || (a && b && *a == *b);
+    };
     return role == t.role && base == t.base && depth == t.depth && bits == t.bits &&
-           record == t.record;
+           record == t.record && extent == t.extent && same(element, t.element) && same(key, t.key);
   }
   bool operator!=(const Type &t) const { return !(*this == t); }
   static const Type Pointer;
 };
 inline const Type Type::Pointer = Type(Type::Void).pointerTo();
 inline bool recordValue(const Type &t) { return !t.depth && t.base == Type::Record; }
+// `T [N]` stores N elements inline; `T []` is a handle to growable heap
+// storage, null while empty.
+inline bool arrayValue(const Type &t) { return !t.depth && t.base == Type::Array; }
+inline bool fixedArray(const Type &t) { return arrayValue(t) && t.extent != 0; }
+inline bool dynamicArray(const Type &t) { return arrayValue(t) && t.extent == 0; }
+// A queue, stack, or pair: a move-only handle to heap storage, null while empty.
+inline bool collectionValue(const Type &t) {
+  return !t.depth && (t.base == Type::Queue || t.base == Type::Stack || t.base == Type::Pair);
+}
 // An enum value is stored as its member's declaration index. Printing uses the
 // member name; operators, conversions, and concatenation use its underlying value.
 inline bool enumValue(const Type &t) { return !t.depth && t.base == Type::Enum; }
@@ -151,7 +180,7 @@ struct Expr {
   std::vector<std::unique_ptr<Expr>> args;
   std::unique_ptr<Expr> receiver;
   bool addressable() const {
-    return kind == "name" || kind == "." || (kind == "unary" && token.text == "*");
+    return kind == "name" || kind == "." || kind == "index" || (kind == "unary" && token.text == "*");
   }
 };
 struct Stmt {
@@ -163,6 +192,17 @@ struct Stmt {
   std::unique_ptr<Stmt> initializer, step;
   std::vector<std::unique_ptr<Stmt>> body, alternate;
 };
+// A `using Name.Space` directive. It applies to the declarations after it in
+// the file scope or static body it appears in, and in their nested bodies.
+// `level` is that scope's qualified container ("" at file scope); `target`
+// is the imported container's qualified name.
+struct Using {
+  Token token;
+  std::string level, target;
+};
+// The directives visible at a declaration, outermost first. Shared because
+// every declaration in a scope sees the same list.
+using Usings = std::shared_ptr<const std::vector<Using>>;
 struct Parameter {
   Token name;
   Type type;
@@ -179,6 +219,7 @@ struct Parameter {
   // The default is not a compile-time constant; a generated method
   // evaluates it during construction.
   bool runtimeDefault = false;
+  Usings usings; // Visible where a field default was written.
 };
 // Instance methods live in their own namespace, so a chained static block
 // can declare a function with the same name: Meter.Read is static and
@@ -193,8 +234,10 @@ inline std::string memberName(const std::string &key) {
 }
 struct Function {
   Token name;
-  Type result;
-  std::vector<Parameter> params;
+  // Mutable so an untyped property's accessors can take the type inferred
+  // from its getter after parsing (see resolveProperties).
+  mutable Type result;
+  mutable std::vector<Parameter> params;
   std::vector<std::unique_ptr<Stmt>> body;
   bool method = false;
   std::string nativeSymbol; // Nonempty for a bodyless extern "C" declaration.
@@ -203,6 +246,10 @@ struct Function {
   // Its fields are not bound as locals, so defaults cannot read them.
   bool generated = false;
   std::string initializes; // The static field a generated $eval assigns.
+  Usings usings;
+  // A property accessor written without a type: a getter's result, or a
+  // setter's value parameter, comes from the property's getter expression.
+  mutable bool inferred = false;
 };
 struct Record {
   Token name;
@@ -229,6 +276,7 @@ struct StaticField {
   bool constant = false;
   bool protectedAccess = false;
   std::unique_ptr<Expr> initializer; // Null for zero initialization.
+  Usings usings;
 };
 struct Program : std::vector<Function> {
   std::vector<Record> records;

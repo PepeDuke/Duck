@@ -316,7 +316,7 @@ Main() {
             with self.subTest(statement=statement):
                 self.reject('Main() { ' + statement + ' }', message)
         self.reject('Holder {\n big value = 5.5\n}\nMain() {}', 'type mismatch')
-        self.reject('Holder {\n big value\n}\nMain() { Holder* h() }', 'heap containers with string, name, or big fields')
+        self.run_source('Holder {\n big value = 5\n}\nMain() { h :: Holder()\nh.value = h.value * 3\nPrint(h.value) }', [15])
         self.reject('extern "C" Bad(big b)\nMain() {}', 'native parameter ABI')
         self.reject('extern "C" Bad(tiny& t)\nMain() {}', 'native parameter ABI')
         self.reject('extern "C" Bad(i16& t)\nMain() {}', 'native parameter ABI')

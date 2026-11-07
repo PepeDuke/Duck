@@ -289,20 +289,42 @@ Declare an instance container as `Example { ... }`. Fields and instance methods
 share the body. Each member and each statement starts on its own line when
 there is more than one. Instance methods can use field names directly or access
 them through `this`. Declare and use the type by its name alone, such as `Example` or `Example*`.
-Static function groups continue to use `#{}`. Custom constructors,
-properties, overrides, and virtual dispatch remain future work.
+Static function groups continue to use `#{}`.
 
 A container name can be followed by a chain of bodies in any order: `{ ... }`
 for instance members and `#{ ... }` for static ones, as in
 `Meter { ... }` then `#{ ... }` on the next line. Bodies must be adjacent,
 separated by at most one newline; a blank line between them is an error. A
 parent list goes before the first body, and a chain that has a parent list
-needs at least one instance body. Instance bodies are allowed only at file
-scope. Static and instance members are separate namespaces, so both kinds can
+needs at least one instance body. Static and instance members are separate namespaces, so both kinds can
 declare `Foo()`: `meter.Foo()` and a bare `Foo()` in an instance method call the
 instance one, while `Meter.Foo()` and a bare `Foo()` in a static body call the
 static one. Instance methods can also use the chain's static fields by their
 bare names.
+
+A container with an instance body can be declared inside a static body, as in
+`Name #{ Space { int Value } }`. Its qualified name is its enclosing path,
+`Name.Space`, which names the type everywhere: declarations (`Name.Space sp()`),
+pointers and casts (`(Name.Space*)p`), parent lists, construction
+(`Name.Space()`), and static calls (`Name.Space.Make()`). Inside `Name`, in its
+nested containers, and in `Space`'s own methods, a type path resolves like a
+relative function name: from the innermost enclosing container outward, then at
+file scope, so a bare `Space` finds `Name.Space` before a file-scope `Space`.
+Nested types merge across declarations by qualified name, and a type cannot
+share its qualified name with a static function or field.
+
+`using Name` at the top of a file or static body imports `Name`'s members into
+that scope: after it, `Space.Foo()`, `Space sp()`, `Space()`, and
+`Space.Count` mean `Name.Space.Foo()` and so on. Directives come before the
+scope's other declarations, name a container by a path resolved like a type
+(`using Name.Space`, or `using Space` inside `Name`), and apply only in the
+file or body that declares them and in the bodies nested inside it, including
+instance methods, field defaults, and static initializers written there.
+Lookup visits each scope from the innermost outward; within a scope, its own
+members come first, then its directives, so the file's own `Helper()` wins
+over an imported one and an inner body's directive wins over the file's.
+Locals still shadow everything. When two directives in the same scope both
+provide a name, the reference is rejected and both candidates are reported.
 
 Separate declarations of one container, in the same file or in different files
 of a module, merge into one container. Instance fields join the layout in input
@@ -336,10 +358,90 @@ Copying a managed container retains its text and big values, assigning one
 releases the values it replaces, and parameters, temporaries, and locals
 release theirs when they go out of scope, through nested containers and
 parents. A managed container's layout is compiler-private, so it cannot be
-passed to native code by reference, allocated on the heap, or reached through
-a raw pointer cast. Heap allocation stays off for these containers because heap
-cleanup frees the storage without releasing the text and big values inside;
-that needs per-container destructors.
+passed to native code by reference or reached through a raw pointer cast.
+
+Managed containers can live on the heap (`Named* p()`, `p :: Make()`). Only an
+owner frees a heap payload, and the owner's type names the payload's type, so
+dropping an owner passes the heap runtime a generated cleanup function,
+`@duck$cleanup.Named`. The runtime calls it to release the payload's string,
+name, and big values, through nested containers and parents, just before
+freeing the payload. Aliases never free it, so they pass no cleanup. Each
+module defines the cleanup functions its owners use.
+
+A container declares constructors as members named after it, `Gun(int ammo)
+{ ... }`, and at most one destructor, `~Gun() { ... }`. Construct with
+arguments as `Gun g(5)`, `Gun(5)`, or `Gun* p(5)` on the heap; `Gun g`,
+`Gun g()`, and `Gun()` call the zero-argument constructor. An overload whose parameter
+types match the arguments exactly wins; otherwise the single constructor the
+arguments convert to is chosen, and two such candidates are reported as
+ambiguous. A container with constructors cannot be built with a
+`{ Field: value }` initializer. Constructors are not inherited and cannot be
+protected: a `-` prefix declares a partial constructor instead.
+
+A partial constructor, `-Entity(World& w) { ... }`, is a part of construction
+that must run in addition to the regular one. A container has one partial part
+and one regular part, each present when it declares such constructors; any
+one overload completes a part, and a zero-argument overload runs
+automatically when no other is chosen. A container's parts run in a fixed
+order: its parents' parts (left to right, depth first), then its own partial
+part, then its regular part, so `-Example()` runs before `Example()`.
+
+Composite construction passes every part's arguments in one flat list in that
+order: with `Gun : Entity`, `Gun g(w, 5)` runs `-Entity(w)` then `Gun(5)`. Each
+part takes the arguments of one overload, or none; the split that leaves the
+fewest parts missing wins, then one whose overloads match the argument types
+exactly, and any other tie is reported as ambiguous. Parents with
+constructors are constructed this way, so `W : G` with `G(int)` is built as
+`W w(2)`.
+
+Only a declared local may be left incomplete: `Gun g(5)` runs `Gun(5)` now
+and leaves `-Entity` missing, and `g(w)` supplies it later. Each part runs as
+soon as its arguments are given. Definite-initialization analysis tracks the
+parts a local may or must still miss and merges them at branches. While a
+part may be missing, the local can read and write fields but cannot call a
+method, be passed by reference, have its address taken, be copied, moved,
+returned, or assigned, or reach the end of its scope, including through
+`return`, `break`, and `continue`. A completion must supply parts missing on
+every path, so completing on one branch and again afterwards is rejected, as
+is completing a local declared outside the loop that contains the call.
+Temporaries (`Gun(5)`), heap constructions, fields without a default, and
+static fields must be complete where they are built.
+
+Calling a constructor on a complete object reinitializes it: `g(5)` on a local
+or reference parameter, `p(5)` on a heap owner or alias (or a typed pointer),
+and `box.Inner(5)` on a container field. The arguments go through the same
+part split as a construction and must complete every part. The new state is
+built first, so arguments, including a reference to the object itself as in
+`a(a, 5)`, still see the old state. Then the old object is destroyed (its
+destructor runs, and its string, name, and big fields are released), and the
+new state moves into the same storage without a copy. References and heap
+aliases to the object therefore see the new object, and a dead owner or alias
+traps like any dereference. Constant locals, fields of constants or
+temporaries, and the receiver inside its own method (`this(...)`) cannot be
+reinitialized. A container without constructors reinitializes to its field
+defaults with `x()`.
+
+Construction follows the layout: each parent is defaulted and runs its own
+parts first, then the container's fields get their defaults (a field without
+one is fully built from its parts' zero-argument overloads), then the
+container's own partial and regular parts run. Each constructor is an instance method keyed by its
+parameter types, such as `@duck.Gun.$$new$int` or `@duck.Entity.$$part$World_r`.
+
+A container with a destructor, or with a field or parent that has one, is
+move-only so that each constructed object is destroyed exactly once. Reading
+one out of a variable, field, or dereference as a value is rejected; pass it
+by reference (`Use(Gun& g)`), and by-value parameters of such a type are
+rejected. Call results and constructions move into their destination, and
+`return local` moves the local out instead of destroying it. Static fields
+cannot hold one, since static storage is never destroyed.
+
+The destructor runs when a local leaves scope (locals in reverse declaration
+order, including on `break`, `continue`, and `return`), when an assignment
+replaces the value, when a temporary dies (`Make()` as a statement, or a method
+called on a call result), and when an owner drops a heap payload, through the
+heap cleanup function. A generated `@duck$destroy.Gun` runs the destructor's
+body, then destroys fields in reverse layout order, so parents are destroyed
+last; string, name, and big values are released after that.
 
 A `#{}` block can also hold static data fields, such as `int Score = 10`,
 `#int Max = 100` for a constant, or `-int Secret` for a protected field. Each
@@ -376,8 +478,92 @@ wins an overlap. Inherited fields can be named directly inside methods and in
 parent state as its receiver. `this.Human.Walk()` reaches a lower-priority
 parent explicitly; that parent view is protected, so outside code cannot use
 it. Unknown or repeated parents and inheritance cycles are rejected, as is a
-member that redeclares an inherited one, until overrides are implemented. A
-derived value does not yet convert to a parent parameter.
+field that redeclares an inherited field or method.
+
+A derived container satisfies a parent's reference parameter: `Talk(c)`
+passes a `Cat` to `Talk(Animal& a)`, and `Stroll(c)` passes it to
+`Stroll(Walker& w)`. The callee receives the parent's embedded state, so
+`a.Legs` reads and writes the cat's own field, and the object's dispatch
+table, so `a.Speak()` and any call on `this` inside `Animal`'s methods reach
+`Cat`'s overrides. Passing the reference on, as `Again(a)`, keeps the table.
+A container that holds the parent through more than one parent is rejected
+as ambiguous. By-value parameters still take only their exact type, since a
+copy holds just the parent's state. Through such a reference, replacing the
+whole object, by reinitialization (`a(...)`) or assignment (`a = Animal()`),
+traps when the reference holds only part of a larger object, because the
+derived state would be left behind; on a whole `Animal` it works as before.
+
+An instance method that redeclares an inherited method overrides it, and
+every inherited method of that name through any parent: `string Speak()` in
+`Cat : Animal` overrides `Animal.Speak`. An override must keep the parameter
+types, `&` markers, result type, and access of each method it overrides;
+fields cannot be overridden, and a method cannot redeclare an inherited
+field. Calling a method on the object (`cat.Speak()`) runs the version its
+exact type sees. Inside a method, a call on `this` (`Speak()` or
+`this.Speak()`) runs the final overrider for the whole object, so
+`Animal.Describe()` calling `Speak()` prints `meow` for a `Cat`, including
+when `Cat` lives in a module that imports `Animal`. The final overrider is the
+most derived declaration on the path from the object to the receiving parent
+state; overriding a method declared in two parents overrides both. A base
+call, `this.Animal.Speak()`, runs that parent's version directly, bypassing
+the overrides below it, while calls on `this` inside it still dispatch.
+Constructors and destructors are not dispatched through: inside them, calls
+on `this` run their own container's versions, since a derived part is not
+built yet or is already destroyed.
+
+A getter block `@{ ... }` and a setter block `={ ... }` chained to a container
+declare properties, as in `Examples/Containers/04_Properties.dk`:
+
+```duck
+Person
+{
+    -int Years = 20
+}
+@{
+    Age: Years
+}
+={
+    Age: Years = value
+}
+```
+
+Each entry is an optional type, the property name, `:`, and either a getter
+expression or a setter statement, or a `{ ... }` body (a getter body needs a
+type and returns the value). Entries are separated by newlines, or by commas
+after getter expressions. A setter reads the assigned value as `value`. An
+untyped property takes the type of its getter expression, and an untyped
+setter takes its container's getter's type; a typed setter must agree with
+the getter. A `-` prefix makes an accessor protected.
+
+`p.Age` calls the getter, `p.Age = 25` calls the setter, and `p.Age += 5`
+and `p.Age++` call the getter and then the setter on a receiver evaluated
+once. Inside a method, a bare `Age` names the property when no local or field
+has that name. A property may share its name with a protected field of its
+own container: inside the container (and derived ones) the name means the
+field, and outside code, which cannot see the field, reaches the property.
+Other clashes with fields or methods are rejected. A property without a
+setter is read-only and one without a getter can only be assigned. A property
+is not storage, so it cannot be passed by reference, have its address taken,
+or be reinitialized; a setter cannot run on a temporary, and neither accessor
+runs on a constant, since accessors may modify their receiver.
+
+Accessors are instance methods named `get-Age` and `set-Age`, so they inherit,
+override (keeping the property's type and access), dispatch through `this`
+and container references, and cross module boundaries like other methods. A
+derived container that redeclares a getter overrides it, and a field cannot
+redeclare an inherited property. Static properties are not supported.
+
+Each source instance method takes a hidden dispatch table after its
+receiver, and each container reference parameter of a non-native function
+takes one after the reference. A table describes an object of one container as
+seen through one of its parent states: that state's offset within the object,
+whether it is the whole object, the tables of its own parents, and, for each overridable method name it can see, the final
+overrider, its receiver's offset, and its table. Calls on `this` load those
+slots and call indirectly, as do calls on a container reference parameter;
+calls on an object of known type, and base calls, are direct. Every module emits private copies of the tables it uses, as
+`@"duck$vt.Cat"` and `@"duck$vt.Cat$1"` for the `Walker` state of
+`Cat : Animal, Walker`. Objects carry no hidden pointer, so container layouts
+are unchanged.
 
 Prefix a field, instance method, or static-container function with `-` to make
 it protected or `+` to state the default public access. The sign must touch the
@@ -635,6 +821,106 @@ Print(Day.Thursday + 0)            // 10
   expressions or other members, conversion from a value back to a member,
   enum `name` lookup at run time other than `Print`, `[args]` attribute tags,
   and native `extern "C"` enum parameters.
+
+## Arrays
+
+```duck
+int [4] a            // fixed: four elements stored inline, starting at 0
+a[0] = 5
+a[3] += 4
+Print(a.Len)         // 4
+string [2] words     // elements start at their defaults: "" here
+Point [3] points     // and a container's field defaults
+points[1].Move(3)
+
+int [] squares       // dynamic: grows as elements are added
+squares += 9         // append
+squares--            // remove the last element
+Print(squares.Len)   // a long
+```
+
+`a[i]` names an element: it can be read, assigned, used with compound
+assignment, passed by reference (from a fixed array), and reached through
+(`points[1].X`). The array and the index are evaluated once, and an index
+outside `0 <= i < Len`, or `--` on an empty array, traps. Indexes are
+integers. Elements are numbers, `bool`, `char`, enums, `string`, `name`,
+`big`, `tiny`, dates and times, and containers; arrays of arrays and of
+collections, literals, and the other mutations (`-= [i]`, `++`, `Clear()`,
+`(a += x)` results), `IsValid`, and `?a[i]` are later items.
+
+A fixed array is a value of `[N x T]`. Declared without an initializer, it
+starts zeroed and then copies each element's default into place: empty text,
+a zero `big`, or a container's constant default. A container whose elements
+need running code (constructors or computed defaults) cannot be defaulted
+this way; use a dynamic array and add elements. A fixed array of plain
+elements copies like any value; one whose elements need cleanup (text, `big`,
+or containers that are managed or have destructors) is move-only and cleans
+up every element when it dies. As a container field, a fixed array must hold
+elements whose default is all zero bits.
+
+A dynamic array is one pointer to heap storage, null while empty, so it can
+be a container field (making its container move-only). It shares the queue
+and stack runtime: elements are element-sized slots, `+=` moves the new value
+into the next slot, and growing doubles the buffer and moves the elements
+bytewise, which is a valid move for every Duck value. `--` cleans up the last
+element, and freeing the array cleans up each element in index order:
+releasing text and `big` values, and running a container's heap cleanup
+(`@duck$cleanup.Name`: its destructor, then its field releases). An element
+of a dynamic array cannot be passed by reference or have its address taken,
+because growing the array would move it. Dynamic arrays are move-only: pass
+them by reference and return locals to move them.
+
+## Queues, stacks, and pairs
+
+```duck
+int queue q          // first in, first out
+int stack s          // last in, first out
+string, int pair ages // keyed by string, in insertion order
+int pair scores      // keyed by name: `T pair` means `name, T pair`
+
+q += 2               // add at the back
+q += 3
+Print(q.Front)       // 2
+q--                  // remove the front
+s += 2
+s += 3
+Print(s.Top)         // 3
+s--                  // remove the top
+ages += "Ada" : 36   // add, or replace the value of an existing key
+Print(ages["Ada"])   // 36; a missing key traps
+Print(ages.LastKey)  // the last key added, and ages.Last its value
+ages--               // remove the last key added
+Print(q.Len)         // number of elements, as a long
+```
+
+A collection starts empty and is a single pointer to heap storage, null until
+something is added, so it can also be a container field. `q.Front`, `s.Top`,
+`p.Last`, `p.LastKey`, and `p[key]` read a copy of an element, and trap when
+the collection is empty or the key is missing, as does `--` on an empty
+collection. Replacing a key's value keeps the key's place, so `p.LastKey` and
+`p--` always refer to the most recently added key that is still present.
+
+Elements are numbers, `bool`, `char`, enums, `string`, `name`, `big`, `tiny`,
+and dates and times; keys are integers, `bool`, `char`, enums, `string`,
+`name`, `big`, and dates and times (floating and `tiny` keys would compare by
+representation, so they are rejected). Containers, pointers, and nested
+collections are not elements yet.
+
+Collections are move-only: pass one by reference (`Fill(int queue& q)`),
+return a local to move it out, and receive a call's result in a declaration
+or assignment. By-value parameters, copies, and static fields of collection
+type are rejected, and a container with a collection field is move-only and
+frees it when destroyed. Elements that are `string`, `name`, or `big` are
+released when removed, replaced, or freed with their collection.
+
+A queue or stack is a ring buffer of element-sized slots that doubles when
+full, copying its elements in order from the head; a queue removes at the
+head and a stack at the back. A pair keeps entries (key, then value at a
+16-byte-aligned offset) in insertion order and finds keys by a linear scan,
+comparing `string`, `name`, and `big` keys by value and other keys bytewise
+after zero-filling them. The runtime is emitted module-locally from
+`CollectionRuntime.cpp`. Literals, `++`, `-= [key]`, `Clear()`, writes
+through `p[key]`, and the results of `(q += x)` and `(q--)` are later items.
 
 ## Characters, dates, and times
 
