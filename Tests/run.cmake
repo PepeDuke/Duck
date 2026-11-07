@@ -588,6 +588,73 @@ reject_file(file_lexical "/* unclosed" "unterminated comment")
 reject_file(file_parse "int Helper() {" "expected '}'")
 reject_file(file_semantic "int Helper() { return true }" "type mismatch")
 reject_file(file_duplicate "Main() {}" "duplicate or reserved function")
+
+# Container declarations merge across files in input order.
+file(WRITE "${WORK}/merge_first.dk" [=[
+Animal
+{
+    int Legs = 4
+}
+Cat : Animal
+{
+    string Name = "Tom"
+    int Lives = 9
+}
+#{
+    int Count
+}
+]=])
+file(WRITE "${WORK}/merge_second.dk" [=[
+Cat : Animal
+{
+    int Whiskers = 12
+    int Total() { return Legs + Lives + Whiskers + Count }
+}
+Cat
+#{
+    Cat Make()
+    {
+        Count++
+        Cat c()
+        return c
+    }
+}
+Main()
+{
+    Cat c = Cat.Make()
+    Print(c.Total())
+    Print(c.Name)
+    Cat d = {Whiskers: 1, Name: "Kit"}
+    Print(d.Whiskers + d.Lives)
+}
+]=])
+run_files(merge_containers "26\nTom\n10\n" "${WORK}/merge_first.dk" "${WORK}/merge_second.dk")
+run_files(merge_containers_reversed "26\nTom\n10\n" "${WORK}/merge_second.dk" "${WORK}/merge_first.dk")
+file(READ "${WORK}/merge_containers.ll" merged_ir)
+file(READ "${WORK}/merge_containers_reversed.ll" reversed_ir)
+if(NOT merged_ir MATCHES "%struct.Cat = type { %struct.Animal, ptr, i32, i32 }" OR
+   NOT reversed_ir MATCHES "%struct.Cat = type { %struct.Animal, i32, ptr, i32 }")
+  message(FATAL_ERROR "merged container layout must follow input order")
+endif()
+# The second file's declaration is the one diagnosed, pointing back at the first.
+function(reject_merge name first second diagnostic)
+  file(WRITE "${WORK}/${name}_a.dk" "${first}")
+  file(WRITE "${WORK}/${name}_b.dk" "${second}")
+  execute_process(COMMAND "${COMPILER}" "${WORK}/${name}_a.dk" "${WORK}/${name}_b.dk" -o "${WORK}/${name}.ll"
+                  RESULT_VARIABLE status ERROR_VARIABLE errors)
+  string(FIND "${errors}" "${WORK}/${name}_b.dk:" location)
+  string(FIND "${errors}" " at ${WORK}/${name}_a.dk:" earlier)
+  if(NOT status EQUAL 1 OR location LESS 0 OR earlier LESS 0 OR NOT errors MATCHES "${diagnostic}")
+    message(FATAL_ERROR "${name}: expected ${diagnostic} in the second file, got ${status}: ${errors}")
+  endif()
+endfunction()
+reject_merge(merge_missing_parents "Animal { int L }\nCat : Animal { int a }\n" "Cat { int b }\nMain() {}\n" "is declared with parents 'Animal'")
+reject_merge(merge_extra_parents "Animal { int L }\nCat { int a }\n" "Cat : Animal { int b }\nMain() {}\n" "is declared with no parents")
+reject_merge(merge_parent_order "A { int a }\nB { int b }\nCat : A, B { int x }\n" "Cat : B, A { int y }\nMain() {}\n" "parents 'A, B'")
+reject_merge(merge_duplicate_field "Cat { int a }\n" "Cat { int a }\nMain() {}\n" "'a' is already declared in container 'Cat'")
+reject_merge(merge_duplicate_method "Cat { F() {} }\n" "Cat { F() {} }\nMain() {}\n" "'F' is already declared in container 'Cat'")
+reject_merge(merge_field_after_method "Cat { F() {} }\n" "Cat { int F }\nMain() {}\n" "'F' is already declared in container 'Cat'")
+reject_merge(merge_method_after_field "Cat { int F }\n" "Cat { F() {} }\nMain() {}\n" "'F' is already declared in container 'Cat'")
 execute_process(COMMAND "${COMPILER}" "${WORK}/caller with spaces.dk" "${WORK}/nonexistent_input.dk" -o "${WORK}/missing.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
 if(NOT status EQUAL 1 OR NOT errors MATCHES "nonexistent_input.dk: cannot open input file")
   message(FATAL_ERROR "Missing input diagnostic: ${errors}")

@@ -692,6 +692,7 @@ public:
   Parser(std::vector<Token> t, const std::set<std::string> &names) : tokens(std::move(t)), containerNames(names) {}
   Program parse() {
     Program functions;
+    functions.sources.push_back(tokens.front().source);
     declarations(functions, "", false);
     return functions;
   }

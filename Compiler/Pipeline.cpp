@@ -11,6 +11,7 @@ Program combineUnits(std::vector<Program> units) {
     for (auto &record : unit.records) program.records.push_back(std::move(record));
     for (auto &fragment : unit.enums) program.enums.push_back(std::move(fragment));
     for (auto &field : unit.statics) program.statics.push_back(std::move(field));
+    for (auto &source : unit.sources) program.sources.push_back(std::move(source));
     for (auto &function : unit)
       program.push_back(std::move(function));
   }
@@ -72,8 +73,14 @@ std::string compileModule(const Program &program, const Program &imports,
       if (f.name.text == "Main")
         fail(f.name, "library module cannot define Main");
   const auto imported = collectSymbols(imports, false);
+  // Only the defining module may add instance members; an importer that
+  // extended the container would disagree about its layout.
   for (const auto &[name, record] : imported.records)
-    if (!symbols.records.emplace(name, record).second) fail(record.name, "duplicate container '" + name + "'");
+    if (!symbols.records.emplace(name, record).second)
+      for (const auto &fragment : program.records)
+        if (fragment.name.text == name)
+          fail(fragment.name, "cannot extend imported container '" + name +
+                                  "'; add instance members in its defining module");
   for (const auto &f : imports) {
     if (f.name.text == "Main")
       fail(f.name, "cannot import an executable module");

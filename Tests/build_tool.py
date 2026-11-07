@@ -252,6 +252,19 @@ class Projects(unittest.TestCase):
         self.assertEqual(subprocess.check_output([str(exe)], text=True).splitlines(),
                          ["core", "core/ann", "2", "app!"])
 
+    def test_imported_container_extensions(self):
+        (self.root / "core.dk").write_text("Badge\n{\n int Level\n}", encoding="utf-8")
+        # Static blocks for an imported container keep its layout and are allowed.
+        (self.root / "app.dk").write_text(
+            "Badge #{ int Twice(int n) { return n * 2 } }\n"
+            "Main() { Badge b()\nb.Level = 21\nPrint(Badge.Twice(b.Level)) }", encoding="utf-8")
+        self.invoke()
+        exe = self.root / ".duck/build/debug" / ("Demo.exe" if os.name == "nt" else "Demo")
+        self.assertEqual(subprocess.check_output([str(exe)], text=True).strip(), "42")
+        (self.root / "app.dk").write_text("Badge\n{\n int Extra\n}\nMain() {}", encoding="utf-8")
+        result = self.invoke(success=False)
+        self.assertIn("cannot extend imported container 'Badge'", result.stderr)
+
     def test_long_interface(self):
         (self.root / "core.dk").write_text(
             "Bump(int64& n) { n++ }\nlong Twice(long n) { return n * 2 }", encoding="utf-8")

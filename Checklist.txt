@@ -36,7 +36,7 @@ Containers and namespaces
    Proposal: Specify static initialization order (declaration order within a module, imported modules first) and run it from a per-module initializer before Main. Evaluate non-constant instance defaults in a generated per-container construction routine shared by default construction and partial initializers. Then lift the restrictions on reading other statics, big defaults other than zero, and container-typed initializers, and decide whether managed containers may live on the heap.
 [x] Allow a container to chain static and instance blocks.
    Proposal: Parse a named container followed by a sequence of adjacent bodies, tagging each body as static or instance. Preserve the existing adjacency rule and resolve member calls using the receiver kind.
-[] Merge instance container extensions across declarations and files.
+[x] Merge instance container extensions across declarations and files.
    Proposal: Collect fragments by qualified container name before validating layouts. Merge in declared input order, diagnose conflicting members and parent lists at their source locations, and give importing modules the same final field layout.
 [] Support nested instance types and their qualified names.
    Proposal: During name collection, maintain a stack of enclosing containers and register qualified type names. Resolve type paths in declarations, casts, and construction using the same lookup order.

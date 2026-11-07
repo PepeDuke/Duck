@@ -302,8 +302,17 @@ scope. Static and instance members are separate namespaces, so both kinds can
 declare `Foo()`: `meter.Foo()` and a bare `Foo()` in an instance method call the
 instance one, while `Meter.Foo()` and a bare `Foo()` in a static body call the
 static one. Instance methods can also use the chain's static fields by their
-bare names. Merging separate declarations of the same container is not
-supported yet.
+bare names.
+
+Separate declarations of one container, in the same file or in different files
+of a module, merge into one container. Instance fields join the layout in input
+order: files in the order given to the compiler (the build tool sorts a
+module's files by path), then source order within a file. Every declaration
+must repeat the same parent list, in the same order, so a reader of any one
+file can see what the container inherits. A field or method declared twice is
+reported at the later declaration, along with where the first one is. A module
+can add static blocks to a container it imports, but not instance members,
+because the defining module has already fixed the layout that importers share.
 
 Fields can declare defaults, as in `int Count = 3` or `string Title = "Duck"`.
 A default must be a compile-time constant of the field's type: a literal, a

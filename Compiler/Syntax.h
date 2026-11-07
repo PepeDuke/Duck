@@ -12,6 +12,11 @@ struct Token {
   std::string source;
   bool character = false; // A 'x' literal; also marked string so it is never punctuation.
 };
+// "file:line:column" of a token, for diagnostics that point at a second place.
+inline std::string where(const Token &t) {
+  return (t.source.empty() ? "<input>" : t.source) + ":" + std::to_string(t.line) + ":" +
+         std::to_string(t.column);
+}
 [[noreturn]] inline void fail(const Token &t, const std::string &message) {
   throw std::runtime_error((t.source.empty() ? "<input>" : t.source) + ":" +
                            std::to_string(t.line) + ":" +
@@ -221,5 +226,6 @@ struct Program : std::vector<Function> {
   std::vector<Record> records;
   std::vector<EnumFragment> enums;
   std::vector<StaticField> statics;
+  std::vector<std::string> sources; // Source names in input order.
 };
 } // namespace duck

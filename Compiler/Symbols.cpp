@@ -178,9 +178,39 @@ bool borrowsOnly(const Stmt &s, const std::string &name) {
 }
 Symbols collectSymbols(const Program &program, bool requireEntry) {
   Symbols symbols;
-  for (const auto &record : program.records)
-    if (!symbols.records.emplace(record.name.text, record).second)
-      fail(record.name, "duplicate container '" + record.name.text + "'");
+  // Input order of source files, then position within a file.
+  std::map<std::string, size_t> files;
+  auto seen = [&](const Token &t) { files.emplace(t.source, files.size()); };
+  for (const auto &source : program.sources) files.emplace(source, files.size());
+  for (const auto &fragment : program.records) seen(fragment.name);
+  for (const auto &f : program) seen(f.name);
+  auto before = [&](const Token &a, const Token &b) {
+    const auto fa = files.at(a.source), fb = files.at(b.source);
+    if (fa != fb) return fa < fb;
+    return a.line != b.line ? a.line < b.line : a.column < b.column;
+  };
+  // Declarations of one container merge in input order, so every module and
+  // file order sees the same field layout. Each must repeat the parent list.
+  for (const auto &fragment : program.records) {
+    auto [found, first] = symbols.records.emplace(fragment.name.text, fragment);
+    if (first) continue;
+    auto &merged = found->second;
+    auto list = [](const Record &record) {
+      std::string text;
+      for (const auto &parent : record.parents) text += (text.empty() ? "" : ", ") + parent.text;
+      return text.empty() ? std::string("no parents") : "parents '" + text + "'";
+    };
+    if (list(fragment) != list(merged))
+      fail(fragment.name, "container '" + fragment.name.text + "' is declared with " + list(merged) +
+                              " at " + where(merged.name) + "; every declaration must repeat the same parent list");
+    for (const auto &field : fragment.fields) {
+      for (const auto &existing : merged.fields)
+        if (existing.name.text == field.name.text)
+          fail(field.name, "'" + field.name.text + "' is already declared in container '" +
+                               fragment.name.text + "' at " + where(existing.name));
+      merged.fields.push_back(field);
+    }
+  }
   symbols.enums = resolveEnums(program.enums);
   for (const auto &[name, info] : symbols.enums)
     if (symbols.records.count(name))
@@ -204,6 +234,23 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
                               p.type.depth || recordValue(p.type))))
           fail(p.name, "unsupported native parameter ABI; use 32/64-bit values, numeric references, pointers, pointer references, or text by value");
       }
+    }
+    if (f.method) {
+      const auto record = f.name.text.substr(0, f.name.text.rfind('.'));
+      const auto member = memberName(f.name.text);
+      for (const auto &field : symbols.records.at(record).fields)
+        if (field.name.text == member) {
+          // Report the clash at whichever declaration comes later in input order.
+          const bool fieldLater = before(f.name, field.name);
+          const auto &later = fieldLater ? field.name : f.name;
+          const auto &earlier = fieldLater ? f.name : field.name;
+          fail(later, "'" + member + "' is already declared in container '" + record + "' at " +
+                          where(earlier));
+        }
+      auto existing = symbols.find(f.name.text);
+      if (existing != symbols.end())
+        fail(f.name, "'" + member + "' is already declared in container '" + record + "' at " +
+                         where(existing->second.declaration));
     }
     if (f.name.text == "Print" || f.name.text == "Length" || f.name.text == "CodeUnitAt" ||
         !symbols.emplace(f.name.text, Signature{f.result, f.params, f.nativeSymbol, f.name, {}, f.method, f.protectedAccess}).second)
