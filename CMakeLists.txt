@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(Duck VERSION 0.1.0 LANGUAGES CXX)
 
 add_library(duck_compiler
-  Compiler/Lexer.cpp Compiler/Parser.cpp Compiler/Symbols.cpp
+  Compiler/Lexer.cpp Compiler/Preprocessor.cpp Compiler/Parser.cpp Compiler/Symbols.cpp
   Compiler/Semantics.cpp Compiler/Codegen.cpp Compiler/Pipeline.cpp Compiler/TextRuntime.cpp Compiler/HeapRuntime.cpp
   Compiler/CalendarRuntime.cpp Compiler/WideRuntime.cpp Compiler/BigRuntime.cpp
   Compiler/DecimalRuntime.cpp Compiler/CollectionRuntime.cpp

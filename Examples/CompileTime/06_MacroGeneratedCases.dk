@@ -1,0 +1,37 @@
+// EXPECT: zero, one, unknown.
+// PITFALL: a macro in a Switch body supplies whole sections. Its arguments
+// bind after the selector is evaluated and before any label is compared.
+Messages
+#{
+    macro Reply(int code, string text)
+    {
+        case code:
+            Print(text)
+            break
+    }
+
+    macro Otherwise()
+    {
+        default:
+            Print("unknown")
+            break
+    }
+
+    Show(int index)
+    {
+        Switch (index)
+        {
+            Reply(0, "zero")
+            Reply(1, "one")
+            Otherwise()
+            // Reply(1, "uno") // Rejected: label 1 is already used.
+        }
+    }
+}
+
+Main()
+{
+    Messages.Show(0)
+    Messages.Show(1)
+    Messages.Show(7)
+}

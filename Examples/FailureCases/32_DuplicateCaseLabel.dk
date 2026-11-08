@@ -1,0 +1,16 @@
+// INTENTIONALLY BROKEN: the second section could never run.
+// EXPECT: compile error at the second label, pointing back at the first.
+// FIX: remove one of the sections or give it a different label.
+Main()
+{
+    int index = 0
+    Switch (index)
+    {
+        case 1:
+            Print("first")
+            break
+        case 1:
+            Print("second")
+            break
+    }
+}

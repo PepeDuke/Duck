@@ -1,0 +1,34 @@
+// EXPECT: fast path, level 3.
+// PITFALL: #define values are typed and visible from their line to the end
+// of this file. Only the active branch exists, so the inactive one below may
+// declare the same names and is never parsed or type-checked.
+#define VERSION 3
+#define FAST VERSION >= 2 && VERSION != 99
+
+#if FAST
+{
+    Engine
+    #{
+        Run() { Print("fast path") }
+    }
+}
+#else
+{
+    Engine
+    #{
+        Run() { This text is never parsed, it only has to balance its braces. }
+    }
+}
+
+Main()
+{
+    Engine.Run()
+    #if VERSION == 3
+    {
+        Print("level 3")
+    }
+    #else
+    {
+        Print("other level")
+    }
+}

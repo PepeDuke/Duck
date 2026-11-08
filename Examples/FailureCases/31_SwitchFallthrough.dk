@@ -1,0 +1,16 @@
+// INTENTIONALLY BROKEN: the first section runs off its end into the next.
+// EXPECT: compile error at case 0.
+// PITFALL: a forgotten break is a silent bug in C; Duck refuses to guess.
+// FIX: end the section with break, or stack the labels to share a body.
+Main()
+{
+    int index = 0
+    Switch (index)
+    {
+        case 0:
+            Print("zero")
+        case 1:
+            Print("one")
+            break
+    }
+}

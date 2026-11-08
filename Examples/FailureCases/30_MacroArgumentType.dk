@@ -1,0 +1,15 @@
+// INTENTIONALLY BROKEN: a macro parameter has a declared type.
+// EXPECT: compile error that int was expected, not string.
+// FIX: pass an int, or declare the parameter as string.
+Report
+#{
+    macro Show(int value)
+    {
+        Print(value)
+    }
+}
+
+Main()
+{
+    Report.Show("six")
+}

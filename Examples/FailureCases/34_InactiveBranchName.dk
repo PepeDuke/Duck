@@ -1,0 +1,17 @@
+// INTENTIONALLY BROKEN: an inactive #if branch publishes no names.
+// EXPECT: compile error that Telemetry is unknown.
+// FIX: declare Telemetry in both branches, or guard the call with #if too.
+#define TELEMETRY false
+
+#if TELEMETRY
+{
+    Telemetry
+    #{
+        Send() { Print("sent") }
+    }
+}
+
+Main()
+{
+    Telemetry.Send()
+}

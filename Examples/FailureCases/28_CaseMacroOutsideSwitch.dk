@@ -1,0 +1,23 @@
+// INTENTIONALLY BROKEN: this macro's output is valid only inside a Switch.
+// EXPECT: compile error naming the case line, the macro's definition, and this call.
+// PITFALL: a macro body is checked only where it is expanded.
+// FIX: call GreetingCase() directly inside a Switch body.
+Messages
+#{
+    macro GreetingCase()
+    {
+        case 0:
+            Print("Hello world")
+            break
+    }
+
+    Show()
+    {
+        GreetingCase()
+    }
+}
+
+Main()
+{
+    Messages.Show()
+}

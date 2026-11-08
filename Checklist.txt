@@ -118,11 +118,11 @@ Entry points and scripts
 Compile-time execution and macros
 [x] Evaluate explicit #Call(...) expressions at compile time.
    Proposal: Evaluate the typed function body and constant arguments in a bounded interpreter that shares Duck's numeric and trap rules. Define allowed effects and report failures at the marked call before substituting the result.
-[] Expand typed macro functions at their call sites.
+[x] Expand typed macro functions at their call sites.
    Proposal: Capture macro bodies as syntax fragments, bind typed arguments once, then expand and validate in the caller's grammar context. Define name hygiene and expansion limits and report both definition and call locations on failure.
-[] Implement #define, #if, and #else.
+[x] Implement #define, #if, and #else.
    Proposal: Process balanced conditional blocks before declaration collection so inactive branches publish no names. Keep define values in a separate environment visible to #if and specify whether that environment is file- or module-scoped.
-[] Support the Switch/case syntax used in the macro example.
+[x] Support the Switch/case syntax used in the macro example.
    Proposal: Introduce switch and case nodes, evaluate the selector once, and type-check labels in its context. Specify fallthrough and break targets and test a case produced by macro expansion.
 
 Language tests, markup, and lifecycle

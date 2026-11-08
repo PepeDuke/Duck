@@ -270,16 +270,18 @@ class Interpreter {
     if (e.kind == "call") validate(target(e, owner));
     else if (e.kind != "int" && e.kind != "real" && e.kind != "bool" && e.kind != "name" &&
              e.kind != "typeMember" && e.kind != "cast" && e.kind != "unary" && e.kind != "binary" &&
-             e.kind != "conditional" && e.kind != "compileTime")
+             e.kind != "conditional" && e.kind != "compileTime" && e.kind != "macroValue")
       reject("expression '" + e.kind + "' is not allowed");
     if (e.kind == "unary" && (e.token.text == "&" || e.token.text == "*")) reject("pointer access is forbidden");
+    for (const auto &bound : e.bindings) validateStatement(*bound, owner);
     // A qualified static function's syntactic receiver is a namespace, not a value.
     for (const auto &child : e.args) validateExpression(*child, owner);
   }
   void validateStatement(const Stmt &s, size_t owner) {
     tick();
     const std::set<std::string> allowed{"let", "expr", "assign", "++", "--", "+=", "-=", "*=", "/=", "%=",
-      "&=", "|=", "^=", "<<=", ">>=", "block", "if", "while", "for", "rangefor", "do", "break", "continue", "return"};
+      "&=", "|=", "^=", "<<=", ">>=", "block", "if", "while", "for", "rangefor", "do", "break", "continue", "return",
+      "switch", "case"};
     if (!allowed.count(s.kind)) reject("statement '" + s.kind + "' is not allowed");
     if (s.kind == "let" && !scalar(analyses[owner].localTypes.at(&s))) reject("only scalar locals are allowed");
     if (s.target) {
@@ -291,6 +293,7 @@ class Interpreter {
     } else if (s.expr) validateExpression(*s.expr, owner);
     if (s.initializer) validateStatement(*s.initializer, owner);
     if (s.step) validateStatement(*s.step, owner);
+    for (const auto &label : s.labels) validateExpression(*label, owner);
     for (const auto &child : s.body) validateStatement(*child, owner);
     for (const auto &child : s.alternate) validateStatement(*child, owner);
   }
@@ -325,7 +328,12 @@ class Interpreter {
       result = *value;
     } else if (e.kind == "cast") result = convert(expression(*e.args[0], owner, env), e.castType);
     else if (e.kind == "compileTime") result = expression(*e.args[0], owner, env);
-    else if (e.kind == "call") {
+    else if (e.kind == "macroValue") {
+      env.emplace_back();
+      for (const auto &bound : e.bindings) statement(*bound, owner, env);
+      result = expression(*e.args[0], owner, env);
+      env.pop_back();
+    } else if (e.kind == "call") {
       const size_t index = target(e, owner);
       validate(index);
       if (depth >= 32) reject("evaluation exceeded the 32-call depth limit");
@@ -375,6 +383,23 @@ class Interpreter {
     if (s.kind == "break") return {Flow::Break, {}};
     if (s.kind == "continue") return {Flow::Continue, {}};
     if (s.kind == "if") return sequence(expression(*s.expr, owner, env).truth() ? s.body : s.alternate, owner, env);
+    if (s.kind == "switch") {
+      env.emplace_back();
+      statement(*s.initializer, owner, env);
+      for (const auto &bound : s.alternate) statement(*bound, owner, env);
+      const auto selected = expression(*s.target, owner, env);
+      const Stmt *chosen = nullptr, *otherwise = nullptr;
+      for (const auto &section : s.body) {
+        if (section->isDefault) otherwise = section.get();
+        for (const auto &label : section->labels)
+          if (!chosen && binary("==", selected, expression(*label, owner, env)).truth()) chosen = section.get();
+      }
+      if (!chosen) chosen = otherwise;
+      Flow result;
+      if (chosen) result = sequence(chosen->body, owner, env);
+      env.pop_back();
+      return result.kind == Flow::Break ? Flow{} : result;
+    }
     if (s.kind == "rangefor") {
       const auto first = expression(*s.expr->args[0], owner, env);
       const auto last = expression(*s.expr->args[1], owner, env);
@@ -453,6 +478,13 @@ class MarkerPass {
       }
       return;
     }
+    if (e.kind == "macroValue") {
+      env.emplace_back();
+      for (const auto &bound : e.bindings) statement(*bound);
+      expression(*e.args[0]);
+      env.pop_back();
+      return;
+    }
     if (e.receiver) expression(*e.receiver);
     for (const auto &child : e.args) expression(*child);
     if (e.lambda) {
@@ -463,11 +495,15 @@ class MarkerPass {
     }
   }
   void statement(const Stmt &s) {
-    const bool loop = s.kind == "for" || s.kind == "rangefor" || s.kind == "foreach";
+    const bool isSwitch = s.kind == "switch";
+    const bool loop = s.kind == "for" || s.kind == "rangefor" || s.kind == "foreach" || isSwitch;
     if (loop) env.emplace_back();
     if (s.initializer) statement(*s.initializer);
     if (s.expr) expression(*s.expr);
     if (s.target) expression(*s.target);
+    for (const auto &label : s.labels) expression(*label);
+    // A Switch's macro bindings are visible to its sections.
+    if (isSwitch) for (const auto &bound : s.alternate) statement(*bound);
     if (s.kind == "rangefor" || s.kind == "foreach") {
       env.back()[s.name] = std::nullopt;
       if (!s.key.empty()) env.back()[s.key] = std::nullopt;
@@ -480,7 +516,8 @@ class MarkerPass {
       }
       env.back()[s.name] = value;
     }
-    list(s.body); list(s.alternate);
+    list(s.body);
+    if (!isSwitch) list(s.alternate);
     if (s.step) statement(*s.step);
     if (loop) env.pop_back();
   }

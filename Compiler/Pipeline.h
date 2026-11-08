@@ -12,8 +12,28 @@ std::vector<Token> lex(const std::string &source,
 // enclose them (`Name.Space`). An enum name is recorded both as Name and as
 // #@Name so the parser can tell enums from containers.
 void collectContainerNames(const std::vector<Token> &tokens, std::set<std::string> &names);
+// Resolves #define, #if, and #else over one file's tokens, before any names
+// are collected, so an inactive branch publishes nothing. A define is visible
+// from its line to the end of its file and to nothing but #if and #define.
+std::vector<Token> preprocess(std::vector<Token> tokens);
+// A macro is kept as syntax: its parameter types and body stay tokens until a
+// call expands them in the caller's grammar context.
+struct MacroParameter {
+  std::vector<Token> type;
+  Token name;
+};
+struct Macro {
+  Token name;
+  std::vector<MacroParameter> parameters;
+  std::vector<Token> body; // Between the braces.
+};
+using MacroTable = std::map<std::string, Macro>; // By qualified name.
+// Collects macros from file scope and container bodies across all units, so
+// calls may precede definitions and cross files.
+void collectMacros(const std::vector<Token> &tokens, MacroTable &macros);
 Program parse(std::vector<Token> tokens);
 Program parse(std::vector<Token> tokens, const std::set<std::string> &names);
+Program parse(std::vector<Token> tokens, const std::set<std::string> &names, const MacroTable &macros);
 // Keep units in input order. Combining is a barrier before declaration
 // collection.
 Program combineUnits(std::vector<Program> units);

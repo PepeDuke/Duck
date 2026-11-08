@@ -11,6 +11,7 @@ bool plainValue(const Type &type) {
 template <class Visit> void visitExpression(const Expr &e, Visit &visit) {
   visit(e);
   if (e.receiver) visitExpression(*e.receiver, visit);
+  for (const auto &binding : e.bindings) visitExpression(*binding->expr, visit);
   for (const auto &child : e.args) visitExpression(*child, visit);
 }
 template <class VisitExpr, class VisitStmt>
@@ -20,6 +21,7 @@ void visitStatement(const Stmt &s, VisitExpr &expr, VisitStmt &stmt) {
   if (s.target) visitExpression(*s.target, expr);
   if (s.initializer) visitStatement(*s.initializer, expr, stmt);
   if (s.step) visitStatement(*s.step, expr, stmt);
+  for (const auto &label : s.labels) visitExpression(*label, expr);
   for (const auto &child : s.body) visitStatement(*child, expr, stmt);
   for (const auto &child : s.alternate) visitStatement(*child, expr, stmt);
 }
@@ -89,9 +91,10 @@ class Scheduler {
     }
   }
   void nested(const Stmt &s) {
-    // Only statement lists spawn; for-initializers and steps run in place.
+    // Only statement lists spawn; for-initializers, steps, and a Switch's
+    // macro argument bindings run in place.
     if (!s.body.empty()) list(s.body);
-    if (!s.alternate.empty()) list(s.alternate);
+    if (!s.alternate.empty() && s.kind != "switch") list(s.alternate);
   }
 
 public:

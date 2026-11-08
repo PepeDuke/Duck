@@ -11,16 +11,30 @@ struct Token {
   bool string = false;
   std::string source;
   bool character = false; // A 'x' literal; also marked string so it is never punctuation.
+  // Set on tokens copied from a macro body. `mark` is unique per expansion
+  // and keeps the names that body declares apart from every other scope.
+  unsigned mark = 0;
+  std::shared_ptr<const struct Expansion> origin;
+};
+// One expansion of a macro: where it was called and where it was defined.
+struct Expansion {
+  Token call;
+  std::string macro; // Qualified name.
+  Token definition;
+  unsigned mark = 0;
 };
 // "file:line:column" of a token, for diagnostics that point at a second place.
 inline std::string where(const Token &t) {
   return (t.source.empty() ? "<input>" : t.source) + ":" + std::to_string(t.line) + ":" +
          std::to_string(t.column);
 }
+// A failure inside macro output names every expansion that produced the token.
 [[noreturn]] inline void fail(const Token &t, const std::string &message) {
-  throw std::runtime_error((t.source.empty() ? "<input>" : t.source) + ":" +
-                           std::to_string(t.line) + ":" +
-                           std::to_string(t.column) + ": error: " + message);
+  std::string text = where(t) + ": error: " + message;
+  for (const auto *e = t.origin.get(); e; e = e->call.origin.get())
+    text += "\n  note: in expansion of macro '" + e->macro + "' defined at " + where(e->definition) +
+            ", called at " + where(e->call);
+  throw std::runtime_error(text);
 }
 struct FuncSignature;
 bool sameSignature(const FuncSignature *a, const FuncSignature *b);
@@ -222,6 +236,9 @@ struct Expr {
   std::unique_ptr<Expr> receiver;
   // A lambda's generated function. Shared because field defaults are cloned.
   std::shared_ptr<Function> lambda;
+  // A "macroValue": read-only locals for the macro's arguments, in scope for
+  // its result in args[0] and evaluated only when the expression is reached.
+  std::vector<std::unique_ptr<struct Stmt>> bindings;
   bool addressable() const {
     return kind == "name" || kind == "." || kind == "index" || (kind == "unary" && token.text == "*");
   }
@@ -236,6 +253,12 @@ struct Stmt {
   std::unique_ptr<Expr> expr, target;
   std::unique_ptr<Stmt> initializer, step;
   std::vector<std::unique_ptr<Stmt>> body, alternate;
+  // A "switch" holds its selector as the hidden local `initializer`, reads it
+  // back through `target`, runs macro argument bindings from `alternate`, and
+  // has one "case" statement per section in `body`. A section's labels are
+  // here; stacked labels and `default` share one section.
+  std::vector<std::unique_ptr<Expr>> labels;
+  bool isDefault = false;
 };
 // A `using Name.Space` directive. It applies to the declarations after it in
 // the file scope or static body it appears in, and in their nested bodies.

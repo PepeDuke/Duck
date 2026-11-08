@@ -191,6 +191,7 @@ class Generator {
   struct Loop {
     std::string exit, next;
     size_t scopeDepth;
+    bool isSwitch = false; // A break target only; continue passes through it.
   };
   std::vector<Loop> loops;
   // A task record is {handle, arguments..., result} in the caller's frame.
@@ -246,6 +247,8 @@ class Generator {
                              analysis.reinitializations.count(&e)))
       return true;
     if (e.receiver && runsCode(*e.receiver)) return true;
+    for (const auto &binding : e.bindings)
+      if (runsCode(*binding->expr)) return true;
     for (const auto &argument : e.args)
       if (runsCode(*argument)) return true;
     return false;
@@ -2085,6 +2088,15 @@ class Generator {
     }
     if (e.kind == "cast")
       return convert(expression(*e.args[0]), e.castType);
+    if (e.kind == "macroValue") {
+      // The result holds its own reference, so the bindings can end first.
+      scopes.emplace_back();
+      for (const auto &binding : e.bindings) statement(*binding);
+      const auto value = expression(*e.args[0]);
+      cleanupScopes(scopes.size() - 1);
+      scopes.pop_back();
+      return value;
+    }
     auto member = analysis.enumMembers.find(&e);
     if (member != analysis.enumMembers.end())
       return {analysis.expressionTypes.at(&e), std::to_string(member->second)};
@@ -3027,13 +3039,65 @@ class Generator {
     scopes.pop_back();
     return terminated;
   }
+  // The selector lives in a hidden local, so it is evaluated once. Labels are
+  // compared in source order, and default runs only after all of them miss.
+  bool switchStatement(const Stmt &s) {
+    scopes.emplace_back();
+    statement(*s.initializer);
+    for (const auto &binding : s.alternate) statement(*binding);
+    const auto end = label();
+    std::vector<std::string> sections;
+    std::string otherwise = end;
+    for (const auto &section : s.body) {
+      sections.push_back(label());
+      if (section->isDefault) otherwise = sections.back();
+    }
+    for (size_t i = 0; i < s.body.size(); ++i)
+      for (const auto &test : s.body[i]->labels) {
+        const auto selected = expression(*s.target);
+        const auto value = expression(*test);
+        std::string matched;
+        if (managedText(selected.type)) matched = binary("==", selected, value).value;
+        else {
+          matched = fresh();
+          emit(matched + " = icmp eq " + irType(selected.type) + " " + selected.value + ", " + value.value);
+        }
+        const auto miss = label();
+        emit("br i1 " + matched + ", label %" + sections[i] + ", label %" + miss);
+        startBlock(miss);
+      }
+    emit("br label %" + otherwise);
+    loops.push_back({end, "", scopes.size(), true});
+    // Analysis has proved that every section ends control.
+    for (size_t i = 0; i < s.body.size(); ++i) {
+      startBlock(sections[i]);
+      block(s.body[i]->body);
+    }
+    loops.pop_back();
+    startBlock(end);
+    if (analysis.terminatingLoops.count(&s)) {
+      emit("unreachable");
+      scopes.pop_back();
+      return true;
+    }
+    cleanupScopes(scopes.size() - 1);
+    scopes.pop_back();
+    return false;
+  }
   bool statement(const Stmt &s) {
     if (s.kind == "block")
       return block(s.body);
-    if (s.kind == "break" || s.kind == "continue") {
+    if (s.kind == "switch") return switchStatement(s);
+    if (s.kind == "break") {
       cleanupScopes(loops.back().scopeDepth);
-      emit("br label %" +
-           (s.kind == "break" ? loops.back().exit : loops.back().next));
+      emit("br label %" + loops.back().exit);
+      return true;
+    }
+    if (s.kind == "continue") {
+      auto loop = loops.rbegin();
+      while (loop->isSwitch) ++loop;
+      cleanupScopes(loop->scopeDepth);
+      emit("br label %" + loop->next);
       return true;
     }
     if (s.kind == "returnOwner") {

@@ -24,6 +24,7 @@ int main(int argc, char **argv) {
     std::vector<duck::Program> units, importedUnits;
     std::vector<std::pair<bool, std::vector<duck::Token>>> sources;
     std::set<std::string> containerNames;
+    duck::MacroTable macros;
     bool entry = true, parallel = true;
     for (int i = 1; i < argc - 2; ++i) {
       std::string path = argv[i];
@@ -55,12 +56,13 @@ int main(int argc, char **argv) {
       source << input.rdbuf();
       if (input.bad())
         throw std::runtime_error(path + ": cannot read input file");
-      auto tokens = duck::lex(source.str(), path);
+      auto tokens = duck::preprocess(duck::lex(source.str(), path));
       duck::collectContainerNames(tokens, containerNames);
+      duck::collectMacros(tokens, macros);
       sources.emplace_back(dependency, std::move(tokens));
     }
     for (auto &[dependency, tokens] : sources) {
-      auto unit = duck::parse(std::move(tokens), containerNames);
+      auto unit = duck::parse(std::move(tokens), containerNames, macros);
       if (dependency) {
         // A dependency's statements are private to the module defining them.
         unit.erase(std::remove_if(unit.begin(), unit.end(),

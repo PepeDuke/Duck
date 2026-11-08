@@ -1,0 +1,51 @@
+// EXPECT: weekend, weekday, 2, 3, 5, big, small.
+// PITFALL: Duck has no implicit fallthrough. Every section ends in break,
+// continue, or return; stack labels when several values share one body.
+// break leaves the Switch, while continue goes to the enclosing loop.
+Day : int #@{ Monday, Saturday, Sunday }
+
+Describe(Day day)
+{
+    Switch (day)
+    {
+        case Day.Saturday:
+        case Day.Sunday:
+            Print("weekend")
+            break
+        default:
+            Print("weekday")
+            break
+    }
+}
+
+string Size(string word)
+{
+    Switch (word)
+    {
+        case "large", "huge":
+            return "big"
+        default:
+            return "small"
+    }
+}
+
+Main()
+{
+    Describe(Day.Sunday)
+    Describe(Day.Monday)
+
+    for i : 1...5
+    {
+        Switch (i)
+        {
+            case 1, 4:
+                continue // Next loop iteration, skipping the Print below.
+            default:
+                break    // Leaves only the Switch.
+        }
+        Print(i)
+    }
+
+    Print(Size("huge"))
+    Print(Size("tiny"))
+}

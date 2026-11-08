@@ -1870,7 +1870,7 @@ macros in C++ are extremely powerful tool but also completely impossible to debu
 
 ``` c++
 Example 
-#{  // Must be in static block
+#{
 
     macro Foo() // anything is allowed. syntax correction gets checked only when used
     {
@@ -1892,8 +1892,51 @@ Example
 }
 ```
 
+A macro can be declared at file scope or in a container body, but not inside a function. Macros are collected before parsing, so calls may come before the definition or from another file of the module. A macro is checked only where it is expanded, and a failure inside macro output names the macro body, the definition, and every call that produced it.
+
+- **Arguments are typed and bound once.** Each parameter becomes a read-only local, so an argument is converted to the declared type and evaluated exactly once, in order, even if the body never names it. Parameters cannot be references; a body can name the caller's variable directly.
+- **Hygiene.** Names a macro declares (locals, loop variables, lambda parameters, and its parameters) are private to that expansion: they cannot capture the caller's names, and the caller cannot see them. Every other name is looked up where the macro is expanded, which is what lets `case`, `break`, and the caller's own variables work. A macro called from a macro is looked up from the macro's own container first.
+- **Limits.** Macros cannot be recursive. Expansion stops at 32 nested levels and 200000 tokens per file.
+
+The position of the call decides what the macro must produce:
+
+| Position | Produces | Argument binding |
+| --- | --- | --- |
+| A statement | A block. `break`, `continue`, and `return` still act on the caller. | Locals at the start of the block |
+| Directly in a `Switch` body | `case` sections | Locals on the `Switch`, after the selector is evaluated |
+| Inside an expression | One expression | Locals scoped to that expression, evaluated only when it is reached |
+
+A parameter can be used any number of times in every position, and its argument still runs once. Macros cannot produce declarations.
+
+## Switch in Duck
+`Switch` evaluates its selector once, then compares it with each label in source order. `default` runs only when every label misses, wherever it is written. Without a match or a `default`, nothing runs.
+
+``` c++
+Switch (day)
+{
+    case Day.Saturday:      // Stacked labels share one body.
+    case Day.Sunday:
+        Print("weekend")
+        break
+    case Day.Monday, Day.Friday:
+        Print("almost")
+        break
+    default:
+        Print("weekday")
+        break
+}
+```
+
+There is no implicit fallthrough: every section must end in `break`, `continue`, or `return`, or the program does not compile. `break` leaves the innermost `Switch` or loop, and `continue` goes to the enclosing loop.
+
+The selector is an integer, `bool`, `char`, enum, `string`, or `name`. Labels convert to the selector's type and must be literals, enum members, type limits such as `int.Max`, `#Call(...)`, or `#` constants. Two labels with the same known value are rejected.
+
 ## Definitions in Duck
 defined constants can be used only and only by the #if, this is to prevent C style defines without type
+
+A `#define` holds a `bool`, integer, or string, and can be built from earlier defines with `!`, `-`, `&&`, `||`, parentheses, and comparisons. A define is visible from its line to the end of its file. Other files never see it, redefining it is an error, and a name that is not defined yet is an error rather than false. A `#if` condition must be a `bool`.
+
+`#if` and `#else` run before any declarations are collected, so an inactive branch publishes no names and only has to balance its braces. The active branch's braces are removed, so its declarations land in the surrounding scope. `#if` also works inside container and function bodies.
 
 ``` c++
 

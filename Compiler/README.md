@@ -1742,7 +1742,7 @@ usable as a compile-time argument only when that initializer can be evaluated.
 
 Allowed function effects are scalar local declarations and mutations, value
 parameters, returns (including void), direct calls to other allowed functions,
-branches, while/do/counted-for loops, inclusive integer range loops, and
+branches, Switch, while/do/counted-for loops, inclusive integer range loops, and
 break/continue. Values are fixed-width integers up to 512 bits, float/double,
 and bool. The complete transitive body is checked, including untaken branches.
 I/O, Exec, native and indirect calls, instance methods, static storage reads or
@@ -1756,6 +1756,68 @@ Floats round at their declared precision and retain IEEE infinity/NaN behavior;
 NaN payloads and signs are unspecified. Float-to-integer casts floor and reject
 NaN, infinity, and results outside the destination range. Integer casts truncate
 or sign/zero extend exactly as at runtime.
+
+## Conditional compilation
+
+`preprocess` (`Preprocessor.cpp`) runs over one file's tokens right after `lex`
+and before name collection. It removes `#define`, evaluates `#if`, and copies
+only the active branch, without its braces. An inactive branch is skipped by
+brace matching alone, so it publishes no names and need not be valid Duck.
+
+Defines are file-scoped: a file's environment starts empty, so the result does
+not depend on the order of input files. Values are `bool`, int64, or string.
+Conditions are type-checked, and both sides of `&&` and `||` are always checked
+so a misspelled define cannot hide behind a short circuit. `#define` values
+never reach the parser, which keeps them out of ordinary expressions.
+
+## Macro expansion
+
+`collectMacros` captures each `macro` at file scope or in a container body as
+tokens, across all units, so calls can precede definitions and cross files. A
+macro inside a function body is rejected. An unused body is never
+validated. The parser then replaces each call with generated tokens and keeps
+parsing, so the normal grammar for that position validates the output:
+
+- Statement position: a `{ ... }` block holding one `#T name = argument` binding
+  per parameter, then the body.
+- Directly in a Switch body: the bindings are parsed onto the Switch
+  (`Stmt::alternate`), then the body is spliced so it can open sections. A
+  statement-position macro after a label stays a block unless its output opens
+  with a label, directly or through the macro it calls first.
+- Inside an expression: a `macroValue` node holding the same bindings
+  (`Expr::bindings`) and the body as its result. The bindings get their own
+  scope and run only when the expression is reached, so short-circuiting and
+  loop conditions behave as written. A macro with no parameters is just
+  `( body )`, which keeps its result usable as a constant label.
+
+Copied tokens carry `Token::origin`, the expansion that produced them, and
+`fail` walks that chain to print a note per expansion. Copied tokens also carry
+`Token::mark`, unique per expansion. A local declared by a marked token is
+renamed `name$mark`, which source text cannot spell, and the parser's `hygiene`
+scope stack resolves later references in order. Argument tokens keep their
+original mark, so they still mean what they meant at the call.
+
+Recursion is rejected by walking the origin chain; macros have no conditions,
+so a cycle could never end. Nesting is limited to 32 levels and output to 200000
+tokens per file. Macros cannot produce declarations yet.
+
+## Switch
+
+`Switch` parses to a `switch` statement holding one `case` statement per
+section. The selector is stored in a hidden `$switch` local (`Stmt::initializer`)
+so it runs once, and `Stmt::target` reads it back. Stacked labels and `default`
+merge into one section at parse time.
+
+Analysis checks each label against the selector's type and rejects non-constant
+and duplicate labels, following `#` locals so that macro-supplied labels are
+compared too. Every section must end control, so each one starts from the same
+entry facts and only breaks and a missing `default` reach the following code.
+A Switch where neither happens is recorded in `terminatingLoops`.
+
+Lowering compares labels in source order, using `@duck.text.equal` for `string`
+and `name` and `icmp` for everything else. A Switch is a break target but not a
+continue target: `LoopFlow::isSwitch` and `Loop::isSwitch` make `continue` pass
+through to the enclosing loop.
 
 Each marked call has a budget of 100,000 interpreter/effect-check steps, 32
 nested calls, and 64 nested expressions. Wide division charges its bit width

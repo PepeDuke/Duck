@@ -15,7 +15,7 @@ Read in this order:
   Features/01..05       Enums, reflection, lambdas, baking, built-in tests.
   Lifecycle/01..03      Custom scopes and frame lifetimes.
   Markup/01..02         Components and repeated children.
-  CompileTime/01..02    Definitions and macros.
+  CompileTime/01..07    Definitions, conditional blocks, and macros.
   Games/01             Combining ownership, collections, and safe calls.
 
 FailureCases contains deliberately broken .dk examples. Read each header

@@ -1,12 +1,19 @@
 #include "Pipeline.h"
 #include <algorithm>
 #include <cctype>
+#include <optional>
 namespace duck {
 namespace {
 class Parser {
   std::vector<Token> tokens;
   size_t pos = 0;
   const std::set<std::string> &containerNames;
+  const MacroTable &macros;
+  // Names declared by macro output, innermost lexical scope last, each with
+  // the mark of the expansion that declared it.
+  std::vector<std::set<std::pair<unsigned, std::string>>> hygiene{1};
+  unsigned expansionMarks = 0;
+  size_t expandedTokens = 0;
   // The qualified container whose declarations or member bodies are being
   // parsed, such as "Name.Space", or empty at file scope.
   std::string scope;
@@ -43,9 +50,310 @@ class Parser {
         t.text == "return" || t.text == "if" || t.text == "else" ||
         t.text == "while" || t.text == "for" || t.text == "break" ||
         t.text == "continue" || t.text == "do" || t.text == "extern" ||
-        t.text == "null" || t.text == "using")
+        t.text == "null" || t.text == "using" || t.text == "Switch")
       fail(t, "reserved keyword cannot be an identifier");
     return pop();
+  }
+  // A local declared by macro output gets a name source text cannot spell, so
+  // it neither captures the caller's names nor is visible to them.
+  std::string declareLocal(const Token &t) {
+    if (!t.mark || t.text.find('$') != std::string::npos) return t.text;
+    hygiene.back().insert({t.mark, t.text});
+    return t.text + "$" + std::to_string(t.mark);
+  }
+  // A name in macro output means that expansion's own local when one is in
+  // scope; any other name is looked up where the macro was expanded.
+  void resolveLocal(Token &t) const {
+    if (!t.mark) return;
+    for (auto level = hygiene.rbegin(); level != hygiene.rend(); ++level)
+      if (level->count({t.mark, t.text})) {
+        t.text += "$" + std::to_string(t.mark);
+        return;
+      }
+  }
+  static bool word(const Token &t) {
+    return !t.string && !t.text.empty() && (std::isalpha(static_cast<unsigned char>(t.text[0])) || t.text[0] == '_');
+  }
+  static bool punctuation(const Token &t, const char *text) { return !t.string && t.text == text; }
+  struct MacroUse {
+    const Macro *macro;
+    std::string qualified;
+    size_t open; // Index of the call's '('.
+  };
+  // The macro called by `Name(` or `Path.To.Name(` at `at`. A call in macro
+  // output looks in the macro's own container first, so a macro keeps
+  // working when it is expanded in another container.
+  std::optional<MacroUse> macroUse(const std::vector<Token> &list, size_t at) const {
+    if (macros.empty() || at >= list.size() || !word(list[at])) return std::nullopt;
+    std::string path = list[at].text;
+    size_t k = at + 1;
+    while (k + 1 < list.size() && punctuation(list[k], ".") && word(list[k + 1])) {
+      path += "." + list[k + 1].text;
+      k += 2;
+    }
+    if (k >= list.size() || !punctuation(list[k], "(")) return std::nullopt;
+    auto parent = [](const std::string &name) {
+      const auto dot = name.rfind('.');
+      return dot == std::string::npos ? std::string() : name.substr(0, dot);
+    };
+    std::vector<std::string> starts;
+    if (list[at].origin) starts.push_back(parent(list[at].origin->macro));
+    starts.push_back(scope);
+    for (auto enclosing : starts)
+      for (;;) {
+        const auto name = enclosing.empty() ? path : enclosing + "." + path;
+        if (auto found = macros.find(name); found != macros.end())
+          return MacroUse{&found->second, found->first, k};
+        const Macro *imported = nullptr;
+        std::string importedName;
+        for (const auto &directive : *usings) {
+          if (directive.level != enclosing) continue;
+          const auto candidate = directive.target + "." + path;
+          auto found = macros.find(candidate);
+          if (found == macros.end()) continue;
+          if (imported && importedName != candidate)
+            fail(list[at], "macro '" + path + "' is ambiguous between '" + importedName + "' and '" + candidate + "'");
+          imported = &found->second;
+          importedName = candidate;
+        }
+        if (imported) return MacroUse{imported, importedName, k};
+        if (enclosing.empty()) break;
+        enclosing = parent(enclosing);
+      }
+    return std::nullopt;
+  }
+  // The arguments of the call: each one's tokens, split at top-level commas.
+  std::vector<std::vector<Token>> macroArguments(const MacroUse &use, size_t &close) const {
+    std::vector<std::vector<Token>> arguments(1);
+    int depth = 1;
+    bool lineBreak = false;
+    for (size_t k = use.open + 1;; ++k) {
+      if (k >= tokens.size() || punctuation(tokens[k], "<eof>")) fail(tokens[use.open], "expected ')'");
+      const auto &t = tokens[k];
+      if (depth == 1 && punctuation(t, "\n")) {
+        lineBreak = !arguments.back().empty();
+        continue;
+      }
+      if (punctuation(t, "(") || punctuation(t, "[") || punctuation(t, "{")) ++depth;
+      else if (punctuation(t, ")") || punctuation(t, "]") || punctuation(t, "}")) {
+        if (--depth == 0) {
+          close = k;
+          break;
+        }
+      } else if (depth == 1 && punctuation(t, ",")) {
+        if (arguments.back().empty()) fail(t, "empty macro argument");
+        arguments.emplace_back();
+        lineBreak = false;
+        continue;
+      }
+      if (lineBreak) fail(t, "a macro argument must stay on one line unless it is inside parentheses");
+      arguments.back().push_back(t);
+    }
+    if (arguments.size() == 1 && arguments[0].empty()) arguments.clear();
+    else if (arguments.back().empty()) fail(tokens[close], "empty macro argument");
+    if (arguments.size() != use.macro->parameters.size())
+      fail(tokens[use.open - 1], "macro '" + use.qualified + "' takes " +
+                                     std::to_string(use.macro->parameters.size()) + " argument(s), got " +
+                                     std::to_string(arguments.size()) + "; it is defined at " + where(use.macro->name));
+    return arguments;
+  }
+  std::shared_ptr<const Expansion> beginExpansion(const Token &call, const MacroUse &use) {
+    unsigned depth = 1;
+    for (const auto *e = call.origin.get(); e; e = e->call.origin.get(), ++depth)
+      if (e->macro == use.qualified) fail(call, "macro '" + use.qualified + "' expands itself; macros cannot be recursive");
+    if (depth > 32) fail(call, "macro expansion exceeded the 32-level depth limit");
+    expandedTokens += use.macro->body.size() + 1;
+    if (expandedTokens > 200000) fail(call, "macro expansion exceeded the 200000-token limit");
+    return std::make_shared<const Expansion>(Expansion{call, use.qualified, use.macro->name, ++expansionMarks});
+  }
+  static Token synthetic(const std::shared_ptr<const Expansion> &origin, const std::string &text) {
+    Token t = origin->definition;
+    t.text = text;
+    t.string = t.character = false;
+    t.origin = origin;
+    return t;
+  }
+  static Token fromMacro(Token t, const std::shared_ptr<const Expansion> &origin) {
+    t.mark = origin->mark;
+    t.origin = origin;
+    return t;
+  }
+  // One read-only local per parameter, so each argument is type-checked and
+  // evaluated exactly once, in order, however often the body names it.
+  static void appendBindings(std::vector<Token> &out, const Macro &macro, std::vector<std::vector<Token>> arguments,
+                             const std::shared_ptr<const Expansion> &origin) {
+    for (size_t i = 0; i < arguments.size(); ++i) {
+      const auto &parameter = macro.parameters[i];
+      out.push_back(synthetic(origin, "#"));
+      for (const auto &t : parameter.type) out.push_back(fromMacro(t, origin));
+      out.push_back(fromMacro(parameter.name, origin));
+      out.push_back(synthetic(origin, "="));
+      for (auto &t : arguments[i]) out.push_back(std::move(t));
+      out.push_back(synthetic(origin, "\n"));
+    }
+  }
+  void replaceTokens(size_t first, size_t last, std::vector<Token> replacement) {
+    tokens.erase(tokens.begin() + long(first), tokens.begin() + long(last) + 1);
+    tokens.insert(tokens.begin() + long(first), std::make_move_iterator(replacement.begin()),
+                  std::make_move_iterator(replacement.end()));
+  }
+  // In statement position a macro becomes a block: its parameters and locals
+  // end with it, while break, continue, and return act on the caller.
+  void expandStatementMacro() {
+    auto use = macroUse(tokens, pos);
+    if (!use) return;
+    size_t close = 0;
+    auto arguments = macroArguments(*use, close);
+    if (close + 1 >= tokens.size() ||
+        !(punctuation(tokens[close + 1], "\n") || punctuation(tokens[close + 1], "}") ||
+          punctuation(tokens[close + 1], "<eof>")))
+      return; // Part of a larger expression.
+    const auto origin = beginExpansion(tokens[pos], *use);
+    std::vector<Token> out{synthetic(origin, "{"), synthetic(origin, "\n")};
+    appendBindings(out, *use->macro, std::move(arguments), origin);
+    for (const auto &t : use->macro->body) out.push_back(fromMacro(t, origin));
+    out.push_back(synthetic(origin, "\n"));
+    out.push_back(synthetic(origin, "}"));
+    replaceTokens(pos, close, std::move(out));
+  }
+  // In a Switch body a macro supplies sections, so there is no block to hold
+  // its parameters: they bind on the Switch, after the selector is evaluated.
+  void expandCaseMacro(Stmt &switchStatement, const MacroUse &use) {
+    size_t close = 0;
+    auto arguments = macroArguments(use, close);
+    const auto origin = beginExpansion(tokens[pos], use);
+    const auto count = arguments.size();
+    std::vector<Token> out;
+    appendBindings(out, *use.macro, std::move(arguments), origin);
+    for (const auto &t : use.macro->body) out.push_back(fromMacro(t, origin));
+    out.push_back(synthetic(origin, "\n"));
+    replaceTokens(pos, close, std::move(out));
+    for (size_t i = 0; i < count; ++i) {
+      switchStatement.alternate.push_back(simpleStatement());
+      expect("\n");
+    }
+  }
+  // Whether a macro's output starts with a Switch label, directly or through
+  // the macro it calls first.
+  bool opensSection(const MacroUse &use, unsigned depth = 0) const {
+    const auto &body = use.macro->body;
+    size_t k = 0;
+    while (k < body.size() && punctuation(body[k], "\n")) ++k;
+    if (k == body.size()) return false;
+    if (punctuation(body[k], "case")) return true;
+    if (punctuation(body[k], "default") && k + 1 < body.size() && punctuation(body[k + 1], ":")) return true;
+    if (depth >= 32) return false;
+    const auto inner = macroUse(body, k);
+    return inner && opensSection(*inner, depth + 1);
+  }
+  // A macro used as a value must be one expression. Its parameters bind in
+  // a scope of their own inside that expression, so an argument runs once,
+  // only when the expression is reached, however often the body names it.
+  void expandValueMacro(const MacroUse &use) {
+    size_t close = 0;
+    auto arguments = macroArguments(use, close);
+    const auto origin = beginExpansion(tokens[pos], use);
+    const auto &macro = *use.macro;
+    size_t first = 0, last = macro.body.size();
+    while (first < last && punctuation(macro.body[first], "\n")) ++first;
+    while (last > first && punctuation(macro.body[last - 1], "\n")) --last;
+    if (first == last) fail(tokens[pos], "macro '" + use.qualified + "' is empty, so it cannot be used as a value");
+    int depth = 0;
+    for (size_t k = first; k < last; ++k) {
+      const auto &t = macro.body[k];
+      if (punctuation(t, "(") || punctuation(t, "[") || punctuation(t, "{")) ++depth;
+      else if (punctuation(t, ")") || punctuation(t, "]") || punctuation(t, "}")) --depth;
+      else if (depth == 0 && punctuation(t, "\n"))
+        fail(tokens[pos], "macro '" + use.qualified + "' expands to statements, so it cannot be used as a value; "
+                          "it is defined at " + where(macro.name));
+    }
+    // With nothing to bind, the output is simply the parenthesized body.
+    const bool binds = !arguments.empty();
+    std::vector<Token> out{synthetic(origin, binds ? "$value" : "(")};
+    appendBindings(out, macro, std::move(arguments), origin);
+    if (binds) out.push_back(synthetic(origin, "$result"));
+    for (size_t k = first; k < last; ++k) out.push_back(fromMacro(macro.body[k], origin));
+    out.push_back(synthetic(origin, binds ? "$end" : ")"));
+    replaceTokens(pos, close, std::move(out));
+  }
+  bool atSectionLabel() const {
+    return at("case") || (at("default") && punctuation(tokens.at(pos + 1), ":"));
+  }
+  // `case a, b:` and `default:`, including labels stacked on one section.
+  void sectionLabels(Stmt &switchStatement, Stmt &section) {
+    for (;;) {
+      if (accept("default")) {
+        if (section.isDefault) fail(section.token, "a Switch section cannot repeat default");
+        section.isDefault = true;
+      } else {
+        expect("case");
+        do {
+          lines();
+          section.labels.push_back(expression());
+          lines();
+        } while (accept(","));
+      }
+      expect(":");
+      lines();
+      // A macro may supply the next stacked label.
+      while (auto use = macroUse(tokens, pos)) {
+        if (!opensSection(*use)) break;
+        expandCaseMacro(switchStatement, *use);
+        lines();
+      }
+      if (!atSectionLabel()) return;
+    }
+  }
+  std::unique_ptr<Stmt> switchStatement() {
+    auto s = std::make_unique<Stmt>();
+    s->kind = "switch";
+    s->token = pop();
+    expect("(");
+    lines();
+    auto selector = std::make_unique<Stmt>();
+    selector->kind = "let";
+    selector->token = peek();
+    selector->name = "$switch";
+    selector->expr = expression();
+    lines();
+    expect(")");
+    s->target = std::make_unique<Expr>();
+    s->target->kind = "name";
+    s->target->token = selector->token;
+    s->target->token.text = selector->name;
+    s->target->token.string = s->target->token.character = false;
+    s->initializer = std::move(selector);
+    lines();
+    expect("{");
+    lines();
+    hygiene.emplace_back();
+    while (!at("}")) {
+      if (at("<eof>")) fail(peek(), "expected '}'");
+      if (auto use = macroUse(tokens, pos)) {
+        expandCaseMacro(*s, *use);
+        lines();
+        continue;
+      }
+      if (!atSectionLabel()) fail(peek(), "expected 'case' or 'default' in Switch body");
+      auto section = std::make_unique<Stmt>();
+      section->kind = "case";
+      section->token = peek();
+      sectionLabels(*s, *section);
+      hygiene.emplace_back();
+      while (!at("}") && !atSectionLabel()) {
+        if (at("<eof>")) fail(peek(), "expected '}'");
+        if (auto use = macroUse(tokens, pos); use && opensSection(*use)) break;
+        section->body.push_back(statement());
+        if (!at("}") && !at("\n")) fail(peek(), "expected newline between statements");
+        lines();
+      }
+      hygiene.pop_back();
+      s->body.push_back(std::move(section));
+    }
+    hygiene.pop_back();
+    expect("}");
+    if (s->body.empty()) fail(s->token, "a Switch needs at least one case or default");
+    return s;
   }
   // The tokens a container or enum type path at `at` spans, or 0. A path
   // such as `Space` or `Name.Space` resolves like a relative function name:
@@ -383,7 +691,9 @@ class Parser {
           fail(peek(), "parameter cannot have void type");
         requireFuncSignature(t, "a func parameter");
         bool reference = accept("&");
-        f.params.push_back({identifier(), t, reference});
+        auto parameterName = identifier();
+        parameterName.text = declareLocal(parameterName);
+        f.params.push_back({parameterName, t, reference});
         lines();
       } while (accept(","));
     expect(")");
@@ -398,10 +708,12 @@ class Parser {
     name.text = "$lambda";
     Function f{name, result, {}, {}, false, {}};
     f.usings = usings;
+    hygiene.emplace_back();
     parameterList(f);
     const bool outerOwner = returnsOwner;
     returnsOwner = false;
     f.body = block();
+    hygiene.pop_back();
     if (returnsOwner) fail(name, "a lambda cannot return ownership with return ::");
     returnsOwner = outerOwner;
     auto signature = std::make_shared<FuncSignature>();
@@ -438,9 +750,22 @@ class Parser {
     return 0;
   }
   std::unique_ptr<Expr> expression(int minimum = 1, bool stopAtPipe = false) {
+    if (auto use = macroUse(tokens, pos)) expandValueMacro(*use);
     auto e = std::make_unique<Expr>();
     e->token = peek();
-    if (accept("#")) {
+    if (accept("$value")) {
+      // An expanded value macro: its argument bindings, then its result.
+      e->kind = "macroValue";
+      hygiene.emplace_back();
+      while (!accept("$result")) {
+        e->bindings.push_back(simpleStatement());
+        expect("\n");
+      }
+      e->args.push_back(expression());
+      lines();
+      expect("$end");
+      hygiene.pop_back();
+    } else if (accept("#")) {
       e->kind = "compileTime";
       e->args.push_back(expression(11, stopAtPipe));
       if (e->args[0]->kind != "call")
@@ -574,6 +899,7 @@ class Parser {
       pop();
     } else {
       e->token = identifier();
+      resolveLocal(e->token);
       e->kind = "name";
     }
     std::string path = e->kind == "name" ? e->token.text : "";
@@ -681,6 +1007,7 @@ class Parser {
     lines();
     expect("{");
     lines();
+    hygiene.emplace_back();
     std::vector<std::unique_ptr<Stmt>> result;
     while (!at("}")) {
       if (at("<eof>"))
@@ -689,10 +1016,20 @@ class Parser {
       if (!at("}") && !at("\n")) fail(peek(), "expected newline between statements");
       lines();
     }
+    hygiene.pop_back();
     expect("}");
     return result;
   }
   std::unique_ptr<Stmt> statement() {
+    expandStatementMacro();
+    if (at("Switch")) return switchStatement();
+    if (at("macro") && word(tokens.at(pos + 1)) && punctuation(tokens.at(pos + 2), "("))
+      fail(peek(), "a macro cannot be declared inside a function; declare it at file scope or in a container");
+    if (at("case")) {
+      const auto &next = tokens.at(pos + 1);
+      if (next.string || next.text == "-" || word(next) || std::isdigit(static_cast<unsigned char>(next.text[0])))
+        fail(peek(), "'case' is valid only directly inside a Switch body");
+    }
     auto s = std::make_unique<Stmt>();
     s->token = peek();
     if (at("{")) {
@@ -726,7 +1063,9 @@ class Parser {
       return s;
     }
     if (accept("for")) {
+      hygiene.emplace_back();
       forClause(*s);
+      hygiene.pop_back();
       return s;
     }
     if (accept("if") || accept("while")) {
@@ -822,18 +1161,21 @@ class Parser {
       pos = start;
       return false;
     }
-    s.name = identifier().text;
+    auto valueName = identifier();
+    std::optional<Token> keyName;
     if (accept(",")) {
-      s.key = s.name;
-      s.name = identifier().text;
+      keyName = valueName;
+      valueName = identifier();
     }
     expect(":");
     auto collection = expression(1, true);
-    if (at(";") && !reverse && s.key.empty()) {
-      s.name.clear();
+    if (at(";") && !reverse && !keyName) {
       pos = start;
       return false;
     }
+    // Declared after the collection, which still sees the outer names.
+    s.name = declareLocal(valueName);
+    if (keyName) s.key = declareLocal(*keyName);
     if (!at("{") && !at("\n") && !at("|"))
       fail(peek(), "expected '{' or a newline after the collection of a for loop");
     if (collection->kind == "range" && reverse)
@@ -913,7 +1255,8 @@ class Parser {
       s->type = type();
       if (s->type == Type::Void)
         fail(s->token, "variable cannot have void type");
-      s->name = identifier().text;
+      const auto declaredName = identifier();
+      s->name = declaredName.text;
       if (accept("(")) {
         // `Gun g(5)` and `Gun* p(5)` construct with arguments, like `Gun(5)`.
         auto arguments = callArguments();
@@ -928,6 +1271,7 @@ class Parser {
         };
         if (recordValue(s->type)) {
           if (!arguments.empty()) s->expr = construction(s->type);
+          s->name = declareLocal(declaredName);
           return s;
         }
         if (s->type.depth != 1 || !heapValue(s->type.pointee()))
@@ -944,6 +1288,8 @@ class Parser {
         s->expr = expression();
       } else if (accept("="))
         s->expr = expression();
+      // Declared after the initializer, which still sees the outer names.
+      s->name = declareLocal(declaredName);
     } else {
       unreachableNestedType();
       auto target = expression(1, stopAtPipe);
@@ -955,8 +1301,8 @@ class Parser {
       } else if (at(":") || at("::")) {
         if (target->kind != "name") fail(target->token, "expected local name");
         s->kind = pop().text == "::" ? "own" : "let";
-        s->name = target->token.text;
         s->expr = expression();
+        s->name = declareLocal(target->token);
       } else if (at("=") || at("++") || at("--") || at("+=") || at("-=") ||
                  at("*=") || at("/=") || at("%=") || at("&=") || at("|=") ||
                  at("^=") || at("<<=") || at(">>=")) {
@@ -1042,6 +1388,10 @@ class Parser {
     expect("{");
     lines();
     while (!accept("}")) {
+      if (macroDeclaration()) {
+        skipMacroDeclaration();
+        continue;
+      }
       const auto tagged = peek();
       auto tags = attributes();
       const auto modifier = peek();
@@ -1353,9 +1703,32 @@ class Parser {
       const auto &next = tokens.at(pos + 1);
       return next.string || (next.text != "{" && next.text != "@");
     }
-    if (at("if") || at("for") || at("while") || at("do") || at("return") || at("break") || at("continue"))
+    if (at("if") || at("for") || at("while") || at("do") || at("return") || at("break") || at("continue") ||
+        at("Switch"))
       return true;
     return !functionAhead() && !containerAhead();
+  }
+  bool macroDeclaration() const {
+    return at("macro") && word(tokens.at(pos + 1)) && punctuation(tokens.at(pos + 2), "(");
+  }
+  // collectMacros already captured it; a macro's body is checked only when used.
+  void skipMacroDeclaration() {
+    int depth = 0;
+    pos += 2;
+    for (;; ++pos) {
+      if (at("(")) ++depth;
+      else if (at(")") && --depth == 0) break;
+    }
+    ++pos;
+    lines();
+    depth = 0;
+    for (;; ++pos) {
+      if (at("{")) ++depth;
+      else if (at("}") && --depth == 0) break;
+    }
+    ++pos;
+    if (!at("\n") && !at("}") && !at("<eof>")) fail(peek(), "expected newline after macro");
+    lines();
   }
   // Collects a file's statements into its hidden function, named by
   // combineUnits. Its locals live for one Exec; other files never see them.
@@ -1382,6 +1755,12 @@ class Parser {
     while (!at("<eof>") && !(nested && at("}"))) {
       if (at("using"))
         fail(peek(), "using directives must come before the other declarations in their scope");
+      if (macroDeclaration()) {
+        skipMacroDeclaration();
+        continue;
+      }
+      if (nested && macroUse(tokens, pos) && !functionAhead())
+        fail(peek(), "a macro expands in statement, Switch, or value position, not among declarations");
       // `[args]` marks the enum that follows as attribute data.
       bool attributeEnum = false;
       if (at("[")) {
@@ -1532,7 +1911,8 @@ class Parser {
   }
 
 public:
-  Parser(std::vector<Token> t, const std::set<std::string> &names) : tokens(std::move(t)), containerNames(names) {}
+  Parser(std::vector<Token> t, const std::set<std::string> &names, const MacroTable &macroTable)
+      : tokens(std::move(t)), containerNames(names), macros(macroTable) {}
   Program parse() {
     Program functions;
     functions.sources.push_back(tokens.front().source);
@@ -1544,9 +1924,12 @@ public:
 };
 } // namespace
 Program parse(std::vector<Token> tokens) {
+  tokens = preprocess(std::move(tokens));
   std::set<std::string> names;
+  MacroTable macros;
   collectContainerNames(tokens, names);
-  return parse(std::move(tokens), names);
+  collectMacros(tokens, macros);
+  return parse(std::move(tokens), names, macros);
 }
 namespace {
 bool punctuation(const std::vector<Token> &tokens, size_t k, const char *text) {
@@ -1583,11 +1966,61 @@ bool namesBeforeBody(const std::vector<Token> &tokens, size_t k, size_t end) {
     ++k;
   }
 }
+// Reads `macro Name(type name, ...) { body }` at i, into the table when one
+// is given. Returns the index of the closing brace.
+size_t collectMacro(const std::vector<Token> &tokens, size_t i, const std::string &prefix, MacroTable *macros) {
+  auto isWord = [&](size_t k) {
+    return k < tokens.size() && !tokens[k].string && !tokens[k].text.empty() &&
+           (std::isalpha(static_cast<unsigned char>(tokens[k].text[0])) || tokens[k].text[0] == '_');
+  };
+  Macro macro;
+  macro.name = tokens[i + 1];
+  size_t k = i + 3;
+  std::set<std::string> seen;
+  for (;;) {
+    while (punctuation(tokens, k, "\n")) ++k;
+    if (punctuation(tokens, k, ")")) break;
+    MacroParameter parameter;
+    int depth = 0;
+    for (;; ++k) {
+      if (k >= tokens.size() || punctuation(tokens, k, "<eof>")) fail(macro.name, "expected ')' after macro parameters");
+      if (depth == 0 && (punctuation(tokens, k, ",") || punctuation(tokens, k, ")"))) break;
+      if (punctuation(tokens, k, "(") || punctuation(tokens, k, "[")) ++depth;
+      else if (punctuation(tokens, k, ")") || punctuation(tokens, k, "]")) --depth;
+      if (!punctuation(tokens, k, "\n")) parameter.type.push_back(tokens[k]);
+    }
+    if (parameter.type.empty()) fail(tokens[k], "expected a macro parameter");
+    parameter.name = parameter.type.back();
+    parameter.type.pop_back();
+    if (!isWord(k - 1) || parameter.type.empty())
+      fail(parameter.name, "a macro parameter requires an explicit type and a name, as in int count");
+    if (!parameter.type.back().string && parameter.type.back().text == "&")
+      fail(parameter.name, "macro parameter '" + parameter.name.text + "' cannot be a reference: arguments are bound "
+                           "once by value; a macro body can name the caller's variable directly");
+    if (!seen.insert(parameter.name.text).second)
+      fail(parameter.name, "duplicate macro parameter '" + parameter.name.text + "'");
+    macro.parameters.push_back(std::move(parameter));
+    if (punctuation(tokens, k, ",")) ++k;
+  }
+  ++k;
+  while (punctuation(tokens, k, "\n")) ++k;
+  if (!punctuation(tokens, k, "{")) fail(macro.name, "macro '" + macro.name.text + "' requires a { ... } body");
+  const size_t close = closingBrace(tokens, k);
+  if (close >= tokens.size()) fail(tokens[k], "unterminated macro body");
+  macro.body.assign(tokens.begin() + long(k) + 1, tokens.begin() + long(close));
+  if (macros) {
+    const auto name = macro.name;
+    const auto inserted = macros->emplace(prefix + name.text, std::move(macro));
+    if (!inserted.second)
+      fail(name, "macro '" + prefix + name.text + "' is already defined at " + where(inserted.first->second.name));
+  }
+  return close;
+}
 // Collects the type names declared in [begin, end), one declaration level,
 // qualified by prefix. Static bodies are scanned with the container's name
 // appended to the prefix, so `Name #{ Space { } }` registers Name.Space.
 void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
-                  const std::string &prefix, std::set<std::string> &names) {
+                  const std::string &prefix, std::set<std::string> &names, MacroTable *macros = nullptr) {
   for (size_t i = begin; i < end; ++i) {
     const auto &t = tokens[i];
     if (t.string) continue;
@@ -1597,6 +2030,12 @@ void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
       continue;
     }
     if (!(std::isalpha(static_cast<unsigned char>(t.text[0])) || t.text[0] == '_')) continue;
+    if (t.text == "macro" && i + 2 < end && !tokens[i + 1].string && !tokens[i + 1].text.empty() &&
+        (std::isalpha(static_cast<unsigned char>(tokens[i + 1].text[0])) || tokens[i + 1].text[0] == '_') &&
+        punctuation(tokens, i + 2, "(")) {
+      i = collectMacro(tokens, i, prefix, macros);
+      continue;
+    }
     // A file-scope statement declares no types, but its header can look as
     // if it does: `if ready {` and `for x : items {`. Skip the whole line.
     if (t.text == "if" || t.text == "else" || t.text == "for" || t.text == "while" || t.text == "do") {
@@ -1641,10 +2080,13 @@ void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
       else if (punctuation(tokens, k, "#") && punctuation(tokens, k + 1, "{")) open = k + 1;
       else break;
       const size_t close = closingBrace(tokens, open);
-      if (open == k) instance = true;
-      else {
+      if (open == k) {
+        instance = true;
+        // Instance bodies declare no types here, but they may hold macros.
+        if (macros) collectScope(tokens, open + 1, close, prefix + t.text + ".", names, macros);
+      } else {
         names.insert("#{" + prefix + t.text);
-        collectScope(tokens, open + 1, close, prefix + t.text + ".", names);
+        collectScope(tokens, open + 1, close, prefix + t.text + ".", names, macros);
       }
       last = close;
       k = close + 1;
@@ -1661,7 +2103,14 @@ void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
 void collectContainerNames(const std::vector<Token> &tokens, std::set<std::string> &names) {
   collectScope(tokens, 0, tokens.size(), "", names);
 }
+void collectMacros(const std::vector<Token> &tokens, MacroTable &macros) {
+  std::set<std::string> names;
+  collectScope(tokens, 0, tokens.size(), "", names, &macros);
+}
 Program parse(std::vector<Token> tokens, const std::set<std::string> &names) {
-  return Parser(std::move(tokens), names).parse();
+  return parse(std::move(tokens), names, MacroTable{});
+}
+Program parse(std::vector<Token> tokens, const std::set<std::string> &names, const MacroTable &macros) {
+  return Parser(std::move(tokens), names, macros).parse();
 }
 } // namespace duck

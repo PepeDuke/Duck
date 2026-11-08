@@ -74,9 +74,9 @@ elsewhere use the clarified rules; this file records remaining boundaries.
     Failure fixtures describe intended failures without inventing messages.
 
 14. Compile-time and macro boundaries
-    Define allowed compile-time effects, expansion hygiene, and recursion
-    limits. The examples use the README's Switch spelling; a complete
-    grammar should settle spelling and all macro expansion contexts.
+    Hygiene, recursion limits, Switch, and the statement, Switch, and value
+    expansion contexts are settled in the README. Still open: whether a
+    macro may produce declarations.
 
 15. Numeric and encoding details
     Explicit float-to-integer casts now floor toward negative infinity.

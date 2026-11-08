@@ -1,0 +1,21 @@
+// EXPECT: 1005, 100.
+// PITFALL: names a macro declares are private to each expansion, so its
+// `total` cannot overwrite the caller's. Any other name is looked up where
+// the macro is expanded, which is how `offset` reaches the caller's local.
+Totals
+#{
+    macro AddUp(int first, int second)
+    {
+        total : first + second
+        Print(total + offset)
+    }
+}
+
+Main()
+{
+    int total = 100
+    int offset = 1000
+    Totals.AddUp(2, 3)
+    Print(total)
+    // first = 1 // Rejected: parameters and macro locals are not visible here.
+}

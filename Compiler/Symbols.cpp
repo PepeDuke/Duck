@@ -163,8 +163,9 @@ bool borrowsOnly(const Expr &e, const std::string &name, bool pointee = false,
   const bool indirect = e.kind == "." || (e.kind == "unary" && e.token.text == "*");
   const bool nullCheck = e.kind == "binary" && (e.token.text == "==" || e.token.text == "!=") &&
                          (e.args[0]->kind == "null" || e.args[1]->kind == "null");
-  // A lambda body is not inspected, so it may capture or keep anything.
-  if (e.kind == "lambda" || e.kind == "duckCall" || e.kind == "moveCheck") return false;
+  // A lambda body is not inspected, so it may capture or keep anything; the
+  // same goes for a macro value's argument bindings.
+  if (e.kind == "lambda" || e.kind == "macroValue" || e.kind == "duckCall" || e.kind == "moveCheck") return false;
   mayEscape = mayEscape || (e.kind == "unary" && e.token.text == "&") ||
               (e.kind == "call" && e.token.text != "Print");
   if (e.receiver && !borrowsOnly(*e.receiver, name, false, true)) return false;

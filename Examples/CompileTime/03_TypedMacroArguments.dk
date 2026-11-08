@@ -1,0 +1,29 @@
+// EXPECT: 6, 12, 1.
+// PITFALL: unlike a text macro, an argument is typed and evaluated exactly once.
+// Next() runs one time even though the body names `value` twice.
+Source
+#{
+    int Calls = 0
+
+    int Next()
+    {
+        Calls++
+        return Calls * 6
+    }
+}
+
+Report
+#{
+    macro ShowTwice(int value)
+    {
+        Print(value)
+        Print(value * 2)
+    }
+}
+
+Main()
+{
+    Report.ShowTwice(Source.Next())
+    Print(Source.Calls)
+    // Report.ShowTwice("six") // Rejected: a string is not an int.
+}

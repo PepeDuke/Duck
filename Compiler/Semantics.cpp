@@ -176,6 +176,7 @@ struct Local {
   bool memberLambda = false; // A func field that can only be called through its object.
   bool callOnly = false;     // Holds a lambda over this frame: it can be called, not copied.
   bool lent = false;         // Received from a function that may lend: it may not own its object.
+  const Expr *constantValue = nullptr; // A # local's initializer, for Switch label checks.
 };
 class Analyzer {
   const Symbols &symbols;
@@ -185,8 +186,14 @@ class Analyzer {
     std::vector<Scopes> continues;
     std::vector<Scopes> breaks;
     size_t depth = 0; // Scopes at or past this index belong to the loop body.
+    bool isSwitch = false; // A break target only; continue passes through it.
   };
   std::vector<LoopFlow> loops;
+  LoopFlow *enclosingLoop() {
+    for (auto loop = loops.rbegin(); loop != loops.rend(); ++loop)
+      if (!loop->isSwitch) return &*loop;
+    return nullptr;
+  }
   // The for-each loops being analyzed, innermost last: each collection's
   // place (see placeKey) and the variable the place starts at.
   struct Iteration {
@@ -727,7 +734,7 @@ class Analyzer {
     // after it rather than holding a pointer across it.
     auto local = [&]() -> Local & { return scopes[depth].at(e.token.text); };
     const auto record = local().type.record;
-    if (!loops.empty() && depth < loops.back().depth)
+    if (const auto *loop = enclosingLoop(); loop && depth < loop->depth)
       fail(e.token, "complete '" + e.token.text + "' outside the loop; a loop body can run more than "
                     "once, which would construct a part twice");
     std::vector<ConstructionPart> parts;
@@ -1689,6 +1696,13 @@ class Analyzer {
   }
   Type checkExpression(const Expr &e, Type expected) {
     if (e.kind == "compileTime") return expression(*e.args[0], expected);
+    if (e.kind == "macroValue") {
+      scopes.emplace_back();
+      for (const auto &binding : e.bindings) statement(*binding);
+      const auto type = expression(*e.args[0], expected);
+      scopes.pop_back();
+      return type;
+    }
     const auto &op = e.token.text;
     if (e.kind == "lambda") return lambdaExpression(e);
     if (e.kind == "duckCall" || e.kind == "duckCheck" || e.kind == "duckExists") return duckCall(e, expected);
@@ -2453,17 +2467,96 @@ class Analyzer {
     scopes.pop_back();
     return terminated;
   }
+  // Literals, enum members, type limits, #Call(...), and # constants.
+  bool constantLabel(const Expr &e) {
+    if (e.kind == "int" || e.kind == "bool" || e.kind == "char" || e.kind == "text" || e.kind == "typeMember" ||
+        e.kind == "compileTime" || analysis.enumMembers.count(&e) ||
+        (e.kind == "unary" && e.token.text == "-" && e.args[0]->kind == "int"))
+      return true;
+    if (const auto field = analysis.staticFields.find(&e); field != analysis.staticFields.end())
+      return symbols.statics.at(field->second).constant;
+    if (e.kind != "name") return false;
+    const auto *local = findLocal(e.token);
+    return local && local->constant;
+  }
+  // Two labels with the same key can never both be reached. Empty when the
+  // value is not known until later, as with #Call(...).
+  std::string labelKey(const Expr &e) {
+    if (const auto number = analysis.integerConstants.find(&e); number != analysis.integerConstants.end())
+      return "integer " + number->second;
+    if (const auto member = analysis.enumMembers.find(&e); member != analysis.enumMembers.end())
+      return "member " + std::to_string(member->second);
+    if (e.kind == "bool" || e.kind == "char" || e.kind == "text") return e.kind + " " + e.token.text;
+    if (e.kind == "name")
+      if (const auto *local = findLocal(e.token); local && local->constantValue)
+        return labelKey(*local->constantValue);
+    return "";
+  }
+  // Each section ends control, so entry facts hold at the start of every one
+  // and only breaks, plus a missing default, reach the code after the Switch.
+  bool switchStatement(const Stmt &s) {
+    scopes.emplace_back();
+    statement(*s.initializer);
+    const auto selector = analysis.localTypes.at(s.initializer.get());
+    if (!integral(selector) && selector != Type::Bool && selector != Type::Char && !enumValue(selector) &&
+        !managedText(selector))
+      fail(s.initializer->token, "a Switch selector must be an integer, bool, char, enum, string, or name, not " +
+                                     typeName(selector));
+    for (const auto &binding : s.alternate) statement(*binding);
+    expression(*s.target);
+    const auto entry = scopes;
+    loops.emplace_back();
+    loops.back().depth = scopes.size();
+    loops.back().isSwitch = true;
+    std::map<std::string, Token> seen;
+    bool hasDefault = false;
+    for (const auto &section : s.body) {
+      if (section->isDefault) {
+        if (hasDefault) fail(section->token, "a Switch can have only one default");
+        hasDefault = true;
+      }
+      for (const auto &label : section->labels) {
+        expression(*label, selector);
+        if (!constantLabel(*label))
+          fail(label->token, "a case label must be a literal, enum member, type limit, #Call(...), or # constant");
+        const auto key = labelKey(*label);
+        if (key.empty()) continue;
+        const auto inserted = seen.emplace(key, label->token);
+        if (!inserted.second)
+          fail(label->token, "duplicate case label; the same value is used at " + where(inserted.first->second));
+      }
+      scopes = entry;
+      if (!block(section->body))
+        fail(section->token, "this Switch section can run off its end; finish it with break, continue, or return "
+                             "(Duck has no implicit fallthrough; stack labels to share a body)");
+    }
+    auto exits = std::move(loops.back().breaks);
+    loops.pop_back();
+    if (!hasDefault) exits.push_back(entry);
+    const bool terminated = exits.empty();
+    scopes = terminated ? entry : merge(entry, exits);
+    if (terminated) analysis.terminatingLoops.insert(&s);
+    else requireCompleteScopes(scopes.size() - 1);
+    scopes.pop_back();
+    return terminated;
+  }
   bool statement(const Stmt &s) {
     if (s.kind == "block")
       return block(s.body);
-    if (s.kind == "break" || s.kind == "continue") {
+    if (s.kind == "switch") return switchStatement(s);
+    if (s.kind == "break") {
       if (loops.empty())
-        fail(s.token, s.kind + " requires an enclosing loop");
+        fail(s.token, "break requires an enclosing loop or Switch");
       requireCompleteScopes(loops.back().depth);
-      if (s.kind == "continue")
-        loops.back().continues.push_back(scopes);
-      else
-        loops.back().breaks.push_back(scopes);
+      loops.back().breaks.push_back(scopes);
+      return true;
+    }
+    if (s.kind == "continue") {
+      auto *loop = enclosingLoop();
+      if (!loop)
+        fail(s.token, "continue requires an enclosing loop");
+      requireCompleteScopes(loop->depth);
+      loop->continues.push_back(scopes);
       return true;
     }
     if (s.kind == "returnOwner") {
@@ -2706,6 +2799,7 @@ class Analyzer {
       bound.lent = lent;
       bound.declaration = name;
       bound.callOnly = keepsFrame;
+      bound.constantValue = s.constant ? s.expr.get() : nullptr;
     } else if (s.kind == "expr")
       expression(*s.expr);
     else {
@@ -3013,6 +3107,16 @@ std::unique_ptr<Expr> clone(const Expr &e) {
   copy->kind = e.kind;
   copy->castType = e.castType;
   copy->lambda = e.lambda;
+  for (const auto &binding : e.bindings) {
+    auto local = std::make_unique<Stmt>();
+    local->token = binding->token;
+    local->kind = binding->kind;
+    local->name = binding->name;
+    local->type = binding->type;
+    local->constant = binding->constant;
+    local->expr = clone(*binding->expr);
+    copy->bindings.push_back(std::move(local));
+  }
   for (const auto &arg : e.args) copy->args.push_back(clone(*arg));
   if (e.receiver) copy->receiver = clone(*e.receiver);
   return copy;

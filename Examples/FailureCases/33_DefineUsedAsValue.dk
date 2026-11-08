@@ -1,0 +1,10 @@
+// INTENTIONALLY BROKEN: #define values exist only for #define and #if.
+// EXPECT: compile error that LIMIT is an unknown name.
+// PITFALL: untyped C-style constants are what #define deliberately avoids.
+// FIX: use a typed constant such as #int Limit = 10.
+#define LIMIT 10
+
+Main()
+{
+    Print(LIMIT)
+}

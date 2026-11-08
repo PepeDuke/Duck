@@ -1,0 +1,15 @@
+// INTENTIONALLY BROKEN: macros have no conditions, so recursion can never end.
+// EXPECT: compile error that Forever expands itself.
+// FIX: use a function for recursion.
+Loops
+#{
+    macro Forever()
+    {
+        Forever()
+    }
+}
+
+Main()
+{
+    Loops.Forever()
+}
