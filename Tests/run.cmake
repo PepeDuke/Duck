@@ -552,7 +552,6 @@ Main() {
  Print(n)
 }
 ]=] "3\n3\n3\n12\n20\n12\n")
-reject(do_missing_while "Main() { do {} }" "expected 'while'")
 reject(do_condition "Main() { do {} while 1 }" "type mismatch")
 reject(do_condition_unassigned "Main() { bool again\ndo { continue } while again }" "read before assignment")
 reject(do_break_unassigned "Main() { int n\ndo { if true break\nn = 1 } while false\nPrint(n) }" "read before assignment")
@@ -3185,6 +3184,647 @@ reject(type_limit_bool "Main() { Print(bool.Max) }" "has no Min or Max")
 reject(type_limit_big "Main() { Print(big.Max) }" "unbounded")
 reject(type_limit_narrow "Main() { byte b = int.Max }" "type mismatch")
 reject(type_limit_assign "Main() { int.Max = 1 }" "mutable variable")
+# Forward and reverse iteration.
+file(READ "${SOURCE}/Examples/Bootstrap/26_Iteration.dk" iteration_example)
+run_program(iteration_example "${iteration_example}" "40\n30\n20\n10\n3\nAda\n37\nAlan\n42\n10\n30\n")
+run_program(iteration_orders "Main() {
+  int [3] fixed = {1, 2, 3}
+  for x : fixed
+    Print(x)
+  for -x : fixed
+    Print(x)
+  int [] empty
+  for x : empty
+    Print(x)
+  for -x : empty
+    Print(x)
+  int stack s = {7, 8}
+  for x : s
+    Print(x)
+  for -x : s
+    Print(x)
+  int [-][-] g
+  g[-1][5] = 3
+  g[2][0] = 4
+  for k, v : g
+    Print(k[0] + k[1] + v)
+}" "1\n2\n3\n3\n2\n1\n7\n8\n8\n7\n7\n6\n")
+# A queue that has wrapped around its ring buffer is still visited front to back.
+run_program(iteration_queue_ring "Main() {
+  int queue q = {1, 2, 3, 4}
+  q--
+  q--
+  q += 5
+  q += 6
+  for x : q
+    Print(x)
+  for -x : q
+    Print(x)
+}" "3\n4\n5\n6\n6\n5\n4\n3\n")
+run_program(iteration_empty_after_all "Main() {
+  int [] r = {1, 2, 3}
+  for -x : r {
+    Print(x)
+    r -= x
+  }
+  Print(r.Len)
+  int [] f = {1, 2, 3}
+  for x : f {
+    Print(x)
+    f -= x
+  }
+  Print(f.Len)
+}" "3\n2\n1\n0\n1\n2\n3\n0\n")
+# Removing the current element: each neighbor is visited exactly once.
+run_program(iteration_reverse_removal "Main() {
+  int [] a = {1, 2, 3, 4, 5, 6}
+  for -x : a {
+    Print(x)
+    if x % 2 == 0
+      a -= x
+  }
+  for x : a
+    Print(x)
+}" "6\n5\n4\n3\n2\n1\n1\n3\n5\n")
+run_program(iteration_reverse_removal_ends "Main() {
+  int [] a = {1, 2, 3, 4}
+  for -x : a {
+    Print(x)
+    if x == 4 || x == 1
+      a -= x
+  }
+  Print(a.Len)
+  Print(a[0])
+  Print(a[1])
+}" "4\n3\n2\n1\n2\n2\n3\n")
+run_program(iteration_forward_removal "Main() {
+  int [] a = {1, 2, 2, 3}
+  for x : a {
+    Print(x)
+    if x == 2
+      a -= x
+  }
+  Print(a.Len)
+}" "1\n2\n2\n3\n2\n")
+run_program(iteration_pair_removal "Main() {
+  string, int pair p = {\"a\" : 1, \"b\" : 2, \"c\" : 3}
+  for -k, v : p {
+    Print(k)
+    if v == 2
+      p -= v
+  }
+  for name_, v : p {
+    if name_ == \"a\"
+      p -= name_
+  }
+  Print(p.Len)
+  Print(p[\"c\"])
+}" "c\nb\na\n1\n3\n")
+run_program(iteration_grid_removal "Main() {
+  int [-] g
+  g[-1] = 1
+  g[0] = 2
+  g[9] = 3
+  for -v : g {
+    Print(v)
+    if v == 2
+      g -= v
+  }
+  Print(g.Len)
+  Print(IsValid(g[0]))
+}" "3\n2\n1\n2\n0\n")
+run_program(iteration_removal_result "Main() {
+  string [] a = {\"x\", \"y\"}
+  for -s : a {
+    t : (a -= s)
+    Print(t)
+  }
+  Print(a.Len)
+}" "y\nx\n0\n")
+run_program(iteration_writes_elements "Item {
+  int Id = 1
+  Bump() { Id += 10 }
+}
+Main() {
+  int [3] fixed = {1, 2, 3}
+  for x : fixed
+    x *= 2
+  Print(fixed[2])
+  string [] words = {\"a\", \"b\"}
+  for w : words
+    w = w + \"!\"
+  Print(words[0])
+  int queue q = {1}
+  for x : q
+    x = 9
+  Print(q.Front)
+  Item [] items
+  items++
+  for -item : items
+    item.Bump()
+  Print(items[0].Id)
+}" "6\na!\n9\n11\n")
+run_program(iteration_control_flow "int First(int [] & a) {
+  for x : a
+    if x > 1
+      return x
+  return 0
+}
+Main() {
+  int [] a = {1, 2, 3, 4}
+  for x : a {
+    if x == 2
+      continue
+    if x == 4
+      break
+    Print(x)
+  }
+  for -x : a {
+    if x == 3
+      continue
+    Print(x)
+    if x == 2
+      break
+  }
+  Print(First(a))
+}" "1\n3\n4\n2\n2\n")
+run_program(iteration_nested "Main() {
+  int [][] rows = {{1, 2}, {3}}
+  for row : rows {
+    for -v : row
+      Print(v)
+    Print(row.Len)
+  }
+  int [2][2] t = {{1, 2}, {3, 4}}
+  for row : t
+    for v : row
+      Print(v)
+  for row : rows
+    for v : row
+      if v == 1
+        row -= v
+  Print(rows[0].Len)
+}" "2\n1\n2\n3\n1\n1\n2\n3\n4\n1\n")
+run_program(iteration_fields "Bag {
+  int [] items
+  Add(int x) { items += x }
+  int Sum() {
+    int total = 0
+    for x : items
+      total += x
+    return total
+  }
+  Trim() {
+    for -x : this.items
+      if x > 1
+        items -= x
+  }
+}
+Main() {
+  Bag b
+  b.Add(1)
+  b.Add(2)
+  Print(b.Sum())
+  b.Trim()
+  Print(b.Sum())
+  for x : b.items
+    Print(x)
+}" "3\n1\n1\n")
+# A callee can change the collection: a loop tracks positions over its live
+# length and the variable finds its element again at each use.
+run_program(iteration_callee_changes "Grow(int []& v) {
+  if v.Len < 3
+    v += (int)v.Len + 1
+}
+Empty(int []& v) { v.Clear() }
+Main() {
+  int [] a = {1}
+  for x : a {
+    Grow(a)
+    Print(x)
+  }
+  Print(a.Len)
+  for -x : a {
+    Print(x)
+    Empty(a)
+  }
+  Print(a.Len)
+  int [] b = {1, 2}
+  for x : b {
+    Print(x)
+    Empty(b)
+  }
+  Print(b.Len)
+}" "1\n2\n3\n3\n3\n0\n1\n0\n")
+run_program(iteration_counted_forms_unchanged "Main() {
+  for i : 0; i < 2; i++
+    Print(i)
+  for int j = 1; j > -1; j--
+    Print(j)
+}" "0\n1\n1\n0\n")
+trap_program(iteration_use_after_removal "Main() {
+  int [] a = {1, 2}
+  for -x : a {
+    a -= x
+    Print(x)
+  }
+}")
+trap_program(iteration_use_after_removal_forward "Main() {
+  int [] a = {1, 2}
+  for x : a {
+    a -= x
+    x = 5
+  }
+}")
+trap_program(iteration_double_removal "Main() {
+  string, int pair p = {\"a\" : 1, \"b\" : 2}
+  for v : p {
+    p -= v
+    p -= v
+  }
+}")
+trap_program(iteration_use_after_callee_empties "Empty(int []& v) { v.Clear() }
+Main() {
+  int [] a = {1}
+  for x : a {
+    Empty(a)
+    Print(x)
+  }
+}")
+set(iteration_body "int [] a = {1}\nint queue q\nint [-] g\nfor x : a")
+reject(iteration_append "Main() { ${iteration_body} { a += 1 } }" "changes 'a' while a for loop iterates it")
+reject(iteration_add_default "Main() { ${iteration_body} { a++ } }" "changes 'a' while a for loop iterates it")
+reject(iteration_remove_last "Main() { ${iteration_body} { a-- } }" "changes 'a' while a for loop iterates it")
+reject(iteration_remove_index "Main() { ${iteration_body} { a -= [0] } }" "changes 'a' while a for loop iterates it")
+reject(iteration_clear "Main() { ${iteration_body} { a.Clear() } }" "changes 'a' while a for loop iterates it")
+reject(iteration_replace "Main() { ${iteration_body} { a = {2} } }" "changes 'a' while a for loop iterates it")
+reject(iteration_result_form "Main() { ${iteration_body} { t : (a += 1) } }" "changes 'a' while a for loop iterates it")
+reject(iteration_grid_store "Main() {\nint [-] g\nfor v : g { g[1] = 2 } }" "changes 'g' while a for loop iterates it")
+reject(iteration_remove_other_value "Main() {\nint [] a = {1}\nint y = 1\nfor x : a { a -= y } }" "changes 'a' while a for loop iterates it")
+reject(iteration_remove_outer_variable "Main() {\nint [] a = {1}\nint [] b = {1}\nfor x : a { for y : b { a -= y } } }" "changes 'a' while a for loop iterates it")
+reject(iteration_remove_shadowed "Main() {\nint [] a = {1}\nfor x : a {\n{ int x = 1\na -= x } } }" "changes 'a' while a for loop iterates it")
+reject(iteration_nested_same "Main() {\nint [] a = {1}\nfor x : a { for y : a { a -= y } } }" "more than one for loop")
+reject(iteration_queue_remove "Main() {\nint queue q\nfor x : q { q -= x } }" "removes only at its end")
+reject(iteration_stack_pop "Main() {\nint stack s\nfor x : s { s-- } }" "changes 's' while a for loop iterates it")
+reject(iteration_fixed_remove "Main() {\nint [2] a\nfor x : a { a -= x } }" "fixed length")
+reject(iteration_remove_without_loop "Main() {\nint [] a\nint y = 1\na -= y }" "remove from")
+reject(iteration_shadow_collection "Main() {\nint [] a = {1}\nfor x : a { int a = 1 } }" "names the collection a for loop is iterating")
+reject(iteration_same_name "Main() {\nint [] a = {1}\nfor a : a { } }" "names the collection a for loop is iterating")
+reject(iteration_temporary "int [] Make() { int [] a\nreturn a }\nMain() { for x : Make() { } }" "named collection or field")
+reject(iteration_index_place "Main() {\nint [][] a\nfor x : a[0] { } }" "named collection or field")
+reject(iteration_not_collection "Main() {\nint a = 1\nfor x : a { } }" "cannot iterate over int")
+reject(iteration_key_on_array "Main() {\nint [] a\nfor k, v : a { } }" "has no keys")
+reject(iteration_key_is_constant "Main() {\nint, int pair p\nfor k, v : p { k = 1 } }" "cannot modify constant 'k'")
+reject(iteration_constant_collection "Main() {\n#int [2] a = {1, 2}\nfor x : a { x = 1 } }" "cannot modify constant 'x'")
+reject(iteration_element_by_reference "F(int& v) {}\nMain() {\nint [] a = {1}\nfor x : a { F(x) } }" "cannot pass an element")
+reject(iteration_element_address "Main() {\nint [] a = {1}\nfor x : a { p : &x } }" "cannot take the address")
+reject(iteration_variable_after_loop "Main() {\nint [] a\nfor x : a { }\nPrint(x) }" "unknown variable 'x'")
+reject(iteration_bad_header "Main() {\nint [] a\nfor x : a a { } }" "after the collection of a for loop")
+run_program(iteration_removal_destroys_once "Probe {
+  int Id = 1
+  ~Probe() { Print(-Id) }
+}
+Main() {
+  Probe [] a
+  a++
+  a++
+  a[1].Id = 2
+  for -p : a {
+    if p.Id == 2
+      a -= p
+  }
+  Print(a.Len)
+}" "-2\n1\n-1\n")
+# Inclusive ranges.
+file(READ "${SOURCE}/Examples/Bootstrap/27_Ranges.dk" ranges_example)
+run_program(ranges_example "${ranges_example}" "0\n1\n2\n2\n1\n0\n30\n3\n3\n0\n3\n")
+file(READ "${SOURCE}/Examples/Collections/04_InclusiveRanges.dk" inclusive_ranges_design)
+run_program(inclusive_ranges_design "${inclusive_ranges_design}" "0\n1\n2\n3\n4\n5\n2\n1\n0\n")
+file(READ "${SOURCE}/Examples/FailureCases/08_InclusiveUpperBound.dk" inclusive_upper_bound)
+trap_program(inclusive_upper_bound "${inclusive_upper_bound}")
+file(READ "${SOURCE}/Examples/FailureCases/09_EmptyDescendingRange.dk" empty_descending)
+run_program(empty_descending "${empty_descending}" "0\n-1\n")
+run_program(range_directions "Main() {
+  for i : 1...3
+    Print(i)
+  for i : 3...1
+    Print(i)
+  for i : 7...7
+    Print(i)
+  for i : -1...1
+    Print(i)
+}" "1\n2\n3\n3\n2\n1\n7\n-1\n0\n1\n")
+# The endpoint is emitted and the loop stops before a step could overflow.
+run_program(range_type_limits "Main() {
+  for i : int.Max - 1...int.Max
+    Print(i)
+  for i : int.Min + 1...int.Min
+    Print(i)
+  byte top = 255
+  for b : 254...top
+    Print(b)
+  uint two = 2
+  for u : two...0
+    Print(u)
+  uint64 nearly = uint64.Max
+  nearly--
+  for w : nearly...uint64.Max
+    Print(w)
+  i9 low = -256
+  for n : low + 1...low
+    Print(n)
+  long [] whole = long.Max - 1...long.Max
+  Print(whole.Len)
+  Print(whole[1])
+}" "2147483646\n2147483647\n-2147483647\n-2147483648\n254\n255\n2\n1\n0\n18446744073709551614\n18446744073709551615\n-255\n-256\n2\n9223372036854775807\n")
+run_program(range_endpoints_once "int Say(int v) {
+  Print(v)
+  return v
+}
+Main() {
+  for i : Say(1)...Say(2)
+    Print(i * 10)
+  n : Say(4)...Say(3)
+  Print(n.Len)
+  int limit = 2
+  for i : 0...limit {
+    limit = 0
+    Print(i)
+  }
+}" "1\n2\n10\n20\n4\n3\n2\n0\n1\n2\n")
+run_program(range_precedence "Main() {
+  int [] v = {1, 2}
+  for i : 0...v.Len-1
+    Print(i)
+  for i : 1+1...2*2
+    Print(i)
+  for i : (0)...(1 | 2)
+    Print(i)
+}" "0\n1\n2\n3\n4\n0\n1\n2\n3\n")
+run_program(range_counter_is_variable "Main() {
+  for n : 0...3 {
+    Print(n)
+    n++
+  }
+  for n : 0...3 {
+    n += 10
+    Print(n)
+  }
+  for n : 3...0 {
+    n -= 10
+    Print(n)
+  }
+}" "0\n2\n10\n-7\n")
+run_program(range_control_flow "int Find() {
+  for i : 1...9
+    if i * i > 10
+      return i
+  return 0
+}
+Main() {
+  for i : 1...5 {
+    if i == 2
+      continue
+    if i == 4
+      break
+    Print(i)
+  }
+  for i : 0...1
+    for j : 1...0
+      Print(i * 10 + j)
+  Print(Find())
+}" "1\n3\n1\n0\n11\n10\n4\n")
+run_program(range_values "Main() {
+  n : 0...3
+  Print(n.Len)
+  Print(n[3])
+  down : 2...0
+  Print(down[2])
+  one : 6...6
+  Print(one.Len)
+  long [] wide = 1...2
+  Print(wide[1])
+  n = 5...6
+  Print(n.Len)
+  n += 9
+  Print(n[2])
+  int [][] rows
+  rows += 0...1
+  Print(rows[0][1])
+  v : 0...v_end()
+  Print(v.Len)
+  for x : n
+    Print(x)
+  0...2
+  picked : n.Len > 0 ? 0...1 | 5...9
+  Print(picked.Len)
+}
+int v_end() { return 1 }" "4\n3\n0\n1\n2\n2\n9\n1\n2\n5\n6\n9\n2\n")
+run_program(range_return "int [] Countdown(int from) { return from...0 }
+Main() {
+  c : Countdown(2)
+  Print(c[0])
+  Print(c.Len)
+}" "2\n3\n")
+reject(range_float "Main() { for i : 0...1.5 { } }" "integer endpoints")
+reject(range_bool "Main() { for i : true...false { } }" "integer endpoints")
+reject(range_text "Main() { n : \"a\"...\"b\" }" "integer endpoints")
+reject(range_mixed_signs "Main() {\nuint64 u = 1\nlong l = 1\nfor i : u...l { } }" "explicit cast")
+reject(range_reverse_prefix "Main() { for -i : 0...1 { } }" "already has a direction")
+reject(range_key_variable "Main() { for k, v : 0...1 { } }" "a range has no keys")
+reject(range_fixed_target "Main() { int [2] a = 0...1 }" "dynamic array of integers")
+reject(range_element_type "Main() { string [] a = 0...1 }" "dynamic array of integers")
+reject(range_scalar_target "Main() { int a = 0...1 }" "dynamic array of integers")
+reject(range_narrow_elements "Main() {\nlong big_ = 1\nint [] a = 0...big_ }" "type mismatch")
+reject(range_variable_after_loop "Main() {\nfor i : 0...1 { }\nPrint(i) }" "unknown variable 'i'")
+reject(range_missing_endpoint "Main() { for i : 0... { } }" "")
+# Loop chaining: each trace is the execution order the language documents.
+file(READ "${SOURCE}/Examples/Bootstrap/28_LoopChaining.dk" chaining_example)
+run_program(chaining_example "${chaining_example}" "0\n1\n10\n11\n0\n0\n2\n2\n1\n1\n3\n3\n6\n100\n1\n2\n200\n1\n2\n")
+string(REPEAT "0\n" 6 six_zeros)
+string(REPEAT "1\n" 6 six_ones)
+string(REPEAT "2\n" 6 six_twos)
+string(REPEAT "3\n" 6 six_threes)
+run_program(chaining_documented_nested "Main() {
+  for n : 0...3 |
+      i : 0...5
+  {
+    Print(n)
+  }
+}" "${six_zeros}${six_ones}${six_twos}${six_threes}")
+run_program(chaining_documented_body_after "Main() {
+  for n : 0...3 |
+  {
+    n++
+  }
+      i : 0...5
+  {
+    Print(n)
+  }
+}" "${six_zeros}${six_twos}")
+run_program(chaining_documented_body_before "Main() {
+  for n : 0...3
+  {
+    n++
+  }|
+      i : 0...5
+  {
+    Print(n)
+  }
+}" "${six_ones}${six_threes}")
+run_program(chaining_three_levels "Main() {
+  for a : 1...2 {
+    Print(100 * a)
+  }|
+  b : 1...2 |
+  {
+    Print(7)
+  }
+  c : 1...1 {
+    Print(a * 10 + b)
+  }
+}" "100\n11\n7\n12\n7\n200\n21\n7\n22\n7\n")
+run_program(chaining_clause_kinds "Main() {
+  int [] v = {1, 2}
+  string, int pair p = {\"a\" : 5}
+  for -x : v | k, y : p
+    Print(x * y)
+  for int i = 0; i < 2; i += 1 | j : 0...0
+    Print(i)
+  for i : 0; i < 1; i++ | int j = 2; j > 0; j--
+    Print(j)
+  for a : 0...1 | b : 1...0 { Print(a + b) }
+  int [][] rows = {{1, 2}, {3}}
+  for row : rows |
+    value : row
+  {
+    if value == 1
+      row -= value
+  }
+  Print(rows[0].Len)
+}" "10\n5\n0\n1\n2\n1\n1\n0\n2\n1\n1\n")
+run_program(chaining_control_flow "int Find() {
+  for a : 1...3 |
+      b : 1...3
+    if a * b == 6
+      return a * 10 + b
+  return 0
+}
+Main() {
+  for a : 1...2 |
+  {
+    Print(a * 100)
+  }
+      b : 1...3
+  {
+    if b == 2
+      break
+    Print(b)
+  }
+  for a : 1...2
+  {
+    if a == 1
+      continue
+    Print(a)
+  }|
+      b : 1...1
+    Print(b + 5)
+  for a : 1...2
+  {
+    int doubled = a * 2
+  }|
+      b : 1...1
+    Print(doubled)
+  Print(Find())
+}" "1\n100\n1\n200\n2\n6\n2\n4\n23\n")
+run_program(chaining_bitwise_still_works "Main() {
+  for int i = 1; i < 4; i = (i | 2) + 1
+    Print(i)
+  for i : (1 | 2)...(4 | 1)
+    Print(i)
+  x : 1 | 2
+  Print(x)
+}" "1\n3\n4\n5\n3\n")
+reject(chaining_two_outer_bodies "Main() { for a : 0...1 { }|\n{ }\nb : 0...1 { } }" "one body, before or after")
+reject(chaining_missing_clause "Main() { for a : 0...1 |\n}" "")
+reject(chaining_missing_body "Main() { for a : 0...1 | b : 0...1 }" "")
+reject(chaining_inner_name_in_after "Main() { for a : 0...1 |\n{ Print(b) }\nb : 0...1 { } }" "unknown variable 'b'")
+reject(chaining_unreachable_inner "Main() { for a : 0...1 { break }|\nb : 0...1 { } }" "unreachable statement")
+# do without a trailing while.
+file(READ "${SOURCE}/Examples/Bootstrap/29_DoLoops.dk" do_loops_example)
+run_program(do_loops_example "${do_loops_example}" "3\n8\n25\n3\n")
+run_program(do_forever_flow "int Count() {
+  int n = 0
+  do {
+    n++
+    if n == 4
+      return n
+  }
+}
+Main() {
+  int n = 0
+  do {
+    n++
+    if n == 2
+      continue
+    Print(n)
+    if n == 3
+      break
+  }
+  do
+    break
+  int a
+  do {
+    if n > 0 {
+      a = 5
+      break
+    }
+    a = 6
+    break
+  }
+  Print(a)
+  do {
+    do {
+      break
+    }
+    Print(9)
+    break
+  }
+  Print(Count())
+  do {
+    return
+  }
+}" "1\n3\n5\n9\n4\n")
+run_program(do_while_on_later_line "Main() {
+  int n = 0
+  do {
+    n++
+  }
+  while n < 3
+  Print(n)
+  do {
+    n = 7
+    break
+  }
+
+  while n < 9
+  {
+    n++
+  }
+  Print(n)
+  do {
+    n = 1
+  } while false
+  {
+    Print(n)
+  }
+}" "3\n9\n1\n")
+reject(do_forever_unreachable "Main() { do { }\nPrint(1) }" "unreachable statement")
+reject(do_forever_break_unassigned "Main() { int n\ndo {\nif true\nbreak\nn = 1\nbreak }\nPrint(n) }" "read before assignment")
+reject(do_forever_break_returns "int F() { do { break } }\nMain() {}" "not all paths return")
+reject(do_forever_body_scope "Main() { do { int n = 1\nbreak }\nPrint(n) }" "unknown variable")
+reject(do_forever_same_line "Main() { do { break } Print(1) }" "newline")
+reject(do_same_line_block "Main() { do { break } while true { } }" "expected terminator")
 message(STATUS "Duck integration tests passed")
 
 trap_program(expired_heap_alias "Main() { int* value = 5\nalias : value\nvalue = null\nPrint(*alias) }")

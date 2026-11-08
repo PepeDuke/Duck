@@ -1,0 +1,32 @@
+// EXPECT: 40, 30, 20, 10, 3, Ada, 37, Alan, 42, 10, 30.
+// A for loop visits a collection front to back; `for -x` goes back to front.
+// The loop variable names the element itself, so writing to it changes the
+// collection. `c -= x` removes the current element without skipping or
+// repeating its neighbor, in either direction.
+Main()
+{
+    int [] scores = {10, 20, 30, 40}
+    for -score : scores
+        Print(score)
+
+    int total = 0
+    int queue waiting = {1, 2}
+    for ticket : waiting
+        total += ticket
+    Print(total)
+
+    string, int pair ages = {"Ada" : 36, "Alan" : 41}
+    for person, age : ages
+    {
+        age += 1
+        Print(person)
+        Print(age)
+    }
+
+    // Removing inside the loop: every remaining element is still visited.
+    for -score : scores
+        if score == 20 || score == 40
+            scores -= score
+    for score : scores
+        Print(score)
+}

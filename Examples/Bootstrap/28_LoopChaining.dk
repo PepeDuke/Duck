@@ -1,0 +1,49 @@
+// A | between for clauses nests the next clause inside the one before it.
+// An outer loop may have its own body: written after the | it runs after the
+// inner loop, written before the | it runs before the inner loop.
+// EXPECT: 0, 1, 10, 11, 0, 0, 2, 2, 1, 1, 3, 3, 6, 100, 1, 2, 200, 1, 2.
+Main()
+{
+    for row : 0...1 |
+        column : 0...1
+    {
+        Print(row * 10 + column)
+    }
+
+    // The outer body comes after the inner loop: n is 0 and then 2.
+    for n : 0...3 |
+    {
+        n++
+    }
+        i : 0...1
+    {
+        Print(n)
+    }
+
+    // The outer body comes before the inner loop: n is 1 and then 3.
+    for n : 0...3
+    {
+        n++
+    }|
+        i : 0...1
+    {
+        Print(n)
+    }
+
+    // Any for clause can be chained, including collections and counted loops.
+    int [][] rows = {{1, 2}, {3}}
+    int total = 0
+    for row : rows |
+        value : row
+        total += value
+    Print(total)
+
+    for room : 1...2
+    {
+        Print(room * 100)
+    }|
+        int seat = 1; seat <= 2; seat++
+    {
+        Print(seat)
+    }
+}

@@ -142,6 +142,15 @@ std::string pathOffset(const std::string &record, const std::vector<size_t> &pat
   for (auto index : path) indices += ", i32 " + std::to_string(index);
   return "ptrtoint (ptr getelementptr (%struct." + record + ", ptr null, i32 0" + indices + ") to i64)";
 }
+// A for-each in progress. `current` is an i64 slot holding the position of
+// the element the loop variable names, or -1 once it has been removed, and
+// `next` the position to visit after it.
+struct Iteration {
+  const Expr *collection;
+  Type type;
+  bool reverse;
+  std::string current, next;
+};
 struct Binding {
   Type type;
   std::string value;
@@ -152,6 +161,10 @@ struct Binding {
   // For this and container reference parameters: the dispatch table of the
   // object the storage belongs to.
   std::string table;
+  // A for-each variable has no storage of its own: variable() finds the
+  // current element at each use, so a collection that moved stays safe.
+  const Iteration *iteration = nullptr;
+  bool iterationKey = false; // The key variable of `for k, v : pair`.
 };
 class Generator {
   const Symbols &functions;
@@ -616,6 +629,31 @@ class Generator {
       return {};
     };
     const auto holder = location(target).value;
+    // c -= x removes the element a for-each is on. A forward loop's next
+    // element shifts into the removed position; a reverse loop's does not move.
+    if (op == "-=" && operand->kind == "name") {
+      const auto &iteration = *findBinding(operand->token).iteration;
+      auto c = fresh(), position = fresh(), slot = fresh();
+      emit(c + " = load ptr, ptr " + holder);
+      emit(position + " = load i64, ptr " + iteration.current);
+      Value v;
+      if (pair) {
+        auto entry = fresh();
+        emit(entry + " = call ptr @duck.pair$nth(ptr " + c + ", i64 " + position + ")");
+        if (const auto releaseKey = slotRelease(*type.key); releaseKey != "null")
+          emit("call void " + releaseKey + "(ptr " + entry + ")");
+        emit(slot + " = call ptr @duck.pair$value(ptr " + c + ", ptr " + entry + ")");
+        v = take(slot, slotRelease(element));
+        emit("call void @duck.pair$remove(ptr " + c + ", ptr " + entry + ")");
+      } else {
+        emit(slot + " = call ptr @duck.seq$index(ptr " + c + ", i64 " + position + ")");
+        v = take(slot, elementCleanup(element));
+        emit("call void @duck.seq$removeAt(ptr " + c + ", i64 " + position + ")");
+      }
+      emit("store i64 -1, ptr " + iteration.current);
+      if (!iteration.reverse) emit("store i64 " + position + ", ptr " + iteration.next);
+      return v;
+    }
     if (op == "--") {
       auto c = fresh(), slot = fresh();
       emit(c + " = load ptr, ptr " + holder);
@@ -1229,7 +1267,7 @@ class Generator {
     code << name << ":\n";
     currentBlock = name;
   }
-  Binding variable(const Token &t) {
+  Binding findBinding(const Token &t) const {
     for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
       auto found = it->find(t.text);
       if (found != it->end())
@@ -1237,6 +1275,168 @@ class Generator {
     }
     throw std::logic_error(
         "lowering requires a successfully analyzed function");
+  }
+  Binding variable(const Token &t) {
+    auto binding = findBinding(t);
+    if (binding.iteration) binding.value = iterationSlot(*binding.iteration, binding.iterationKey);
+    return binding;
+  }
+  // The live number of elements of the collection a for-each iterates.
+  std::string iterationLength(const Iteration &iteration) {
+    if (fixedArray(iteration.type)) return std::to_string(iteration.type.extent);
+    const auto holder = location(*iteration.collection).value;
+    auto c = fresh(), n = fresh();
+    emit(c + " = load ptr, ptr " + holder);
+    emit(n + " = call i64 @duck." + std::string(iteration.type.base == Type::Pair ? "pair" : "seq") + "$length(ptr " +
+         c + ")");
+    return n;
+  }
+  // The storage of a for-each's current element, or of its key. Traps once
+  // that element has been removed or is no longer inside the collection.
+  std::string iterationSlot(const Iteration &iteration, bool key) {
+    const auto &type = iteration.type;
+    const auto holder = location(*iteration.collection).value;
+    auto position = fresh(), slot = fresh();
+    emit(position + " = load i64, ptr " + iteration.current);
+    if (fixedArray(type)) {
+      emit(slot + " = getelementptr " + irType(type) + ", ptr " + holder + ", i64 0, i64 " + position);
+      return slot;
+    }
+    auto c = fresh();
+    emit(c + " = load ptr, ptr " + holder);
+    if (type.base == Type::Pair) {
+      auto entry = fresh();
+      emit(entry + " = call ptr @duck.pair$nth(ptr " + c + ", i64 " + position + ")");
+      if (key) return entry;
+      emit(slot + " = call ptr @duck.pair$value(ptr " + c + ", ptr " + entry + ")");
+      return slot;
+    }
+    emit(slot + " = call ptr @duck.seq$" + (dynamicArray(type) ? "index" : "nth") + "(ptr " + c + ", i64 " + position +
+         ")");
+    return slot;
+  }
+  // Ends one step of a range whose values `counter` holds: leaves for exit
+  // at or past the endpoint, before a step could overflow, and otherwise
+  // steps toward it and returns to body. Both endpoints were already
+  // evaluated, once, and `ascending` compared them.
+  void rangeAdvance(const std::string &counter, const Value &end, const std::string &ascending,
+                    const std::string &body, const std::string &exit) {
+    const auto type = irType(end.type);
+    const std::string sign = unsignedInteger(end.type) ? "u" : "s";
+    auto value = fresh(), above = fresh(), below = fresh(), done = fresh();
+    emit(value + " = load " + type + ", ptr " + counter);
+    emit(above + " = icmp " + sign + "ge " + type + " " + value + ", " + end.value);
+    emit(below + " = icmp " + sign + "le " + type + " " + value + ", " + end.value);
+    emit(done + " = select i1 " + ascending + ", i1 " + above + ", i1 " + below);
+    auto step = label();
+    emit("br i1 " + done + ", label %" + exit + ", label %" + step);
+    startBlock(step);
+    auto up = fresh(), down = fresh(), following = fresh();
+    emit(up + " = add " + type + " " + value + ", 1");
+    emit(down + " = sub " + type + " " + value + ", 1");
+    emit(following + " = select i1 " + ascending + ", " + type + " " + up + ", " + type + " " + down);
+    emit("store " + type + " " + following + ", ptr " + counter);
+    emit("br label %" + body);
+  }
+  std::string rangeAscending(const Value &first, const Value &last) {
+    auto ascending = fresh();
+    emit(ascending + " = icmp " + (unsignedInteger(first.type) ? "ule " : "sle ") + irType(first.type) + " " +
+         first.value + ", " + last.value);
+    return ascending;
+  }
+  // `for i : a...b`: i is the counter itself, so a body that changes it
+  // changes which values follow. A range always holds at least one value.
+  void rangeFor(const Stmt &s) {
+    const auto first = expression(*s.expr->args[0]), last = expression(*s.expr->args[1]);
+    scopes.emplace_back();
+    auto name = s.token;
+    name.text = s.name;
+    declare(name, first);
+    const auto ascending = rangeAscending(first, last);
+    auto body = label(), step = label(), end = label();
+    emit("br label %" + body);
+    startBlock(body);
+    loops.push_back({end, step, scopes.size()});
+    if (!block(s.body))
+      emit("br label %" + step);
+    loops.pop_back();
+    startBlock(step);
+    rangeAdvance(findBinding(name).value, last, ascending, body, end);
+    startBlock(end);
+    cleanupScopes(scopes.size() - 1);
+    scopes.pop_back();
+  }
+  // A range used as a value: a new dynamic array of its values.
+  Value rangeArray(const Expr &e) {
+    usesCollectionRuntime = true;
+    const auto type = analysis.expressionTypes.at(&e);
+    const auto &element = *type.element;
+    const auto first = expression(*e.args[0]), last = expression(*e.args[1]);
+    auto holder = fresh(), counter = fresh();
+    allocations << "  " << holder << " = alloca ptr\n";
+    allocations << "  " << counter << " = alloca " << irType(element) << '\n';
+    emit("store ptr null, ptr " + holder);
+    emit("store " + irType(element) + " " + first.value + ", ptr " + counter);
+    const auto ascending = rangeAscending(first, last);
+    auto body = label(), end = label();
+    emit("br label %" + body);
+    startBlock(body);
+    auto value = fresh(), slot = fresh();
+    emit(value + " = load " + irType(element) + ", ptr " + counter);
+    emit(slot + " = call ptr @duck.seq$push(ptr " + holder + ", i64 " + sizeOf(element) + ")");
+    emit("store " + irType(element) + " " + value + ", ptr " + slot);
+    rangeAdvance(counter, last, ascending, body, end);
+    startBlock(end);
+    auto result = fresh();
+    emit(result + " = load ptr, ptr " + holder);
+    return {type, result};
+  }
+  // `for x : c` and `for -x : c` lower to an indexed loop over the live
+  // length. The check picks the next position, so `continue` needs no step.
+  // Reverse starts at the largest position and is clamped to the last
+  // element, which also keeps it inside a collection a callee has shrunk.
+  void forEach(const Stmt &s) {
+    usesCollectionRuntime = true;
+    const auto type = analysis.expressionTypes.at(s.expr.get());
+    const Iteration iteration{s.expr.get(), type, s.reverse, fresh(), fresh()};
+    allocations << "  " << iteration.current << " = alloca i64\n";
+    allocations << "  " << iteration.next << " = alloca i64\n";
+    emit("store i64 " + std::string(s.reverse ? "9223372036854775807" : "0") + ", ptr " + iteration.next);
+    scopes.emplace_back();
+    auto name = s.token;
+    name.text = s.name;
+    bind(name, {*type.element, "", false, false, false, 0, "", &iteration, false});
+    if (!s.key.empty()) {
+      name.text = s.key;
+      bind(name, {*type.key, "", true, false, false, 0, "", &iteration, true});
+    }
+    auto check = label(), body = label(), end = label();
+    emit("br label %" + check);
+    startBlock(check);
+    const auto length = iterationLength(iteration);
+    auto position = fresh(), more = fresh();
+    emit(position + " = load i64, ptr " + iteration.next);
+    if (s.reverse) {
+      auto last = fresh(), beyond = fresh(), clamped = fresh();
+      emit(last + " = sub i64 " + length + ", 1");
+      emit(beyond + " = icmp sgt i64 " + position + ", " + last);
+      emit(clamped + " = select i1 " + beyond + ", i64 " + last + ", i64 " + position);
+      position = clamped;
+      emit(more + " = icmp sge i64 " + position + ", 0");
+    } else
+      emit(more + " = icmp slt i64 " + position + ", " + length);
+    emit("br i1 " + more + ", label %" + body + ", label %" + end);
+    startBlock(body);
+    auto following = fresh();
+    emit(following + " = add i64 " + position + ", " + (s.reverse ? "-1" : "1"));
+    emit("store i64 " + position + ", ptr " + iteration.current);
+    emit("store i64 " + following + ", ptr " + iteration.next);
+    loops.push_back({end, check, scopes.size()});
+    if (!block(s.body))
+      emit("br label %" + check);
+    loops.pop_back();
+    startBlock(end);
+    scopes.pop_back();
   }
   size_t declarations = 0;
   void bind(const Token &t, Binding binding) {
@@ -1492,6 +1692,7 @@ class Generator {
     if (decimal != analysis.decimalConstants.end())
       return {analysis.expressionTypes.at(&e),
               "{ i256 " + decimal->second.first + ", i32 " + decimal->second.second + " }"};
+    if (e.kind == "range") return rangeArray(e);
     if (e.kind == "initializer" && !recordValue(analysis.expressionTypes.at(&e)))
       return literal(e, analysis.expressionTypes.at(&e));
     if (e.kind == "initializer") {
@@ -2099,13 +2300,24 @@ class Generator {
         emit("br label %" + check);
       loops.pop_back();
       startBlock(check);
-      auto condition = expression(*s.expr);
-      emit("br i1 " + condition.value + ", label %" + body + ", label %" + end);
+      if (s.expr) {
+        auto condition = expression(*s.expr);
+        emit("br i1 " + condition.value + ", label %" + body + ", label %" + end);
+      } else
+        emit("br label %" + body);
       startBlock(end);
       if (analysis.terminatingLoops.count(&s)) {
         emit("unreachable");
         return true;
       }
+      return false;
+    }
+    if (s.kind == "foreach") {
+      forEach(s);
+      return false;
+    }
+    if (s.kind == "rangefor") {
+      rangeFor(s);
       return false;
     }
     if (s.kind == "while" || s.kind == "for") {

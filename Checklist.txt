@@ -76,13 +76,13 @@ Collections
    Proposal: Record the size annotation as an estimate on the array type or declaration. Feed it to the scheduling cost model; a [50*] array must still grow beyond 50 elements without changing program behavior.
 
 Loops and ranges
-[] Support forward and reverse collection iteration.
+[x] Support forward and reverse collection iteration.
    Proposal: Lower iteration to an indexed loop or a collection-specific cursor. Define mutation rules per collection and test reverse removal of the current element so its neighbor is neither skipped nor visited twice.
-[] Support inclusive ascending and descending ranges in loops and expressions.
+[x] Support inclusive ascending and descending ranges in loops and expressions.
    Proposal: Add a range expression with two integral endpoints evaluated once. In loops, choose the step from their order and stop after emitting the endpoint, before an increment could overflow. Materialize an array when a sequence value is required.
-[] Support loop chaining with | and the documented ordering of outer and inner bodies.
+[x] Support loop chaining with | and the documented ordering of outer and inner bodies.
    Proposal: Parse each chained clause with its optional body and lower it to nested loops. Place each outer body before or after its inner loop according to the pipe position and verify the execution order with a trace.
-[] Support do blocks without a trailing while.
+[x] Support do blocks without a trailing while.
    Proposal: Allow a missing while clause after a do body and lower that form to an unconditional back edge. Reuse loop-exit analysis so break establishes the facts available after the loop and continue starts the next iteration.
 
 Types, enums, and constants

@@ -54,7 +54,11 @@ bodies, and standalone scopes.
 `Examples/Bootstrap/23_BoundsChecks.dk` demonstrates `IsValid` and guarded `?a[i]` reads and writes.
 `Examples/Bootstrap/24_CollectionMutations.dk` demonstrates undo history, removal, `Clear()`, and mutation results.
 `Examples/Bootstrap/25_GridsAndTables.dk` demonstrates a table, Pascal's triangle, and a Game of Life step on a sparse grid.
-`Examples/Collections/01_ArrayMutation.dk`, `02_BoundsChecks.dk`, and `03_Maps.dk` now compile unchanged.
+`Examples/Bootstrap/26_Iteration.dk` demonstrates forward and reverse `for` loops over collections and removing while iterating.
+`Examples/Bootstrap/27_Ranges.dk` demonstrates inclusive ascending and descending ranges in loops and as values.
+`Examples/Bootstrap/28_LoopChaining.dk` demonstrates chained for clauses and the placement of outer bodies.
+`Examples/Bootstrap/29_DoLoops.dk` demonstrates `do` without a trailing `while`.
+`Examples/Collections/01_ArrayMutation.dk`, `02_BoundsChecks.dk`, `03_Maps.dk`, and `04_InclusiveRanges.dk` now compile unchanged.
 Other tutorial files still demonstrate the larger language design.
 
 For another Clang location, configure with `-DDUCK_CLANG=<path-to-clang>`.
@@ -187,8 +191,12 @@ accept explicit files/options only and never reads project configuration.
   Any for-header clause may be omitted; an omitted condition is true.
   `break` exits the innermost loop; `continue` runs the for-loop step or
   checks a while/do-while condition. A do-while body runs before its condition,
-  and `break` skips the condition. The condition ends at a newline or `}`. The bare `do { ... }` form without
-  `while` shown in the broader design is not yet supported.
+  and `break` skips the condition. The condition ends at a newline or `}`.
+  A `do` body without a trailing `while` repeats until `break` or `return`;
+  `continue` starts its next iteration, facts after it come only from its
+  `break`s, and without a `break` the code after it is unreachable. A `while`
+  on the body's last line is always its condition; on a later line it is the
+  condition unless a `{` block follows it, which makes it the next statement.
   For-initializer locals belong to the loop
   scope. The step cannot declare a variable.
 - `char`, `date`, `time`, and `datetime` values with validated constructors;
@@ -1074,6 +1082,137 @@ time proportional to what follows it. `Clear()` releases every element in
 order and frees the storage; the collection is then empty and null, like a
 new one, so clearing an empty collection does nothing and the next `+=`
 gives index 0.
+
+## Iterating collections
+
+```duck
+int [] scores = {10, 20, 30}
+for score : scores       // first to last
+    Print(score)
+for -score : scores      // last to first
+    if score == 20
+        scores -= score  // removes this element
+
+string, int pair ages = {"Ada" : 36}
+for person, age : ages   // or `for age : ages` for the values alone
+    age += 1
+```
+
+| Collection | `for x` order | `for -x` order | `x` names | `c -= x` |
+| --- | --- | --- | --- | --- |
+| `T [N]` | index 0 up | last index down | the element | rejected: fixed length |
+| `T []` | index 0 up | last index down | the element | removes it |
+| Queue | front to back | back to front | the element | rejected: drain with `--` |
+| Stack | bottom to top | top to bottom | the element | rejected: drain with `--` |
+| Pair | insertion order | reverse insertion | the value, and in `for k, v` a constant key | removes the entry |
+| Grid | storage order | reverse storage order | the cell, and in `for k, v` its constant coordinates `k[0]`, `k[1]` | removes the cell |
+
+The loop variable names the current element's storage, so `x = v`, `x += 1`,
+and `x.Method()` change the collection. It is a new variable in each
+iteration's scope, is constant when the collection is, and, for anything but
+a fixed array, cannot be passed by reference or have its address taken, like
+any element in storage that can move. The collection must be a named local,
+parameter, or field chain such as `this.items`; store a call's result in a
+local first, and use a counted loop for `a[i]`. A body cannot declare a local
+with the collection's name.
+
+The loop lowers to an index cursor over the live length: the array or pair
+position, or the distance from a queue's head. The collection is named again
+at each use of the variable, so growth that moves the storage cannot leave
+the variable dangling, and each use is bounds checked.
+
+**Removing while iterating.** The only change a body can make to the length
+of the collection it iterates is `c -= x`, where `x` (or the key in
+`for k, v`) is that loop's variable:
+
+- The rest of the loop visits every remaining element exactly once, forward
+  or reverse. A forward loop stays at the position the next element shifted
+  into; a reverse loop's next element did not move.
+- After the removal `x` names nothing: reading it, writing it, or removing it
+  again traps. `(c -= x)` gives the removed element if it is still needed.
+- `+=`, `++`, `--`, `-= [i]`, `Clear()`, assigning the collection, and writing
+  a grid cell (which can store a new one) are rejected in the body, as is
+  removing while a second loop iterates the same collection.
+
+**Changes made through a call** cannot be seen by the compiler and stay
+memory safe, but positions are not adjusted. A forward loop runs while its
+position is below the live length, so it visits appended elements and stops
+early after a shrink. A reverse loop continues from the next lower position,
+moved down to the last element if the collection has shrunk below it, and
+does not visit appended elements. Using `x` after a call removed its element
+traps if the position is now outside the collection, and otherwise names
+whichever element is at that position.
+
+## Loop chaining
+
+```duck
+for row : 0...1 |             // two nested loops; Print is the inner body
+    column : 0...2
+    Print(row * 10 + column)
+
+for n : 0...3 |               // the | comes first: this body runs after the inner loop
+{
+    n++
+}
+    i : 0...5
+    Print(n)
+
+for n : 0...3                 // the | comes last: this body runs before the inner loop
+{
+    n++
+}|
+    i : 0...5
+    Print(n)
+```
+
+A `|` nests the following clause, written without `for`, inside the clause
+before it. Any for clause can be chained, to any depth: counted, range, or
+collection, as in `for row : rows | value : row`. The last clause must have
+a body. An outer loop has at most one body of its own, either before or after
+its inner loop; giving it both is rejected.
+
+The form is exactly the nested loops it stands for. An outer body and its
+inner loop are one statement list, so a local declared in a body that runs
+before the inner loop is visible in it, `break` and `continue` apply to the
+innermost loop around them, and a `continue` in a body that runs first skips
+the inner loop. Because `|` also means bitwise or, parenthesize a bitwise or
+at the end of a for header, as in `i = (i | 1)`.
+
+## Ranges
+
+```duck
+for i : 0...5                 // six values, 0 through 5
+for i : 5...0                 // six values, 5 down to 0
+for i : 0...values.Len-1      // ... binds looser than arithmetic
+
+n : 0...3                     // int [] {0, 1, 2, 3}
+long [] down = 2...0          // {2, 1, 0}
+```
+
+`a...b` includes both endpoints. Each endpoint is an integer and is evaluated
+exactly once, `a` first, so changing a variable used in `b` does not move the
+end of a running loop. The range's type is the endpoints' common type, as
+arithmetic would widen them, and a literal endpoint takes the other
+endpoint's type; mixed signed and unsigned values that have no common type
+need a cast.
+
+The direction comes from comparing the endpoints, once: `a <= b` counts up,
+otherwise down. A range is never empty, so `0...values.Len-1` on an empty
+array runs for 0 and then -1; use a counted loop or `for x : values` when a
+collection may be empty. `for -i` does not apply: write the high endpoint first.
+
+The loop variable is the counter itself, a new mutable local scoped to the
+loop. Writing to it changes which values follow. After each iteration, the
+loop ends if the counter has reached or passed `b`; only then does it step.
+So a range ending at `int.Max` or `uint.Min` stops without overflowing, and a
+body that moves the counter past `b` ends the loop.
+
+Anywhere else, a range is a value: a new `T []` holding every value in order,
+accepted wherever a dynamic array of those integers is, and the expected
+element type sets the endpoints' type, as in `long [] w = 1...2`. A fixed
+array or any other target is rejected. The array is built eagerly, so a huge
+range traps when memory runs out. An unparenthesized `|` after the second
+endpoint is not part of the range, so write `0...(a | b)` for a bitwise or.
 
 ## Indexing and bounds checks
 

@@ -496,6 +496,16 @@ class Parser {
       parent->args.push_back(expression(p + 1, stopAtPipe));
       e = std::move(parent);
     }
+    // A range binds looser than every operator, so 0...a.Len-1 needs no
+    // parentheses; a bare pipe after it belongs to the enclosing form.
+    if (minimum == 1 && at("...")) {
+      auto parent = std::make_unique<Expr>();
+      parent->token = pop();
+      parent->kind = "range";
+      parent->args.push_back(std::move(e));
+      parent->args.push_back(expression(2, true));
+      e = std::move(parent);
+    }
     if (minimum == 1 && at("?")) {
       auto parent = std::make_unique<Expr>();
       parent->token = pop();
@@ -534,26 +544,30 @@ class Parser {
     if (accept("do")) {
       s->kind = "do";
       s->body = controlBody();
+      // A `while` on the body's last line is its condition. One on a later
+      // line is too, unless it has a block of its own: that is the next
+      // statement, and this `do` has no condition.
+      const auto end = pos;
+      const bool sameLine = at("while");
       lines();
-      expect("while");
-      s->expr = expression();
-      if (!at("\n") && !at("}"))
-        fail(peek(), "expected terminator after do-while condition");
+      if (accept("while")) {
+        auto condition = expression();
+        const bool terminated = at("\n") || at("}");
+        if (sameLine && !terminated) fail(peek(), "expected terminator after do-while condition");
+        const auto after = pos;
+        lines();
+        const bool ownBlock = at("{");
+        pos = after;
+        if (terminated && (sameLine || !ownBlock)) {
+          s->expr = std::move(condition);
+          return s;
+        }
+      }
+      pos = end;
       return s;
     }
     if (accept("for")) {
-      s->kind = "for";
-      if (!at(";"))
-        s->initializer = simpleStatement();
-      expect(";");
-      if (!at(";"))
-        s->expr = expression();
-      expect(";");
-      if (!at("{") && !at("\n"))
-        s->step = simpleStatement();
-      if (s->step && (s->step->kind == "let" || s->step->kind == "own"))
-        fail(s->step->token, "for step cannot declare a variable");
-      s->body = controlBody();
+      forClause(*s);
       return s;
     }
     if (accept("if") || accept("while")) {
@@ -591,6 +605,87 @@ class Parser {
                    "not be supported yet)");
     return s;
   }
+  // One clause of a for loop and everything chained after it. `h | inner`
+  // nests inner in h; `h | {after} inner` runs the body after the inner
+  // loop and `h {before} | inner` before it. Each outer body shares one
+  // statement list with its inner loop.
+  void forClause(Stmt &s) {
+    if (!forEachHeader(s)) {
+      s.kind = "for";
+      if (!at(";"))
+        s.initializer = simpleStatement();
+      expect(";");
+      if (!at(";"))
+        s.expr = expression();
+      expect(";");
+      if (!at("{") && !at("\n") && !at("|"))
+        s.step = simpleStatement(true);
+      if (s.step && (s.step->kind == "let" || s.step->kind == "own"))
+        fail(s.step->token, "for step cannot declare a variable");
+    }
+    std::vector<std::unique_ptr<Stmt>> before, after;
+    if (accept("|")) {
+      lines();
+      if (at("{")) {
+        after = block();
+        lines();
+      }
+    } else {
+      before = controlBody();
+      const auto end = pos;
+      lines();
+      if (!accept("|")) {
+        pos = end;
+        s.body = std::move(before);
+        return;
+      }
+      lines();
+      if (at("{")) fail(peek(), "an outer loop takes one body, before or after its inner loop");
+    }
+    auto inner = std::make_unique<Stmt>();
+    inner->token = peek();
+    forClause(*inner);
+    s.body = std::move(before);
+    s.body.push_back(std::move(inner));
+    for (auto &statement : after) s.body.push_back(std::move(statement));
+  }
+  // `for x : c`, `for -x : c`, or `for k, v : c`, after the `for`. A counted
+  // `for i : 0; ...` starts the same way: it is told apart by its ';', and
+  // the position is restored for the counted form.
+  bool forEachHeader(Stmt &s) {
+    const auto start = pos;
+    const bool reverse = accept("-");
+    auto first = peek();
+    const bool word = !first.string && !first.text.empty() &&
+                      (std::isalpha(static_cast<unsigned char>(first.text[0])) || first.text[0] == '_');
+    if (!word || at("<eof>") || (tokens[pos + 1].text != ":" && tokens[pos + 1].text != ",") ||
+        tokens[pos + 1].string) {
+      pos = start;
+      return false;
+    }
+    s.name = identifier().text;
+    if (accept(",")) {
+      s.key = s.name;
+      s.name = identifier().text;
+    }
+    expect(":");
+    auto collection = expression(1, true);
+    if (at(";") && !reverse && s.key.empty()) {
+      s.name.clear();
+      pos = start;
+      return false;
+    }
+    if (!at("{") && !at("\n") && !at("|"))
+      fail(peek(), "expected '{' or a newline after the collection of a for loop");
+    if (collection->kind == "range" && reverse)
+      fail(collection->token, "a range already has a direction; write the high endpoint first, as 5...0");
+    if (collection->kind == "range" && !s.key.empty())
+      fail(collection->token, "a range has no keys; write for i : a...b");
+    s.kind = collection->kind == "range" ? "rangefor" : "foreach";
+    s.reverse = reverse;
+    s.expr = std::move(collection);
+    return true;
+  }
   std::vector<std::unique_ptr<Stmt>> controlBody() {
     lines();
     if (at("{"))
@@ -614,7 +709,7 @@ class Parser {
   }
   // The right side of += or -=: `key : value` adds an entry to a pair, and
   // `[i]` or `[key]` after -= names the element to remove.
-  std::unique_ptr<Expr> mutationOperand(const std::string &op) {
+  std::unique_ptr<Expr> mutationOperand(const std::string &op, bool stopAtPipe = false) {
     if (op == "-=" && at("[")) {
       auto removal = std::make_unique<Expr>();
       removal->kind = "removal";
@@ -632,18 +727,19 @@ class Parser {
       }
       return removal;
     }
-    auto value = expression();
+    auto value = expression(1, stopAtPipe);
     if (op == "+=" && at(":")) {
       auto entry = std::make_unique<Expr>();
       entry->kind = "entry";
       entry->token = pop();
       entry->args.push_back(std::move(value));
-      entry->args.push_back(expression());
+      entry->args.push_back(expression(1, stopAtPipe));
       return entry;
     }
     return value;
   }
-  std::unique_ptr<Stmt> simpleStatement() {
+  // stopAtPipe leaves an unparenthesized `|` for a chained for loop.
+  std::unique_ptr<Stmt> simpleStatement(bool stopAtPipe = false) {
     auto s = std::make_unique<Stmt>();
     s->token = peek();
     s->constant = accept("#");
@@ -687,7 +783,7 @@ class Parser {
         s->expr = expression();
     } else {
       unreachableNestedType();
-      auto target = expression();
+      auto target = expression(1, stopAtPipe);
       if (at(":") || at("::")) {
         if (target->kind != "name") fail(target->token, "expected local name");
         s->kind = pop().text == "::" ? "own" : "let";
@@ -699,8 +795,8 @@ class Parser {
         auto op = pop().text;
         s->kind = op == "=" ? "assign" : op;
         s->target = std::move(target);
-        if (op == "+=" || op == "-=") s->expr = mutationOperand(op);
-        else if (op != "++" && op != "--") s->expr = expression();
+        if (op == "+=" || op == "-=") s->expr = mutationOperand(op, stopAtPipe);
+        else if (op != "++" && op != "--") s->expr = expression(1, stopAtPipe);
       } else {
         s->kind = "expr";
         s->expr = std::move(target);

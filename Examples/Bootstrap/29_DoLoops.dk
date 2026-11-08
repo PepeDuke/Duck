@@ -1,0 +1,57 @@
+// `do` without a trailing while repeats until a break or a return.
+// EXPECT: 3, 8, 25, 3.
+int FirstSquareOver(int limit)
+{
+    int i = 0
+    do
+    {
+        i++
+        if i * i > limit
+            return i * i
+    }
+    // Only return leaves that loop, so no return is needed after it.
+}
+
+Main()
+{
+    // continue starts the next iteration; there is no condition to check.
+    int tries = 0
+    do
+    {
+        tries++
+        if tries < 3
+            continue
+        break
+    }
+    Print(tries)
+
+    // A variable assigned before every break is initialized after the loop.
+    int found
+    int n = 10
+    do
+    {
+        n--
+        if n % 4 == 0
+        {
+            found = n
+            break
+        }
+    }
+    Print(found)
+
+    Print(FirstSquareOver(20))
+
+    // A while on a later line with its own block is the next statement. It
+    // would be this do's condition if it had no block.
+    int count = 0
+    do
+    {
+        count = 1
+        break
+    }
+    while count < 3
+    {
+        count++
+    }
+    Print(count)
+}

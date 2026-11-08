@@ -368,6 +368,58 @@ exit:
 
 )IR" // MSVC caps each string literal piece at 16 KB.
          R"IR(
+; The slot at position i from the head of a queue or stack, for iteration.
+; Traps outside 0 <= i < count.
+define internal ptr @duck.seq$nth(ptr %c, i64 %i) {
+entry:
+  %null = icmp eq ptr %c, null
+  br i1 %null, label %trap, label %check
+check:
+  %countp = getelementptr %duck.seq, ptr %c, i32 0, i32 2
+  %count = load i64, ptr %countp
+  %inside = icmp ult i64 %i, %count
+  br i1 %inside, label %found, label %trap
+trap:
+  call void @llvm.trap()
+  unreachable
+found:
+  %data = load ptr, ptr %c
+  %headp = getelementptr %duck.seq, ptr %c, i32 0, i32 1
+  %head = load i64, ptr %headp
+  %capp = getelementptr %duck.seq, ptr %c, i32 0, i32 3
+  %cap = load i64, ptr %capp
+  %sizep = getelementptr %duck.seq, ptr %c, i32 0, i32 4
+  %size = load i64, ptr %sizep
+  %at0 = add i64 %head, %i
+  %at = urem i64 %at0, %cap
+  %off = mul i64 %at, %size
+  %slot = getelementptr i8, ptr %data, i64 %off
+  ret ptr %slot
+}
+
+; The entry at position i in insertion order, for iteration. Traps outside
+; 0 <= i < count.
+define internal ptr @duck.pair$nth(ptr %c, i64 %i) {
+entry:
+  %null = icmp eq ptr %c, null
+  br i1 %null, label %trap, label %check
+check:
+  %countp = getelementptr %duck.pair, ptr %c, i32 0, i32 1
+  %count = load i64, ptr %countp
+  %inside = icmp ult i64 %i, %count
+  br i1 %inside, label %found, label %trap
+trap:
+  call void @llvm.trap()
+  unreachable
+found:
+  %entries = load ptr, ptr %c
+  %stridep = getelementptr %duck.pair, ptr %c, i32 0, i32 4
+  %stride = load i64, ptr %stridep
+  %off = mul i64 %i, %stride
+  %e = getelementptr i8, ptr %entries, i64 %off
+  ret ptr %e
+}
+
 define internal ptr @duck.pair$find(ptr %c, ptr %key, ptr %equal) {
 entry:
   %null = icmp eq ptr %c, null

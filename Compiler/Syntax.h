@@ -197,6 +197,8 @@ struct Expr {
 struct Stmt {
   Token token;
   std::string kind, name;
+  std::string key;      // A foreach's key variable, as in `for k, v : pair`.
+  bool reverse = false; // A foreach written `for -x : c`.
   Type type = Type::Void;
   bool constant = false;
   std::unique_ptr<Expr> expr, target;

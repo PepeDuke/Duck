@@ -157,6 +157,10 @@ struct Local {
   bool initialized = true;
   bool receiver = false;
   bool borrowed = false; // A reference parameter: the caller owns the storage.
+  // A for-each variable: the place of the collection it iterates, and whether
+  // its element sits in storage that moves when the collection grows.
+  std::string iterating;
+  bool growable = false;
   // Construction parts a container local may (on some path) or must (on
   // every path) still be missing, by ConstructionPart::id.
   std::set<std::string> mayMiss, mustMiss;
@@ -172,6 +176,12 @@ class Analyzer {
     size_t depth = 0; // Scopes at or past this index belong to the loop body.
   };
   std::vector<LoopFlow> loops;
+  // The for-each loops being analyzed, innermost last: each collection's
+  // place (see placeKey) and the variable the place starts at.
+  struct Iteration {
+    std::string place, root;
+  };
+  std::vector<Iteration> iterations;
   FunctionAnalysis analysis;
   Type result;
   const Expr *ownerDestination = nullptr;
@@ -243,6 +253,10 @@ class Analyzer {
     return visible;
   }
   void bind(const Token &token, Local local) {
+    // Lowering names the collection again on each use of the loop variable.
+    for (const auto &iteration : iterations)
+      if (iteration.root == token.text)
+        fail(token, "'" + token.text + "' names the collection a for loop is iterating; use another name here");
     if (!scopes.back().emplace(token.text, local).second)
       fail(token, "duplicate variable '" + token.text + "'");
   }
@@ -824,11 +838,13 @@ class Analyzer {
   // stack's top, or the pair's last added entry; a -= [i] and p -= [key]
   // remove one element. Gives the type of the parenthesized form's result:
   // the inserted index for += and ++, the removed element otherwise.
-  Type collectionMutation(const Type &type, const std::string &op, const Expr *operand, const Token &token) {
+  Type collectionMutation(const Expr &target, const Type &type, const std::string &op, const Expr *operand,
+                          const Token &token) {
     if (fixedArray(type))
       fail(token, typeName(type) + " has a fixed length; '" + op + "' needs a dynamic array (" +
                       typeName(*type.element) + " [])");
     const auto &element = *type.element;
+    if (removesCurrent(target, type, op, operand, token)) return element;
     if (gridValue(type)) {
       if (op != "-=" || operand->kind != "removal")
         fail(token, "'" + op + "' does not apply to " + typeName(type) +
@@ -881,6 +897,102 @@ class Analyzer {
     fail(token, "'" + op + "' is not supported on " + typeName(type) +
                     "; collections support +=, ++, --, -= [i], and Clear()");
   }
+  // A name for the storage a chain of names and fields reaches, the same
+  // for every spelling of it; empty for any other expression.
+  std::string placeKey(const Expr &e) const {
+    if (e.kind == ".") {
+      const auto &base = *e.args[0];
+      if (base.kind == "name" && base.token.text == "this") return "0:" + e.token.text; // Fields bind in scope 0.
+      const auto prefix = placeKey(base);
+      return prefix.empty() ? "" : prefix + "." + e.token.text;
+    }
+    if (e.kind != "name") return "";
+    for (size_t i = scopes.size(); i-- > 0;)
+      if (scopes[i].count(e.token.text)) return std::to_string(i) + ":" + e.token.text;
+    return "static:" + e.token.text;
+  }
+  // A for-each body changes the length of its collection only by removing
+  // the current element, as `c -= x`. Whether op on target does that; any
+  // other length change of a collection being iterated is rejected.
+  bool removesCurrent(const Expr &target, const Type &type, const std::string &op, const Expr *operand,
+                      const Token &token) {
+    const auto place = placeKey(target);
+    const auto active = std::count_if(iterations.begin(), iterations.end(),
+                                      [&](const Iteration &i) { return i.place == place; });
+    if (!active || place.empty()) return false;
+    const auto *current = op == "-=" && operand->kind == "name" ? findLocal(operand->token) : nullptr;
+    if (!current || current->iterating != place)
+      fail(token, "'" + op + "' changes '" + target.token.text +
+                      "' while a for loop iterates it; the body can only remove the current element, as " +
+                      target.token.text + " -= x");
+    if (active > 1)
+      fail(token, "cannot remove from '" + target.token.text +
+                      "' while more than one for loop iterates it: the other loop would lose its place");
+    if (type.base == Type::Queue || type.base == Type::Stack)
+      fail(token, typeName(type) + " removes only at its end; drain it with while " + target.token.text +
+                      ".Len > 0 and -- instead of removing inside a for loop");
+    return true;
+  }
+  // Declares a for-each's variables. Each names the current element's
+  // storage rather than a copy of it.
+  void bindIteration(const Stmt &s) {
+    const auto &collection = *s.expr;
+    const auto place = placeKey(collection);
+    if (place.empty() || !storage(collection))
+      fail(collection.token, "a for loop iterates a named collection or field; store this value in a local first");
+    requireComplete(collection);
+    const auto source = location(collection);
+    const auto type = source.type;
+    if (!arrayValue(type) && !collectionValue(type))
+      fail(collection.token, "cannot iterate over " + typeName(type) +
+                                 "; a for loop takes an array, queue, stack, pair, or grid");
+    if (!s.key.empty() && type.base != Type::Pair)
+      fail(collection.token, "for k, v : c needs a pair or a grid; " + typeName(type) + " has no keys");
+    const Expr *root = &collection;
+    while (root->kind == ".") root = root->args[0].get();
+    iterations.push_back({place, root->token.text});
+    Local value{*type.element, source.constant};
+    value.borrowed = true;
+    value.growable = !fixedArray(type) || growableElement(collection);
+    value.iterating = place;
+    auto name = s.token;
+    name.text = s.name;
+    bind(name, value);
+    if (s.key.empty()) return;
+    value.type = *type.key;
+    value.constant = true;
+    name.text = s.key;
+    bind(name, value);
+  }
+  // Checks a range's endpoints and gives their integer type: expected if
+  // there is one, else their common type. A literal endpoint takes the type
+  // of the other endpoint.
+  Type rangeEndpoints(const Expr &e, Type expected) {
+    const auto &first = *e.args[0], &second = *e.args[1];
+    auto literal = [](const Expr &x) {
+      return x.kind == "int" || (x.kind == "unary" && x.token.text == "-" && x.args[0]->kind == "int");
+    };
+    auto integer = [](const Expr &x, const Type &type) {
+      if (!integral(type)) fail(x.token, "a range needs integer endpoints, not " + typeName(type));
+      return type;
+    };
+    if (expected != Type::Void) {
+      expression(first, expected);
+      expression(second, expected);
+      return expected;
+    }
+    if (literal(first) != literal(second)) {
+      const auto &typed = literal(first) ? second : first;
+      const auto type = integer(typed, expression(typed));
+      expression(literal(first) ? first : second, type);
+      return type;
+    }
+    const auto a = integer(first, expression(first)), b = integer(second, expression(second));
+    const auto type = common(a, b, e.token);
+    convert(first, a, type);
+    convert(second, b, type);
+    return type;
+  }
   // A grid's coordinates are ints, from int.Min to int.Max.
   void gridCoordinates(const std::vector<const Expr *> &coordinates) {
     for (const auto *coordinate : coordinates) {
@@ -922,11 +1034,15 @@ class Analyzer {
   // Storage inside a dynamic array or a pair, which moves when the
   // collection grows, so it cannot be borrowed by reference or address.
   bool growableElement(const Expr &e) const {
-    for (const Expr *part = &e; part->kind == "." || part->kind == "index"; part = part->args[0].get())
+    const Expr *part = &e;
+    for (; part->kind == "." || part->kind == "index"; part = part->args[0].get())
       if (part->kind == "index") {
         const auto &holder = analysis.expressionTypes.at(part->args[0].get());
         if (dynamicArray(holder) || collectionValue(holder)) return true;
       }
+    if (part->kind != "name") return false;
+    for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope)
+      if (auto local = scope->find(part->token.text); local != scope->end()) return local->second.growable;
     return false;
   }
   [[noreturn]] void notStorage(const Expr &e) const {
@@ -1089,6 +1205,12 @@ class Analyzer {
   }
   Type checkExpression(const Expr &e, Type expected) {
     const auto &op = e.token.text;
+    // Outside a for header a range is the array of its values.
+    if (e.kind == "range") {
+      if (expected != Type::Void && (!dynamicArray(expected) || !integral(*expected.element)))
+        fail(e.token, "a range makes a dynamic array of integers, not " + typeName(expected));
+      return Type::array(rangeEndpoints(e, expected == Type::Void ? expected : *expected.element), 0);
+    }
     if (e.kind == "initializer" && !recordValue(expected)) {
       Type type = expected;
       if (expected == Type::Void) type = inferLiteral(e);
@@ -1344,7 +1466,7 @@ class Analyzer {
         fail(e.token, "only collection mutations give a result; '" + op + "' on " + typeName(local.type) +
                           " is a statement");
       if (local.constant) constantTarget(target, e.token);
-      return collectionMutation(local.type, op, e.args.size() > 1 ? e.args[1].get() : nullptr, e.token);
+      return collectionMutation(target, local.type, op, e.args.size() > 1 ? e.args[1].get() : nullptr, e.token);
     }
     if (e.kind == "unary" && op == "&") {
       const auto &arg = *e.args[0];
@@ -1466,6 +1588,7 @@ class Analyzer {
               fail(e.token, typeName(t) + " has a fixed length; Clear() needs a dynamic array (" +
                                 typeName(*t.element) + " [])");
             if (constant) constantTarget(base, e.token);
+            removesCurrent(base, t, "Clear", nullptr, e.token);
             return Type::Void;
           }
           if (!recordValue(t)) fail(base.token, "method receiver requires a container");
@@ -1844,8 +1967,9 @@ class Analyzer {
       if (!terminated)
         incoming.push_back(scopes);
       scopes = incoming.empty() ? entry : merge(entry, incoming);
-      require(expression(*s.expr), Type::Bool, s.token);
-      if (!incoming.empty())
+      // Without a condition only break leaves, so its facts are all that hold.
+      if (s.expr) require(expression(*s.expr), Type::Bool, s.token);
+      if (s.expr && !incoming.empty())
         exits.push_back(scopes);
       scopes = exits.empty() ? entry : merge(entry, exits);
       if (exits.empty()) {
@@ -1854,11 +1978,20 @@ class Analyzer {
       }
       return false;
     }
-    if (s.kind == "while" || s.kind == "for") {
+    if (s.kind == "while" || s.kind == "for" || s.kind == "foreach" || s.kind == "rangefor") {
       scopes.emplace_back();
       if (s.initializer)
         statement(*s.initializer);
-      if (s.expr)
+      if (s.kind == "foreach")
+        bindIteration(s);
+      else if (s.kind == "rangefor") {
+        const auto type = rangeEndpoints(*s.expr, Type::Void);
+        analysis.expressionTypes[s.expr.get()] = type;
+        analysis.localTypes[&s] = type;
+        auto name = s.token;
+        name.text = s.name;
+        bind(name, {type, false});
+      } else if (s.expr)
         require(expression(*s.expr), Type::Bool, s.token);
       auto entry = scopes;
       loops.emplace_back();
@@ -1875,6 +2008,7 @@ class Analyzer {
       scopes = entry; // A precondition loop can execute zero times.
       requireCompleteScopes(scopes.size() - 1);
       scopes.pop_back();
+      if (s.kind == "foreach") iterations.pop_back();
       return false;
     }
     if (s.kind == "let" || s.kind == "own") {
@@ -1957,6 +2091,12 @@ class Analyzer {
                                              : location(target, s.kind != "assign");
       if (&target != s.target.get()) analysis.expressionTypes[s.target.get()] = local.type;
       if (local.constant) constantTarget(target, s.token);
+      // Replacing a collection, or storing a new grid cell, changes its length.
+      if (s.kind == "assign" && (arrayValue(local.type) || collectionValue(local.type)))
+        removesCurrent(target, local.type, "=", nullptr, s.token);
+      if (std::vector<const Expr *> coordinates; &target == s.target.get() && target.kind == "index")
+        if (const auto *grid = gridAccess(target, coordinates))
+          removesCurrent(*grid, location(*grid).type, "[...] =", nullptr, s.token);
       if (local.type.role != Type::Raw) {
         if (s.kind != "assign" || (s.expr->kind != "null" &&
             (local.type.role != Type::Alias || s.expr->kind != "name")))
@@ -1968,7 +2108,7 @@ class Analyzer {
         return false;
       }
       if ((arrayValue(local.type) || collectionValue(local.type)) && s.kind != "assign") {
-        collectionMutation(local.type, s.kind, s.expr.get(), s.token);
+        collectionMutation(target, local.type, s.kind, s.expr.get(), s.token);
         return false;
       }
       const bool bitwise = s.kind == "&=" || s.kind == "|=" || s.kind == "^=" ||

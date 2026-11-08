@@ -153,7 +153,10 @@ std::vector<Token> lex(const std::string &source,
         fail(t, "'" + t.text + "' is reserved in Duck. Use the container name directly");
     } else {
       t.text += take();
-      if (i < source.size()) {
+      if (t.text == "." && source.compare(i, 2, "..") == 0) {
+        t.text += take();
+        t.text += take();
+      } else if (i < source.size()) {
         std::string pair = t.text + source[i];
         if (pair == "::" || pair == "==" || pair == "!=" || pair == "<=" || pair == ">=" ||
             pair == "++" || pair == "--" || pair == "&&" || pair == "||" ||
