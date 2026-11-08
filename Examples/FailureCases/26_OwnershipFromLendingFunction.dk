@@ -1,0 +1,16 @@
+// INTENTIONALLY BROKEN: :: asks for ownership, but Find never gives any.
+// EXPECT: compile-time rejection.
+// FIX: receive it with found : shelf.Find(), which makes an alias.
+Item {}
+
+Shelf
+{
+    Item* Held()
+    Item* Find() { return Held }
+}
+
+Main()
+{
+    Shelf shelf
+    found :: shelf.Find()
+}

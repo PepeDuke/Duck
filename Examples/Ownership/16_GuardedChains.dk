@@ -1,0 +1,40 @@
+// EXPECT: skipped: no arguments evaluated, cost, fired, 0, 7.
+// PITFALL: ? checks every reference in the chain, once, from the left. At the
+// first invalid one it skips the whole call, so the arguments never run.
+int Cost()
+{
+    Print("cost")
+    return 7
+}
+
+Weapon
+{
+    int Power = 7
+
+    Fire(int cost) { Print("fired") }
+    int Read() { return Power }
+}
+
+Soldier
+{
+    Weapon* Gun :: null
+}
+
+Main()
+{
+    Soldier* soldier()
+
+    ?soldier.Gun.Fire(Cost()) // Gun is still empty.
+    Print("skipped: no arguments evaluated")
+
+    soldier.Gun :: Weapon()
+    ?soldier.Gun.Fire(Cost())
+
+    gun : soldier.Gun
+    soldier = null            // The weapon dies with its soldier.
+    Print(?gun.Read())        // A skipped call gives its type's default.
+
+    Weapon* spare()
+    backup : spare
+    Print(?backup.Read())
+}

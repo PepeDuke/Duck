@@ -1,0 +1,18 @@
+// INTENTIONALLY BROKEN: this factory returned a borrowed reference on this path.
+// EXPECT: runtime trap at the :: declaration.
+// PITFALL: when a function can do either, only execution knows which it did.
+// FIX: receive it with item : Make(false), which accepts both.
+Item {}
+
+Item* Make(bool give)
+{
+    Item* local()
+    if give
+        return ::local
+    return local
+}
+
+Main()
+{
+    item :: Make(false)
+}

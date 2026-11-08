@@ -175,6 +175,7 @@ struct Local {
   Token declaration;
   bool memberLambda = false; // A func field that can only be called through its object.
   bool callOnly = false;     // Holds a lambda over this frame: it can be called, not copied.
+  bool lent = false;         // Received from a function that may lend: it may not own its object.
 };
 class Analyzer {
   const Symbols &symbols;
@@ -195,6 +196,8 @@ class Analyzer {
   FunctionAnalysis analysis;
   Type result;
   const Expr *ownerDestination = nullptr;
+  // Finding what a function's returns can be, before callers are analyzed.
+  bool probing = false, probedOwns = false, probedLends = false;
   std::string container;
   Usings usings; // Directives visible where the analyzed code was written.
   bool method = false;
@@ -227,6 +230,13 @@ class Analyzer {
     FunctionAnalysis::LambdaInfo info;
   };
   std::vector<Frame> frames;
+  // The `if p` branches being analyzed, whose uses of p are bound to it.
+  struct CheckedPlace {
+    std::string place;
+    const Stmt *statement;
+    size_t frame;
+  };
+  std::vector<CheckedPlace> checks;
 
   void require(Type actual, Type expected, const Token &token) {
     if (actual != expected)
@@ -360,7 +370,97 @@ class Analyzer {
     auto found = symbols.enums.find(e.args[0]->token.text);
     return found == symbols.enums.end() ? nullptr : &found->second;
   }
+  // The function a direct call resolves to, or null.
+  const Signature *calledFunction(const Expr &e) const {
+    if (e.kind != "call") return nullptr;
+    const auto target = analysis.callTargets.find(&e);
+    return target == analysis.callTargets.end() ? nullptr : &symbols.at(target->second);
+  }
+  // `::` takes ownership, which a function that only lends never gives.
+  void requireOwningResult(const Expr &source, const Token &token) const {
+    if (const auto *called = calledFunction(source); called && called->lends && !called->owns)
+      fail(token, "'" + source.token.text + "' only lends its result, so '::' cannot take ownership of it; "
+                  "receive it with ':'");
+  }
+  // A condition takes a bool or a pointer, which is true when it is not null.
+  Type truth(const Expr &e, Type type, const Token &token) {
+    if (type.depth) {
+      analysis.pointerTests.insert(&e);
+      return Type::Bool;
+    }
+    require(type, Type::Bool, token);
+    return type;
+  }
+  // Named storage holding a tracked reference, which an alias can be taken from.
+  bool trackedPlace(const Expr &e) {
+    std::string owner;
+    return (e.kind == "name" || e.kind == "." || e.kind == "index") && !propertyOf(e, owner) &&
+           !analysis.collectionMembers.count(&e);
+  }
+  // How a chain of names and fields was written, without `this`; empty for
+  // anything else. Conservative: it ignores shadowing.
+  static std::string pathText(const Expr &e) {
+    if (e.kind == "name") return e.token.text;
+    if (e.kind != ".") return "";
+    const auto base = pathText(*e.args[0]);
+    if (base.empty()) return "";
+    return base == "this" ? e.token.text : base + "." + e.token.text;
+  }
+  static bool writesPath(const Expr *e, const std::string &path) {
+    if (!e) return false;
+    const auto written = pathText(*e);
+    return !written.empty() && (written == path || path.rfind(written + ".", 0) == 0);
+  }
+  // Whether a statement assigns the path or one it goes through, or moves it.
+  static bool writesPlace(const Stmt &s, const std::string &path) {
+    if (writesPath(s.target.get(), path)) return true;
+    if ((s.kind == "own" || s.kind == "moveInto" || s.kind == "returnOwner") && writesPath(s.expr.get(), path))
+      return true;
+    if ((s.initializer && writesPlace(*s.initializer, path)) || (s.step && writesPlace(*s.step, path))) return true;
+    for (const auto &child : s.body) if (writesPlace(*child, path)) return true;
+    for (const auto &child : s.alternate) if (writesPlace(*child, path)) return true;
+    return false;
+  }
+  // An owner a transfer can take: a call result or mutable owning storage.
+  bool ownerSource(const Expr &e) {
+    return e.kind == "call" || ((e.kind == "name" || e.kind == ".") && !location(e).constant);
+  }
+  // `target :: source` moves or allocates into an owning field.
+  void ownershipMove(const Expr &target, const Expr &source, const Token &token) {
+    requireComplete(target);
+    const auto destination = location(target);
+    if (destination.type.role != Type::Owner)
+      fail(token, "'::' into a field needs an owning field, declared as T* " + target.token.text + "() or T* " +
+                      target.token.text + " :: null");
+    if (destination.constant) constantTarget(target, token);
+    const auto payload = destination.type.pointee();
+    const bool literal = source.kind == "int" || source.kind == "real" ||
+                         (source.kind == "unary" && source.token.text == "-" && source.args[0]->kind == "int");
+    ownerDestination = &source;
+    const auto type = expression(source, (literal && numeric(payload)) || source.kind == "initializer"
+                                             ? payload : Type(Type::Void));
+    ownerDestination = nullptr;
+    if (!type.depth) {
+      if (!heapValue(type)) fail(token, "heap allocation requires a scalar or container value");
+      convert(source, type, payload);
+      return;
+    }
+    if (type.role != Type::Owner || !ownerSource(source))
+      fail(token, "ownership transfer requires a mutable owning source");
+    require(type.pointee(), payload, token);
+    requireOwningResult(source, token);
+    const auto moved = pathText(source);
+    if (!moved.empty() && pathText(target).rfind(moved + ".", 0) == 0)
+      fail(token, "cannot move '" + moved + "' into its own field '" + pathText(target) +
+                      "': it would create an ownership cycle");
+  }
   void convert(const Expr &e, Type from, Type to) {
+    // A tracked reference stored in an alias slot takes a counted reference.
+    if (to.role == Type::Alias && from.role != Type::Raw && from.depth && from.pointee() == to.pointee()) {
+      if (!trackedPlace(e)) fail(e.token, "tracked aliases require a named source");
+      analysis.conversions[&e] = to;
+      return;
+    }
     if (from == to)
       return;
     if (enumValue(from)) {
@@ -700,9 +800,8 @@ class Analyzer {
           }
         }
         require(local.type, parameter.type, argument.token);
-      } else if (argument.kind == "name" && findLocal(argument.token) &&
-                 lookup(argument.token).type.role != Type::Raw) {
-        auto tracked = expression(argument);
+      } else if (auto tracked = argument.addressable() && parameter.type.depth ? expression(argument) : Type(Type::Void);
+                 tracked.role != Type::Raw) {
         tracked.role = Type::Raw;
         if (!signature.nonescapingParameters.count(i + offset) || tracked != parameter.type)
           fail(argument.token, "tracked pointer requires a proven nonescaping parameter of matching type");
@@ -897,9 +996,14 @@ class Analyzer {
     scopes = savedScopes;
     if (keyed && plain) fail(e.token, "a literal cannot mix values and key : value entries");
     auto unify = [&](const std::vector<Type> &types, const std::vector<const Expr *> &at, const std::string &what) {
-      Type common = types.front();
+      // A collection holds aliases, whichever kind of reference filled it.
+      auto stored = [](Type t) {
+        if (t.role != Type::Raw) t.role = Type::Alias;
+        return t;
+      };
+      Type common = stored(types.front());
       for (size_t i = 1; i < types.size(); ++i) {
-        const auto &next = types[i];
+        const auto next = stored(types[i]);
         if (next == common) continue;
         if (numeric(common) && numeric(next)) {
           const auto widened = commonNumeric(common, next);
@@ -1098,7 +1202,9 @@ class Analyzer {
   // Existing storage: an addressable expression that is not a property.
   bool storage(const Expr &e) {
     std::string owner;
-    return e.addressable() && !propertyOf(e, owner) && !(e.kind == "index" && pairIndex(e));
+    // q.Front gives a copy of an element, so q.Front.X reads through that.
+    return e.addressable() && !propertyOf(e, owner) && !(e.kind == "index" && pairIndex(e)) &&
+           !(e.kind == "." && collectionMember(e) != Type::Void);
   }
   // p[key] on a stored pair, which reads a copy rather than naming storage.
   bool pairIndex(const Expr &e) {
@@ -1287,6 +1393,12 @@ class Analyzer {
       local.type = path.field->type;
     } else fail(e.token, "operand must be a mutable variable, field, or dereference");
     analysis.expressionTypes[&e] = local.type;
+    if (local.type.role != Type::Raw)
+      for (auto check = checks.rbegin(); check != checks.rend(); ++check)
+        if (check->frame == frames.size() && check->place == placeKey(e)) {
+          analysis.checkedUses[&e] = check->statement;
+          break;
+        }
     return local;
   }
   bool heapStorage(const Expr &e) const {
@@ -1576,6 +1688,7 @@ class Analyzer {
     return produced;
   }
   Type checkExpression(const Expr &e, Type expected) {
+    if (e.kind == "compileTime") return expression(*e.args[0], expected);
     const auto &op = e.token.text;
     if (e.kind == "lambda") return lambdaExpression(e);
     if (e.kind == "duckCall" || e.kind == "duckCheck" || e.kind == "duckExists") return duckCall(e, expected);
@@ -1816,6 +1929,20 @@ class Analyzer {
         fail(e.token, "?.. cannot read '" + type.record + "': its default is built at run time; check e..?Foo() first");
       return type;
     }
+    if (e.kind == "guard" && e.args[0]->kind == "call") {
+      // ?p.q.Foo(x) runs only when every link is valid.
+      const auto &call = *e.args[0];
+      const auto type = expression(call);
+      const auto target = analysis.callTargets.find(&call);
+      const auto indirect = analysis.indirectCalls.find(&call);
+      if (!(target != analysis.callTargets.end() && symbols.at(target->second).method) &&
+          !(indirect != analysis.indirectCalls.end() && indirect->second.field))
+        fail(e.token, "'?' guards a method called through a reference, such as ?p.Foo(); "
+                      "this call has no reference to check");
+      if (recordValue(type) && symbols.runtimeDefaults(type.record))
+        fail(e.token, "'?' cannot read '" + type.record + "': its default is built at run time; check the reference with if first");
+      return type;
+    }
     if (e.kind == "guard") {
       // ?a[i] and ?p[key] read the element, or the element type's default
       // when the index is outside the array or the key is missing.
@@ -1855,7 +1982,14 @@ class Analyzer {
         fail(e.token, "only collection mutations give a result; '" + op + "' on " + typeName(local.type) +
                           " is a statement");
       if (local.constant) constantTarget(target, e.token);
-      return collectionMutation(target, local.type, op, e.args.size() > 1 ? e.args[1].get() : nullptr, e.token);
+      const auto mutated = collectionMutation(target, local.type, op, e.args.size() > 1 ? e.args[1].get() : nullptr, e.token);
+      if (trackedAlias(mutated))
+        fail(e.token, "a removed alias is released, not returned; read the element first, then remove it");
+      return mutated;
+    }
+    if (e.kind == "moveCheck") {
+      ownershipMove(*e.args[0], *e.args[1], e.token);
+      return Type::Bool;
     }
     if (e.kind == "unary" && op == "&") {
       const auto &arg = *e.args[0];
@@ -2046,7 +2180,7 @@ class Analyzer {
       analysis.callTargets[&e] = found->first;
       const auto &signature = found->second;
       if (signature.result.role == Type::Owner && ownerDestination != &e)
-        fail(e.token, "receive an owning function result with ::");
+        fail(e.token, "receive an owning function result with : or ::");
       if (signature.method && !instance && (!method || e.receiver))
         fail(e.token, "instance method requires a receiver");
       const size_t offset = signature.method ? 1 : 0;
@@ -2071,7 +2205,7 @@ class Analyzer {
       return Type::Bool;
     }
     if (e.kind == "conditional") {
-      require(first, Type::Bool, e.token);
+      truth(*e.args[0], first, e.token);
       auto yes = expression(*e.args[1], expected);
       if (yes.role != Type::Raw) fail(e.token, "tracked aliases require a named source");
       if (yes == Type::Void)
@@ -2114,16 +2248,16 @@ class Analyzer {
     }
     if (e.kind == "unary") {
       if (op == "!")
-        require(first, Type::Bool, e.token);
-      else if (op == "~" && !integral(first))
+        return truth(*e.args[0], first, e.token);
+      if (op == "~" && !integral(first))
         fail(e.token, "bitwise operators require integer operands");
       else if (!numeric(first))
         require(first, Type::Int, e.token);
       return first;
     }
     if (op == "&&" || op == "||") {
-      require(first, Type::Bool, e.token);
-      require(decay(*e.args[1], expression(*e.args[1])), Type::Bool, e.token);
+      truth(*e.args[0], first, e.token);
+      truth(*e.args[1], decay(*e.args[1], expression(*e.args[1])), e.token);
       return Type::Bool;
     }
     Type hint = Type::Void;
@@ -2302,7 +2436,8 @@ class Analyzer {
     for (size_t i = 0; i < statements.size(); ++i) {
       const auto &s = *statements[i];
       if (s.kind != "let" || analysis.localTypes.at(&s).role != Type::Alias ||
-          analysis.expressionTypes.at(s.expr.get()).role != Type::Owner) continue;
+          analysis.expressionTypes.at(s.expr.get()).role != Type::Owner || s.expr->kind != "name" ||
+          analysis.receiverStorage.count(s.expr.get())) continue;
       bool scoped = true;
       for (size_t j = i + 1; scoped && j < statements.size(); ++j)
         scoped = borrowsOnly(*statements[j], s.name) &&
@@ -2345,7 +2480,30 @@ class Analyzer {
         inferring = false;
         return true;
       }
-      if (result.role == Type::Owner) fail(s.token, "owning function requires return :: on every return");
+      if (s.expr && frames.empty() && (result.role == Type::Owner || (probing && result.depth == 1))) {
+        // Any path can hand back a tracked reference. The caller learns which
+        // kind it got from the returned handle.
+        requireCompleteScopes(0);
+        analysis.handleReturns.insert(&s);
+        if (s.expr->kind == "null") {
+          expression(*s.expr, result);
+          return true;
+        }
+        if (s.expr->kind == "call") ownerDestination = s.expr.get();
+        const auto type = expression(*s.expr);
+        ownerDestination = nullptr;
+        const auto *called = calledFunction(*s.expr);
+        if (probing) {
+          probedOwns = probedOwns || (called && called->owns);
+          probedLends = probedLends || (called ? called->lends : type.role != Type::Raw);
+          return true;
+        }
+        if (type.role == Type::Raw || type.pointee() != result.pointee() ||
+            (s.expr->kind != "call" && !trackedPlace(*s.expr)))
+          fail(s.token, "this function returns tracked heap references, so it cannot return " + typeName(type) +
+                            "; return a tracked reference, ::owner, or null");
+        return true;
+      }
       if (s.expr) requireComplete(*s.expr);
       requireCompleteScopes(0);
       // `return local` moves a value with a destructor out of the function.
@@ -2365,10 +2523,27 @@ class Analyzer {
       movable = nullptr;
       return true;
     }
+    if (s.kind == "moveInto") {
+      ownershipMove(*s.target, *s.expr, s.token);
+      return false;
+    }
     if (s.kind == "if") {
-      require(expression(*s.expr), Type::Bool, s.token);
+      const auto tested = expression(*s.expr);
+      if (!tested.depth) require(tested, Type::Bool, s.token);
+      // The branch uses the reference `if p` evaluated, unless it replaces p.
+      // A local owner needs no binding: nothing else can clear it.
+      const auto place = tested.role != Type::Raw ? placeKey(*s.expr) : std::string();
+      const bool localOwner = tested.role == Type::Owner && s.expr->kind == "name" &&
+                              !analysis.receiverStorage.count(s.expr.get()) && !lookup(s.expr->token).lent;
+      bool bound = !place.empty() && !localOwner;
+      for (const auto &child : s.body) bound = bound && !writesPlace(*child, pathText(*s.expr));
+      if (bound) {
+        analysis.boundConditions.insert(&s);
+        checks.push_back({place, &s, frames.size()});
+      }
       auto before = scopes;
       bool yes = block(s.body);
+      if (bound) checks.pop_back();
       auto yesState = scopes;
       scopes = before;
       bool no = block(s.alternate);
@@ -2395,7 +2570,7 @@ class Analyzer {
         incoming.push_back(scopes);
       scopes = incoming.empty() ? entry : merge(entry, incoming);
       // Without a condition only break leaves, so its facts are all that hold.
-      if (s.expr) require(expression(*s.expr), Type::Bool, s.token);
+      if (s.expr) truth(*s.expr, expression(*s.expr), s.token);
       if (s.expr && !incoming.empty())
         exits.push_back(scopes);
       scopes = exits.empty() ? entry : merge(entry, exits);
@@ -2419,7 +2594,7 @@ class Analyzer {
         name.text = s.name;
         bind(name, {type, false});
       } else if (s.expr)
-        require(expression(*s.expr), Type::Bool, s.token);
+        truth(*s.expr, expression(*s.expr), s.token);
       auto entry = scopes;
       loops.emplace_back();
       loops.back().depth = scopes.size();
@@ -2453,8 +2628,11 @@ class Analyzer {
         hint = (literal && numeric(s.type.pointee())) || s.expr->kind == "initializer"
                    ? s.type.pointee() : Type(Type::Void);
       }
-      if (s.kind == "own") ownerDestination = s.expr.get();
+      // A fresh inferred local receives a call's result as it comes.
+      if (s.kind == "own" || (s.kind == "let" && s.type == Type::Void && s.expr && s.expr->kind == "call"))
+        ownerDestination = s.expr.get();
       std::set<std::string> missing;
+      bool lent = false;
       if (!s.expr && s.kind == "own" && recordValue(s.type.pointee())) {
         missing = defaultMissing(s.type.pointee().record);
         if (!missing.empty()) incomplete(s.token, s.type.pointee().record, missing);
@@ -2478,17 +2656,21 @@ class Analyzer {
         type.role = Type::Owner;
       } else if (s.kind == "own") {
         if (s.expr && type.depth) {
-          if (type.role != Type::Owner || (s.expr->kind != "call" &&
-              (s.expr->kind != "name" || lookup(s.expr->token).constant)))
+          if (type.role != Type::Owner || !ownerSource(*s.expr))
             fail(s.token, "ownership transfer requires a mutable owning source");
+          requireOwningResult(*s.expr, s.token);
         } else if (s.expr) {
           if (!heapValue(type))
             fail(s.token, "heap allocation requires a scalar or container value");
           type = type.pointerTo();
         }
         type.role = Type::Owner;
+      } else if (type.role != Type::Raw && s.expr->kind == "call") {
+        // Consumes an owning result and keeps a borrowed one as an alias.
+        const auto *called = calledFunction(*s.expr);
+        lent = called && called->lends;
       } else if (type.role != Type::Raw) {
-        if (s.expr->kind != "name") fail(s.token, "tracked aliases require a named source");
+        if (!trackedPlace(*s.expr)) fail(s.token, "tracked aliases require a named source");
         type.role = Type::Alias;
       } else if (s.expr && s.type.depth) {
         convert(*s.expr, type, s.type);
@@ -2515,8 +2697,13 @@ class Analyzer {
       bind(name, {type, s.constant,
                   s.kind == "own" || s.expr != nullptr || recordValue(type) || collectionValue(type) ||
                       arrayValue(type)});
+      if (s.kind == "own" && s.type == Type::Void && method && !scopes.empty())
+        if (const auto field = scopes.front().find(s.name);
+            field != scopes.front().end() && field->second.receiver && field->second.type.role == Type::Owner)
+          fail(s.token, "'" + s.name + "' is an owning field; write this." + s.name + " :: ... to move into it");
       auto &bound = scopes.back().at(name.text);
       bound.mayMiss = bound.mustMiss = missing;
+      bound.lent = lent;
       bound.declaration = name;
       bound.callOnly = keepsFrame;
     } else if (s.kind == "expr")
@@ -2537,10 +2724,10 @@ class Analyzer {
         if (const auto *grid = gridAccess(target, coordinates))
           removesCurrent(*grid, location(*grid).type, "[...] =", nullptr, s.token);
       if (local.type.role != Type::Raw) {
-        if (s.kind != "assign" || (s.expr->kind != "null" &&
-            (local.type.role != Type::Alias || s.expr->kind != "name")))
-          fail(s.token, "tracked binding requires null or an alias assignment");
+        if (s.kind != "assign") fail(s.token, "tracked binding requires null or an alias assignment");
         auto source = expression(*s.expr);
+        if (s.expr->kind != "null" && (local.type.role != Type::Alias || !trackedPlace(*s.expr)))
+          fail(s.token, "tracked binding requires null or an alias assignment");
         if (s.expr->kind != "null" && (source.role == Type::Raw ||
             source.pointee() != local.type.pointee()))
           fail(s.token, "incompatible tracked alias source");
@@ -2578,6 +2765,16 @@ class Analyzer {
 public:
   Analyzer(const Symbols &symbols, Type result)
       : symbols(symbols), result(result) {}
+  // What the function's returns can hand back, as far as is known so far: a
+  // body that does not analyze yet is reported by its real analysis later.
+  std::pair<bool, bool> probeReturns(const Function &function) {
+    probing = true;
+    try {
+      run(function);
+    } catch (const std::runtime_error &) {
+    }
+    return {probedOwns, probedLends};
+  }
   // The type an untyped getter's expression produces, or Void while it
   // reads another property whose type is not known yet.
   Type inferGetter(const Function &getter) {
@@ -2751,10 +2948,45 @@ void resolveProperties(Symbols &symbols, const std::vector<const Program *> &pro
       fail(f->name, "property '" + property + "' has the name of a method of '" + record + "'");
   }
 }
+void resolveReturnRoles(Symbols &symbols, const std::vector<const Program *> &programs,
+                        const std::vector<Symbols *> &tables) {
+  std::vector<const Function *> candidates;
+  for (const auto *program : programs)
+    for (const auto &f : *program)
+      if (f.nativeSymbol.empty() && f.result.depth == 1 && heapValue(f.result.pointee()) &&
+          propertyName(f.name.text).empty())
+        candidates.push_back(&f);
+  auto update = [&](const Function &f, bool owns, bool lends) {
+    if (owns || lends) f.result.role = Type::Owner;
+    for (auto *table : tables)
+      if (auto found = table->find(f.name.text); found != table->end()) {
+        found->second.result = f.result;
+        found->second.owns = owns;
+        found->second.lends = lends;
+      }
+  };
+  for (const auto *f : candidates)
+    if (f->result.role == Type::Owner) update(*f, true, false);
+  // A function can return another's result, so repeat until nothing changes.
+  for (bool progress = true; progress;) {
+    progress = false;
+    for (const auto *f : candidates) {
+      const auto &known = symbols.at(f->name.text);
+      const auto [owns, lends] = Analyzer(symbols, f->result).probeReturns(*f);
+      const bool allOwns = known.owns || owns, allLends = known.lends || lends;
+      if (allOwns == known.owns && allLends == known.lends) continue;
+      update(*f, allOwns, allLends);
+      progress = true;
+    }
+  }
+}
 void resolveFieldDefaults(Symbols &symbols) {
   for (auto &[name, record] : symbols.records)
     for (auto &field : record.fields)
-      if (field.initializer) {
+      if (field.initializer && field.type.role == Type::Owner) {
+        // Allocated at run time; analyzed with its generated method.
+        field.runtimeDefault = true;
+      } else if (field.initializer) {
         auto value = Analyzer(symbols, Type::Void)
                          .constant(name + "." + field.name.text, *field.initializer, field.type, field.usings);
         field.runtimeDefault = !value;
@@ -2825,6 +3057,7 @@ std::vector<Function> generateInitializers(Symbols &symbols, Symbols &declaratio
       receiver->token = self;
       target->args.push_back(std::move(receiver));
       generated.push_back(assignment(key, params, std::move(target), clone(*field.initializer)));
+      if (field.type.role == Type::Owner) generated.back().body.front()->kind = "moveInto";
       generated.back().method = true;
       generated.back().usings = field.usings;
     }

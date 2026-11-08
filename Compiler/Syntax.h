@@ -113,6 +113,10 @@ inline bool sameSignature(const FuncSignature *a, const FuncSignature *b) {
       return false;
   return true;
 }
+// A non-owning heap reference held in a field or collection slot: the address
+// of the object's control block, or null. It expires when the owner releases
+// the object. A slot holding an owner has role Owner instead.
+inline bool trackedAlias(const Type &t) { return t.depth == 1 && t.role == Type::Alias; }
 // A func value is one word: a reference-counted closure, or null.
 inline bool funcValue(const Type &t) { return !t.depth && t.base == Type::Func; }
 inline bool recordValue(const Type &t) { return !t.depth && t.base == Type::Record; }

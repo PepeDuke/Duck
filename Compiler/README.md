@@ -313,9 +313,11 @@ containers or fields.
 Calls whose effects are fully known can run on worker threads; see
 [worker tasks](#worker-tasks). Everything else executes sequentially. The
 compiler does not yet track resource reads and writes across calls, implement
-`${ ... }` resource locking, or Duck's complete ownership rules. Local reference declarations, reference returns, arrays,
+`${ ... }` resource locking, or all of Duck's ownership rules; see
+[Owned heap locals](#owned-heap-locals) and [Owning fields and tracked
+storage](#owning-fields-and-tracked-storage). Local reference declarations, reference returns, arrays,
 mutable text buffers, range-based loops,
-markup and compile-time evaluation
+markup
 remain future work. Unsupported constructs produce errors; the design
 examples are not a claim of compiler coverage. Non-void functions must have
 an explicit return on every structurally reachable path, and statements
@@ -880,7 +882,8 @@ assignment, passed by reference (from a fixed array), and reached through
 (`points[1].X`). The array and the index are evaluated once, and an index
 outside `0 <= i < Len`, or `--` on an empty array, traps. Indexes are
 integers. Elements are numbers, `bool`, `char`, enums, `string`, `name`,
-`big`, `tiny`, dates and times, containers, and other arrays (see
+`big`, `tiny`, dates and times, containers, heap references (`Item* []` holds
+tracked aliases), and other arrays (see
 [Multidimensional arrays and grids](#multidimensional-arrays-and-grids));
 arrays of collections are a later item. See [Indexing and bounds
 checks](#indexing-and-bounds-checks) for `IsValid` and `?a[i]`, and
@@ -974,10 +977,11 @@ collection. Replacing a key's value keeps the key's place, so `p.LastKey` and
 `p--` always refer to the most recently added key that is still present.
 
 Elements are numbers, `bool`, `char`, enums, `string`, `name`, `big`, `tiny`,
-and dates and times; keys are integers, `bool`, `char`, enums, `string`,
-`name`, `big`, and dates and times (floating and `tiny` keys would compare by
-representation, so they are rejected). Containers, pointers, and nested
-collections are not elements yet.
+dates and times, and heap references, which are tracked aliases; keys are
+integers, `bool`, `char`, enums, `string`, `name`, `big`, and dates and times
+(floating and `tiny` keys would compare by representation, so they are
+rejected). Containers, raw pointers, and nested collections are not elements
+yet, and grids cannot hold heap references.
 
 Collections are move-only: pass one by reference (`Fill(int queue& q)`),
 return a local to move it out, and receive a call's result in a declaration
@@ -1493,11 +1497,108 @@ dereferencing it traps. Scope exit, early return, break, and continue clean up
 owned locals.
 
 Tracked arguments may borrow into Duck pointer parameters whose bodies the
-compiler proves only access the pointee. Unproven escapes, raw casts, storing
-tracked aliases in native-layout fields, and transfers from aliases are rejected.
-Owners cross a function return via `return ::owner` and a receiving `::`
-declaration. Native pointers obtained from `&local` or a platform API continue
+compiler proves only access the pointee, including from fields and collection
+entries. Unproven escapes, raw casts, and transfers from aliases are rejected.
+Heap references cross a function return as described in [Owning and lending
+returns](#owning-and-lending-returns). Native pointers obtained from `&local` or a platform API continue
 to use the existing raw ABI.
+
+### Owning and lending returns
+
+Before analyzing callers, `resolveReturnRoles` works out what each function
+with a `T*` result can return, on every path and repeating until functions
+that return each other's results settle. `return ::x` gives ownership, `return x`
+of a tracked reference lends it, and `return Other()` passes on whatever
+`Other` can give. A function with any of these has an owner-role result; one
+that only returns raw pointers keeps its raw result, and may not mix the two.
+Accessors stay raw. The result is part of a method's signature, so an override
+must return the same kinds of reference as what it overrides.
+
+The returned word carries the role. An owning result is an ordinary owner word;
+a borrowed one is its control block address with bit 1 set, taken before local
+cleanup, so an alias to the function's own local arrives closed. A local
+received with `:` keeps that word, in an owner-role slot, and the runtime reads
+bit 1 to decide whether clearing the slot closes the object or only drops a
+reference. Such a local is also treated like an alias for active uses, since
+its owner may be elsewhere.
+
+`::` checks the bit when the function can lend, and traps on a borrowed result;
+a function that only lends is a compile error instead. `(a.b :: Make())`
+reports a borrowed result as `false` and releases it. Results still need a
+destination (`:`, `::`, or `return`), including a function that only lends, and
+`Item* x = Make()` is rejected in favor of those two forms.
+
+### Owning fields and tracked storage
+
+The declaration decides what a pointer field is. `Item* Part()` owns an object
+built with the container, through a generated default method, and may pass
+constructor arguments. `Item* Next :: null` owns and starts empty, and `Item*
+Next :: value` owns the result of evaluating value at construction. Plain
+`Item* Ref` is a tracked alias. `void*` and pointers to scalars such as `int*`
+stay raw pointers, in C layout. A raw value cannot be stored in an alias field,
+and a container with tracked or owning fields has compiler-private layout, as
+managed containers do, so it cannot be passed to native code. To keep a native
+pointer to a container in a field, store it as `void*` and cast it when reading.
+Owning fields whose construction would lead back to their container are
+rejected.
+
+An owning field is move-only storage holding the same word as a local owner:
+the payload address, or the tagged control block. An alias slot, in a field,
+array element, queue, stack, pair value, or closure, holds the untagged block
+address, one reference. Copying a container takes a reference for each alias it
+holds, and overwriting or destroying one releases it, through the same paths as
+`string` and `func` fields. Reading an alias slot gives the payload, or null
+once it has expired. Removing an entry releases its alias, so `(list--)` is
+rejected. An expired entry stays in place and compares equal to null.
+
+`target :: source` runs the cycle check before changing anything. Instead of
+walking up from the destination, it searches the moved object's subtree for the
+destination slot: a by-value container, parent state, array element, or `this`
+has no header from which to find its enclosing object, and a search downward
+needs no parent links to keep correct as objects move. Each container that can
+be searched gets a generated `@duck$reach.<Container>`. Moves the types show to
+be safe skip it, as does a move into a local's own storage, which needs at most
+one pointer comparison: nothing owns a local, so it has no ancestors. The search
+costs time proportional to the moved subtree, and otherwise only happens for
+self-referencing types.
+
+`if p` accepts a pointer. For a tracked reference named by a local or field
+path, the branch holds a use of the object: dereferences of that same path are
+bound to the evaluated reference, and every exit ends the use. A local owner
+needs no use, since only its own function can clear it. A branch that assigns or
+moves the path gets a plain null test, as do conditions on array elements.
+
+Every other condition accepts a pointer as well: `while p`, `do ... while p`,
+the condition of a `for`, `!p`, `p && q`, `p || q`, and `p ? a | b`. A pointer
+is true when it is not null, and these results are `bool`. They are plain tests
+that hold no use of the object: only `if p` binds its branch, so a later
+dereference in a `while p` body traps if the object has expired since the test.
+
+`?p.q.Foo(x)` lowers to one check per link, root first, before the arguments.
+Dereferences, array and pair lookups, and calls returning pointers all count
+as links, and each is evaluated once: the call reuses the payload the check
+found. A tracked link takes a use until the statement ends, except a local
+owner, as elsewhere. The guard applies to methods and func fields, and a
+result takes the same default as a missing `?a[i]`, so a container built at run
+time cannot be read through one. Field reads such as `?p.q.X` are not guarded
+yet.
+
+### Active uses
+
+A control block is `{ payload, references, uses, cleanup }`, where bit 63 of
+`uses` means closed. Dropping an owner publishes the cleanup and sets that bit
+with one atomic operation. `heap$pin` increments `uses` unless the object is
+closed, and takes a reference so the block outlives a cleared slot; `heap$unpin`
+undoes both. Whichever operation leaves a closed object with no uses runs the
+cleanup, so it runs exactly once.
+
+A statement that can run Duck code, through a call, property, or destructor,
+pins each tracked object it dereferences until the statement ends; a statement
+that cannot run code has nothing that could release the object, and stays a
+plain load. A local owner is not pinned, and so takes no control block. A
+statement pinning an owner held in a field promotes that owner to a control
+block. Worker tasks do not receive heap references yet, so the atomic paths are
+only exercised on one thread today.
 
 ### Typed pointers and window state
 
@@ -1615,6 +1716,57 @@ inside larger expressions still run on the caller.
 with one worker, four workers, and the default. It also checks that a trapping
 task stops the program before later output.
 
+## Explicit compile-time calls
+
+Prefix a direct function call with `#` to evaluate it during compilation:
+
+```c++
+int Square(int n) { return n * n }
+Main() {
+    #int size = 7
+    Print(#Square(size + 1)) // Emits the constant 64, with no Square call.
+}
+```
+
+The interpreter runs after all function bodies have been type-checked, before
+task scheduling and LLVM lowering. It uses the resolved call targets and the
+same typed conversions as lowering. Forward calls, qualified static calls,
+mutual recursion, and nested calls are supported when their bodies are in the
+current module. Imported signatures and native declarations cannot be evaluated.
+
+Arguments may use numeric/bool literals, type limits, arithmetic, casts,
+conditionals, and earlier local `#` constants with evaluable initializers.
+Mutable locals and runtime parameters cannot supply compile-time arguments.
+An ordinary `#int` declaration still permits a runtime initializer; it becomes
+usable as a compile-time argument only when that initializer can be evaluated.
+
+Allowed function effects are scalar local declarations and mutations, value
+parameters, returns (including void), direct calls to other allowed functions,
+branches, while/do/counted-for loops, inclusive integer range loops, and
+break/continue. Values are fixed-width integers up to 512 bits, float/double,
+and bool. The complete transitive body is checked, including untaken branches.
+I/O, Exec, native and indirect calls, instance methods, static storage reads or
+writes, references, pointers, closures, containers, managed text, enums,
+calendar values, big/ubig, and tiny/utiny are rejected by this interpreter.
+
+Arithmetic follows the runtime rules: integers wrap to their declared width;
+signed division truncates toward zero; zero divisors and signed MIN/-1 division
+or remainder fail. Shifts check the original count before converting it.
+Floats round at their declared precision and retain IEEE infinity/NaN behavior;
+NaN payloads and signs are unspecified. Float-to-integer casts floor and reject
+NaN, infinity, and results outside the destination range. Integer casts truncate
+or sign/zero extend exactly as at runtime.
+
+Each marked call has a budget of 100,000 interpreter/effect-check steps, 32
+nested calls, and 64 nested expressions. Wide division charges its bit width
+against the step budget. Exhaustion, disallowed effects, unavailable bodies,
+nonconstant arguments, and traps are compile errors at the `#` location; no
+runtime fallback is emitted. A successful call is replaced by its typed result,
+or removed for a void result. Field-default and static-initializer calls use
+the same evaluation stage. `Tests/compile_time.py` compares interpreter results
+with runtime execution at both optimization levels and with Python integer
+arithmetic, and checks diagnostics and budgets.
+
 ## Implementation and validation
 
 The compiler is a reusable `duck_compiler` library with explicit stage APIs in
@@ -1627,13 +1779,14 @@ The compiler is a reusable `duck_compiler` library with explicit stage APIs in
 | Combine units | Per-file syntax trees in input order â†’ program | `Pipeline.cpp` |
 | Collect declarations | Syntax tree â†’ function signatures | `Symbols.cpp` |
 | Analyze a function | Function + signatures â†’ types, conversions, literal constants | `Semantics.cpp` |
+| Evaluate marked calls | Typed bodies and constant arguments to typed results | `CompileTime.cpp` |
 | Schedule tasks | All analyses â†’ isolated functions, task spawns and joins | `Scheduling.cpp` |
 | Lower a function | Function + signatures + analysis â†’ LLVM fragment | `Codegen.cpp` |
 | Assemble | Fragments in source order â†’ LLVM module | `Pipeline.cpp` |
 
 Semantic analysis checks names, types, references, constants, definite assignment, and control flow
 without creating LLVM instructions. All functions are analyzed successfully
-before the sequential driver starts lowering. The backend consumes the analysis
+before the sequential driver evaluates marked calls and starts lowering. The backend consumes the analysis
 artifact and treats it as a precondition; callers must not mutate the AST or
 signatures between analysis and lowering. Analysis stores expression pointers,
 so the input AST must remain alive. Stage outputs are owned by the caller.

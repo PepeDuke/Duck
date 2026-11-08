@@ -4223,6 +4223,30 @@ reject(duck_constant_receiver "C { Go() {} }\nMain() {\n#C c = {}\nc..Go()\n}" "
 
 # Arrays of func values.
 run_example(func_arrays "Examples/Features/10_FuncArrays.dk" "49\n20\n3\n1\n7\n")
+run_example(ownership_stored_aliases "Examples/Ownership/07_AliasesInCollectionsAndFields.dk" "1\n1\n1\n")
+run_example(ownership_fields "Examples/Ownership/10_OwningFields.dk"
+  "42\n1\n1\n1\n2\nwheel off\n1\ncar scrapped\nwheel off\n")
+run_example(ownership_rejected_cycle "Examples/Ownership/11_RejectedCycle.dk" "0\n0\n1\n2\n1\n3\n")
+run_example(ownership_tracked_storage "Examples/Ownership/12_TrackedStorage.dk" "7\n7\n7\n0\n2\n1\n1\n1\n1\n1\n")
+run_example(ownership_deferred "Examples/Ownership/13_DeferredDestruction.dk"
+  "start\n2\njob finished\ncleaned up\n1\n")
+run_example(ownership_conditions "Examples/Ownership/14_PointerConditions.dk"
+  "armed\nfiring\n1\nfiring\nfuse gone\nskipped\n")
+run_example(ownership_bare_conditions "Examples/Ownership/15_BarePointerConditions.dk"
+  "1\n2\n3\nlist ended\nempty\nboth\n0\n")
+run_example(ownership_shorter_scope "Examples/Ownership/05_ShorterOwnerScope.dk" "1\n1\n")
+run_example(ownership_guarded_calls "Examples/Ownership/08_GuardedCalls.dk" "used\nused\n")
+run_example(ownership_deferred_cleanup "Examples/Ownership/09_DeferredCleanup.dk" "100\n")
+run_example(ownership_guarded_chains "Examples/Ownership/16_GuardedChains.dk"
+  "skipped: no arguments evaluated\ncost\nfired\n0\n7\n")
+run_example(ownership_factory_paths "Examples/Ownership/06_FactoryReturn.dk" "3\n3\n4\n1\n")
+run_example(ownership_lending_lookup "Examples/Ownership/17_LendingLookup.dk" "9\n0\n1\n1\n1\n")
+run_example(ownership_return_alias_expires "Examples/FailureCases/03_ReturnWithoutOwnership.dk" "1\n")
+reject_example(ownership_lending_rejected "Examples/FailureCases/26_OwnershipFromLendingFunction.dk" "only lends its result")
+trap_example(ownership_borrowed_result_trap "Examples/FailureCases/27_OwnershipOfBorrowedResult.dk")
+reject_example(ownership_cycle_rejected "Examples/FailureCases/23_OwnershipCycle.dk" "ownership cycle")
+trap_example(ownership_cycle_trap "Examples/FailureCases/24_OwnershipCycleAtRuntime.dk")
+trap_example(expired_field_alias "Examples/FailureCases/25_UseExpiredFieldAlias.dk")
 run_program(func_array_release [=[
 Res {
  int V = 1

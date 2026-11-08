@@ -1,0 +1,44 @@
+// EXPECT: 42, true, 1, true, 2, wheel off, true, car scrapped, wheel off.
+// PITFALL: an owning field is declared differently from a reference field.
+//   Wheel* Spare()       owning, built with the container
+//   Wheel* Front :: null owning, starts empty
+//   Wheel* Favorite      not owning: a tracked alias
+// A move into a field is written target :: source, and through this inside a
+// method, because a bare Front :: x declares a new local.
+Wheel
+{
+    int Size = 42
+    ~Wheel() { Print("wheel off") }
+}
+
+Car
+{
+    Wheel* Spare()
+    Wheel* Front :: null
+    Wheel* Favorite
+
+    Fit() { this.Front :: Wheel() }
+    ~Car() { Print("car scrapped") }
+}
+
+Main()
+{
+    Car* car()
+    Print(car.Spare.Size)
+    Print(car.Front == null)
+
+    Wheel* wheel()
+    wheel.Size = 1
+    car.Front :: wheel // The local gives up ownership to the field.
+    Print(car.Front.Size)
+    Print(wheel == null)
+
+    car.Favorite = car.Front
+    taken :: car.Front // A move can also take an object back out of a field.
+    taken.Size = 2
+    Print(car.Favorite.Size)
+
+    taken = null // The local owned it, so its aliases expire.
+    Print(car.Favorite == null)
+    // Leaving scope destroys car, and with it the wheel in car.Spare.
+}

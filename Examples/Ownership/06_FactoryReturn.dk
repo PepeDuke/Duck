@@ -1,6 +1,9 @@
-// EXPECT: 3.
-// PITFALL: return local returns a reference, not heap ownership.
-// FIX: explicitly return ::local and receive the owner with ::.
+// EXPECT: 3, 3, 4, true.
+// PITFALL: return local returns a reference, not heap ownership. The local
+// owner still dies with the function, so that reference arrives expired.
+// FIX: return ::local to hand over ownership.
+// A fresh inferred local (item : Make()) takes whatever the call returned:
+// it becomes the owner of an owning result and an alias of a borrowed one.
 Item
 {
     int Value = 3
@@ -13,10 +16,28 @@ Factory
         Item* local()
         return ::local
     }
+
+    Item* MakeOrLend(bool give)
+    {
+        Item* local()
+        local.Value = 4
+        if give
+            return ::local
+        return local
+    }
 }
 
 Main()
 {
-    item :: Factory.Make()
-    Print(item.Value)
+    explicit :: Factory.Make()
+    Print(explicit.Value)
+
+    inferred : Factory.Make()
+    Print(inferred.Value)
+
+    given : Factory.MakeOrLend(true)
+    Print(given.Value)
+
+    lent : Factory.MakeOrLend(false)
+    Print(lent == null) // true: its owner was the factory's local.
 }

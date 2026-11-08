@@ -1,0 +1,36 @@
+// EXPECT: armed, firing, true, firing, fuse gone, skipped.
+// PITFALL: `if p` is more than a null test. Inside the branch p keeps naming
+// the object it found, even if the owner lets go of it meanwhile. The object is
+// cleaned up when the branch ends, however it ends.
+Fuse
+{
+    Fire() { Print("firing") }
+    ~Fuse() { Print("fuse gone") }
+}
+
+Bomb
+{
+    Fuse* Part()
+
+    Defuse() { Part = null }
+}
+
+Main()
+{
+    Bomb bomb
+    fuse : bomb.Part
+
+    if fuse
+    {
+        Print("armed")
+        fuse.Fire()
+        bomb.Defuse()        // The owner lets go here.
+        Print(fuse == null)  // New checks see it as gone...
+        fuse.Fire()          // ...but this branch still holds the object.
+    }
+
+    if fuse
+        Print("still here")
+    else
+        Print("skipped")
+}

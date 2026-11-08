@@ -481,6 +481,12 @@ Owner* o()
 ```
 
 Both `if ex` followed by `ex.Foo()` and `?ex.Foo()` protect the checked use against null invalidation during the call. The `?ex.Foo()` form executes only if the reference and the function are valid; otherwise it skips the call.
+
+A pointer works in any condition, and is true when it is not null: `while ex`, `!ex`, `ex && other`, and `ex ? a | b`.
+
+`?o.ex.Foo(x)` checks each reference on the way, once and from left to right. At the first invalid one it skips the rest, so `x` is not evaluated. Each live reference stays valid until the statement ends. A skipped call that returns a value gives that type's default, such as `0`, `""`, or `null`. A missing collection entry, as in `?items[5].Foo()`, or an empty `func` field also skips the call.
+
+Inside `if ex`, the name `ex` keeps referring to the object the condition found, even if its owner lets go of it during the branch. The object is cleaned up when the branch ends, whether it falls through, returns, breaks, or continues. New checks such as `ex == null` already see it as gone. A branch that itself reassigns or moves `ex` gets an ordinary null test instead.
 ## Heap allocation in Duck
 when variable gets inicilized we also allocate the variable. we use C++ style pointer symbol * to specify if it's stack allocation or heap allocated
 ``` c++ 
@@ -671,6 +677,17 @@ cake2.Eat() // <-- Error null reference
 
 ```
 
+A function can return ownership on one path and a tracked reference on another. The returned value carries which one it is, and the way you receive it decides what happens:
+
+| Receiver | Owning result | Borrowed result |
+| --- | --- | --- |
+| `x : Make()` | `x` becomes the owner | `x` is an alias |
+| `x :: Make()` | `x` becomes the owner | runtime error, or a compile error if `Make` never gives ownership |
+
+So `:` accepts anything a call returns, and `::` is a demand for ownership. The same demand applies to `node.Next :: Make()`, where `(node.Next :: Make())` gives `false` instead of an error. A local received with `:` can be cleared like any other, and only destroys the object if it really owned it. Moving from it with `::` needs real ownership too.
+
+A heap reference result has to be stored before use, so `x : Find()` then `x.Foo()` rather than `Find().Foo()`.
+
 
 A heap object has one owner and any number of non-owning aliases. Copying a
 reference creates an alias. Clearing an alias releases only that binding.
@@ -691,13 +708,38 @@ Print(alias == null)   // true
 
 Only the current owner may transfer ownership. Moving an owner preserves the
 object's identity and all its aliases. Moving it into a shorter scope makes
-that scope responsible for destruction. Owning fields form a tree. Transferring
-an object into one of its own descendants would create an ownership cycle and
-must be rejected. Non-owning references can point back to ancestors.
+that scope responsible for destruction.
 
-Factories transfer ownership explicitly. A plain return of an alias can succeed
-when the owner outlives the call. An alias to a local owner's object expires
-when that owner leaves scope.
+A container field can own a heap object, refer to one, or hold a raw pointer.
+The declaration says which:
+
+```c++
+Node
+{
+    Item* Part()         // owning, built with the Node
+    Node* Next :: null   // owning, starts empty
+    Node* Parent         // tracked alias: never keeps the object alive
+    void* Handle         // raw, as are pointers to scalars such as int*
+}
+```
+
+A container with an owning field is move-only and destroys its children with
+itself. A move into a field is written `node.Next :: other`, or `this.Next ::
+other` inside a method, since a bare `Next :: other` declares a local. The
+source is an owner, a call that returns ownership, or a new value, as in
+`node.Next :: Node()`. `taken :: node.Next` moves an object back out.
+
+Owning fields form a tree. Moving an object into one of its own descendants
+would create an ownership cycle, so the move is rejected before anything
+changes, and the original owner stays intact. When the path shows the cycle,
+as in `node.Next :: node`, it is a compile error. Otherwise the statement
+traps, and the parenthesized form `(below.Next :: top)` gives `false` instead.
+Non-owning references can point back to ancestors.
+
+Factories transfer ownership explicitly with `return ::item`. A plain return
+of a tracked reference lends it: it stays usable while its owner survives, and
+one whose owner was a local of the function arrives expired, because the owner
+is cleaned up as the function returns.
 
 ```c++
 Item* MakeItem()
@@ -710,22 +752,23 @@ item :: MakeItem()
 ```
 
 The [open design questions](Examples/DesignQuestions.dk) cover assignment into
-an existing owner, owning collection slots, and receipt of a returned owner
-with type inference.
+an existing owner and owning collection slots.
 
 ### Lazy reference tracking
 
 A heap owner starts as one word pointing directly to the object. Ownership moves
 and proven short borrows use that representation. When execution first creates
 an alias that could outlive the owner, Duck switches the owner to a control
-block. Subsequent aliases share it. On x64 the block holds a payload pointer and
-a reference count in 16 bytes, excluding allocator overhead.
+block. Subsequent aliases share it. On x64 the block holds a payload pointer, a
+reference count, an active-use count, and the cleanup function in 32 bytes,
+excluding allocator overhead.
 
-Releasing the owner clears the payload pointer and frees the object. All aliases
-then compare equal to null. The last alias releases the block. The bootstrap
-implements this for local scalar and container allocations, explicit ownership
-returns, and synchronous borrows. Tracked collection entries, owning fields,
-and concurrent use are future work.
+Releasing the owner closes the object in one atomic step: no new use can begin,
+and all aliases compare equal to null. Calls already using the object finish
+first, and whichever of them ends last runs the cleanup, exactly once. The last
+reference releases the block. Aliases live in locals, container fields,
+collection entries, and captured lambdas alike. Sharing heap objects between
+threads is future work.
 
 ##  Pointers in Duck
 Heap allocations are inherently pointer and do have size of 8 bytes
@@ -1803,13 +1846,15 @@ Example
 
 ``` 
 ## Compile time execution in Duck
-any function call that have # before it, will get compiled into it's return at compile time (this is also known as baking). It can be very useful for optimalizations.
+Prefix a direct call with `#` to evaluate it during compilation (also called
+baking). The bootstrap supports bounded evaluation of scalar Duck functions
+with constant arguments and local effects. See the [supported effects and
+limits](Compiler/README.md#explicit-compile-time-calls).
 ``` c++
-Example 
-{
+Example #{
     int Foo(int i) 
     {
-        return (2^4)*i + (i > 0)? Foo(i-1) | 0
+        return i > 0 ? 16 * i + Foo(i - 1) | 0
     }
     int Foo2()
     {

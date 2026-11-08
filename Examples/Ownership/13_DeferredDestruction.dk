@@ -1,0 +1,33 @@
+// EXPECT: start, 2, job finished, cleaned up, true.
+// PITFALL: clearing an owner during a call does not cancel the call. The object
+// closes at once, but its cleanup waits for the call to finish, then runs once.
+Job
+{
+    int Steps = 1
+
+    Run(Crew& crew)
+    {
+        Print("start")
+        crew.Cancel()       // Destroys this object's owner slot...
+        Steps++             // ...but this call can still use the object.
+        Print(Steps)
+        Print("job finished")
+    }
+
+    ~Job() { Print("cleaned up") }
+}
+
+Crew
+{
+    Job* Current()
+
+    Cancel() { Current = null }
+}
+
+Main()
+{
+    Crew crew
+    watcher : crew.Current
+    crew.Current.Run(crew)
+    Print(watcher == null)
+}

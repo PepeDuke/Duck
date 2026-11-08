@@ -1,0 +1,13 @@
+// EXPECT: compile-time rejection: the move would create an ownership cycle.
+// PITFALL: a move is rejected at compile time when the path shows the cycle.
+// See 24_OwnershipCycleAtRuntime.dk for a cycle only execution can see.
+Node
+{
+    Node* Next :: null
+}
+
+Main()
+{
+    Node* node()
+    node.Next :: node
+}

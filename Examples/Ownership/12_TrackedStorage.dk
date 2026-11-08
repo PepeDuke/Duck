@@ -1,0 +1,40 @@
+// EXPECT: 7, 7, 7, false, 2, true, true, true, true, true.
+// PITFALL: storing a reference does not extend the object's lifetime. Every
+// stored alias expires with its owner, and an expired collection entry stays
+// in the collection, comparing equal to null.
+Enemy
+{
+    int Health = 7
+}
+
+Target
+{
+    Enemy* Current
+}
+
+Main()
+{
+    Enemy* boss()
+    Enemy* [] marked = {boss}
+    marked += boss
+
+    Target tracker
+    tracker.Current = boss
+    copy : tracker              // Copying the container copies its alias.
+
+    isGone : @ bool() { return boss == null } // A capture is an alias too.
+
+    Print(marked[0].Health)
+    Print(tracker.Current.Health)
+    Print(copy.Current.Health)
+    Print(isGone())
+
+    boss = null
+
+    Print(marked.Len)           // Entries are kept.
+    Print(marked[0] == null)
+    Print(marked[1] == null)
+    Print(tracker.Current == null)
+    Print(copy.Current == null)
+    Print(isGone())
+}

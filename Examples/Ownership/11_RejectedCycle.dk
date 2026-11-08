@@ -1,0 +1,28 @@
+// EXPECT: false, false, 1, 2, true, 3.
+// PITFALL: owning fields form a tree. An object cannot be moved below itself.
+// The move checks first, so a rejected move leaves the original owner intact.
+// The parenthesized form reports false; a plain statement traps instead.
+Folder
+{
+    int Id
+    Folder* Inside :: null
+}
+
+Main()
+{
+    Folder* top()
+    top.Id = 1
+    top.Inside :: Folder()
+    top.Inside.Id = 2
+
+    below : top.Inside
+    Print((below.Inside :: top)) // top holds below, so this would be a cycle.
+    Print(top == null)           // Still the owner.
+    Print(top.Id)
+    Print(below.Id)
+
+    // A new object has nothing below it, so it can go anywhere in the tree.
+    Print((below.Inside :: Folder()))
+    below.Inside.Id = 3
+    Print(top.Inside.Inside.Id)
+}

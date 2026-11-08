@@ -4,11 +4,11 @@ OPEN DESIGN QUESTIONS -- NOT EXECUTABLE TESTS
 These cases are intentionally not assigned invented outcomes. The examples
 elsewhere use the clarified rules; this file records remaining boundaries.
 
-1. Receiving returned ownership
-   The factory tutorial uses item :: Factory.Make() to make ownership intent
-   explicit. Does item : Factory.Make() also become an owner when Make
-   returns ::local?
-   Specify how a returned owning temporary is consumed by each form.
+1. Receiving returned ownership (resolved)
+   item : Make() takes the result as it comes: it owns an owning result and
+   is an alias of a borrowed one. item :: Make() demands ownership: it is a
+   compile error when Make only lends, and a runtime trap when Make lent on
+   the path that ran. See Ownership/06 and Ownership/17.
 
 2. Assigning into an existing owner
    Item* a()

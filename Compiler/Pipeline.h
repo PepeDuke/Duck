@@ -99,6 +99,10 @@ struct Signature {
   bool protectedAccess = false;
   bool inferred = false; // An accessor whose property type is not known yet.
   std::vector<Tag> tags;
+  // What a function with an owner-role result can hand back: ownership
+  // (return ::x) and a tracked alias (return x). resolveReturnRoles fills these.
+  bool owns = false;
+  bool lends = false;
 };
 // The text a duck call site and a method descriptor compare: "void(float,int&)".
 inline std::string signatureText(const Type &result, const std::vector<Parameter> &parameters, size_t first) {
@@ -203,6 +207,9 @@ struct Symbols : std::map<std::string, Signature> {
   // A container holding string, name, or big storage anywhere in its layout,
   // nested containers and parents included. Copies retain and cleanup releases.
   bool managedRecord(const std::string &record) const;
+  // Whether an object of type holder can contain, or own through any chain of
+  // owning fields, an object of type held; holder itself counts.
+  bool canOwn(const std::string &holder, const std::string &held) const;
   // A container whose construction evaluates defaults at run time, in its
   // own fields, nested containers, or parents.
   bool runtimeDefaults(const std::string &record) const;
@@ -220,12 +227,13 @@ struct Symbols : std::map<std::string, Signature> {
   // (fields and parents). Such values are move-only and destroyed once.
   bool destructible(const std::string &record) const;
   bool managed(const Type &type) const {
-    return managedValue(type) || funcValue(type) || (recordValue(type) && managedRecord(type.record));
+    return managedValue(type) || funcValue(type) || trackedAlias(type) ||
+           (recordValue(type) && managedRecord(type.record));
   }
   // Storage that must release, destroy, or free something when it dies.
   bool needsCleanup(const Type &type) const {
-    return managedValue(type) || funcValue(type) || collectionValue(type) || dynamicArray(type) ||
-           (fixedArray(type) && needsCleanup(*type.element)) ||
+    return managedValue(type) || funcValue(type) || trackedAlias(type) || collectionValue(type) ||
+           dynamicArray(type) || (fixedArray(type) && needsCleanup(*type.element)) ||
            (recordValue(type) && (managedRecord(type.record) || destructible(type.record)));
   }
   // Values that cannot be copied, only moved: they own heap storage or
@@ -246,9 +254,10 @@ struct Symbols : std::map<std::string, Signature> {
     }
     if (arrayValue(type)) {
       const auto &element = *type.element;
-      const bool plain = !element.depth && (numeric(element) || element == Type::Bool || element == Type::Char ||
-                                            enumValue(element) || managedValue(element) || funcValue(element) ||
-                                            decimalValue(element) || calendarValue(element));
+      const bool plain = trackedAlias(element) ||
+                         (!element.depth && (numeric(element) || element == Type::Bool || element == Type::Char ||
+                                             enumValue(element) || managedValue(element) || funcValue(element) ||
+                                             decimalValue(element) || calendarValue(element)));
       if (!plain && !recordValue(element) && !arrayValue(element))
         fail(token, "an array cannot hold " + typeName(element) +
                         "; elements are numbers, bool, char, enums, string, name, big, tiny, dates and times, "
@@ -259,7 +268,8 @@ struct Symbols : std::map<std::string, Signature> {
     if (collectionValue(type)) {
       // Elements are plain values or reference-counted text and big
       // integers; keys must also compare by value.
-      auto element = [](const Type &t) {
+      auto element = [&](const Type &t) {
+        if (trackedAlias(t)) return !gridValue(type);
         return !t.depth && (numeric(t) || t == Type::Bool || t == Type::Char || enumValue(t) ||
                             managedValue(t) || decimalValue(t) || calendarValue(t));
       };
@@ -270,7 +280,8 @@ struct Symbols : std::map<std::string, Signature> {
       if (!element(*type.element))
         fail(token, std::string(gridValue(type) ? "a grid" : "a collection") + " cannot hold " +
                         typeName(*type.element) +
-                        "; elements are numbers, bool, char, enums, string, name, big, tiny, and dates and times");
+                        "; elements are numbers, bool, char, enums, string, name, big, tiny, dates and times, "
+                        "and heap references");
       if (gridValue(type)) return validateType(*type.element, token);
       if (type.key && !key(*type.key))
         fail(token, "a pair cannot be keyed by " + typeName(*type.key) +
@@ -321,6 +332,11 @@ std::vector<Function> generateInitializers(Symbols &symbols, Symbols &declaratio
 inline std::string defaultKey(const std::string &record, const std::string &field) {
   return methodKey(record, "default$" + field);
 }
+// Finds which functions return tracked references, across every path, and
+// gives those an owner-role result; repeats until functions returning other
+// functions' results settle. Runs once field types and defaults are known.
+void resolveReturnRoles(Symbols &symbols, const std::vector<const Program *> &programs,
+                        const std::vector<Symbols *> &tables);
 void validateNativeSymbols(const Symbols &symbols);
 // Checks that every container field and parent with constructors can be
 // default-constructed, and that values with destructors are never copied
@@ -436,11 +452,26 @@ struct FunctionAnalysis {
     std::string record; // The receiver's container, when usesThis or bound.
   };
   std::map<const Expr *, LambdaInfo> lambdas;
+  // `return x` from a function with an owner-role result: x stays with its
+  // owner and is returned as a borrowed handle.
+  std::set<const Stmt *> handleReturns;
+  // `if p` on a tracked reference whose branch uses the evaluated reference:
+  // the object is pinned through the branch.
+  std::set<const Stmt *> boundConditions;
+  // Pointers used as conditions outside a plain `if p`: !p, p && q, while p,
+  // p ? a | b. Each evaluates to true when the pointer is not null.
+  std::set<const Expr *> pointerTests;
+  // Uses of that reference inside the branch: the `if` each one belongs to.
+  std::map<const Expr *, const Stmt *> checkedUses;
   // Locals a lambda captures by reference; they live in a shared heap box.
   std::set<std::string> captured;
 };
 FunctionAnalysis analyzeFunction(const Function &function,
                                  const Symbols &symbols);
+// Evaluate explicit #Call expressions after all bodies have been typed, before
+// scheduling or lowering. Results use the existing typed constant tables.
+void evaluateCompileTimeCalls(const std::vector<const Function *> &functions,
+                              std::vector<FunctionAnalysis> &analyses);
 
 // Functions whose complete effects are known: plain value parameters and
 // results, no external effects, and calls only to other isolated functions.

@@ -179,6 +179,8 @@ struct Binding {
   bool iterationKey = false; // The key variable of `for k, v : pair`.
   // A local shared with lambdas: the address of the word holding its box.
   std::string box;
+  bool pin = false; // Not a variable: an active use, ended when its scope exits.
+  bool lent = false; // Received from a function that may lend; it may not own its object.
 };
 class Generator {
   const Symbols &functions;
@@ -208,6 +210,94 @@ class Generator {
   bool usesBigRuntime = false, usesDecimalRuntime = false, usesCollectionRuntime = false;
   bool usesFuncRuntime = false, usesMetaRuntime = false;
   int lambdaCount = 0;
+  // The uses begun by the statement being lowered, and whether its tracked
+  // dereferences need them: only code that can run during the statement can
+  // destroy the object.
+  std::vector<std::string> activeUses;
+  bool pinning = false;
+  // The payload of each link a guarded call has already checked.
+  std::map<const Expr *, std::string> guardedLinks;
+  // The payload each bound `if p` evaluated, while lowering its branch.
+  std::map<const Stmt *, std::string> checkedPayloads;
+  struct UseFrame {
+    size_t mark;
+    bool pinning;
+  };
+  UseFrame beginUses(bool runs) {
+    const UseFrame frame{activeUses.size(), pinning};
+    pinning = runs;
+    return frame;
+  }
+  void endUses(const UseFrame &frame) {
+    while (activeUses.size() > frame.mark) {
+      emit("call void @duck.heap$unpin(ptr " + activeUses.back() + ")");
+      activeUses.pop_back();
+    }
+    pinning = frame.pinning;
+  }
+  // Whether evaluating e can run Duck code, which could release an object
+  // this statement is using.
+  bool runsCode(const Expr &e) const {
+    if (e.kind == "invoke" || e.kind == "duckCall" || e.kind == "duckCheck" || e.kind == "duckExists" ||
+        e.kind == "mutation" || e.kind == "moveCheck" || analysis.properties.count(&e) ||
+        analysis.indirectCalls.count(&e))
+      return true;
+    if (e.kind == "call" && (e.receiver || analysis.callTargets.count(&e) || analysis.constructions.count(&e) ||
+                             analysis.reinitializations.count(&e)))
+      return true;
+    if (e.receiver && runsCode(*e.receiver)) return true;
+    for (const auto &argument : e.args)
+      if (runsCode(*argument)) return true;
+    return false;
+  }
+  bool statementRuns(const Stmt &s) const {
+    if ((s.expr && runsCode(*s.expr)) || (s.target && runsCode(*s.target))) return true;
+    if (!s.target) return false;
+    // Overwriting storage can run a destructor.
+    const auto type = analysis.expressionTypes.at(s.target.get());
+    return type.role == Type::Owner || functions.needsCleanup(type);
+  }
+  // Whether a dereference of e needs a use of its own. A local owner does
+  // not: only this function can clear it.
+  bool pinnable(const Expr &e, const Type &type) const {
+    if (!e.addressable() || e.kind == "unary" || analysis.properties.count(&e) ||
+        analysis.collectionMembers.count(&e) || analysis.staticFields.count(&e))
+      return false;
+    if (e.kind != "name") return true;
+    const auto binding = findBinding(e.token);
+    return !binding.scopedBorrow &&
+           (type.role != Type::Owner || binding.lent || analysis.receiverStorage.count(&e) != 0);
+  }
+  // A null word that a `heap$pin` can record its block in, once per entry.
+  std::string useRecord() {
+    auto record = fresh();
+    allocations << "  " << record << " = alloca ptr\n  store ptr null, ptr " << record << '\n';
+    return record;
+  }
+  std::string pinCall(const Binding &slot, const std::string &record) {
+    usesHeapRuntime = true;
+    auto payload = fresh();
+    emit(payload + " = call ptr @duck.heap$pin(ptr " + slot.value + ", i1 " + ownerFlag(slot.type) + ", ptr " + record +
+         ")");
+    return payload;
+  }
+  // Begins a use of the object e refers to, for the rest of the statement.
+  std::string pinUse(const Expr &e) {
+    const auto slot = location(e);
+    const auto record = useRecord();
+    activeUses.push_back(record);
+    const auto payload = pinCall(slot, record);
+    auto valid = fresh();
+    emit(valid + " = icmp ne ptr " + payload + ", null");
+    require(valid);
+    return payload;
+  }
+  Value condition(const Expr &e) {
+    const auto frame = beginUses(runsCode(e));
+    auto v = expression(e);
+    endUses(frame);
+    return v;
+  }
   std::set<std::string> cleanups, destroys;
   std::map<std::string, std::string> helpers;
   std::set<DispatchTable> tables;
@@ -415,6 +505,9 @@ class Generator {
       else if (funcValue(field.type)) {
         usesFuncRuntime = true;
         emit("call void @duck.cell$" + runtime + "(ptr " + part + ")");
+      } else if (trackedAlias(field.type)) {
+        usesHeapRuntime = true;
+        emit("call void @duck.heap$" + runtime + "(ptr " + part + ")");
       } else {
         usesTextRuntime = true;
         emit("call void @duck.text." + runtime + "(ptr " + part + ")");
@@ -442,6 +535,10 @@ class Generator {
   }
   // The release function for collection slots of a type, or null.
   std::string slotRelease(const Type &type) {
+    if (trackedAlias(type)) {
+      usesHeapRuntime = true;
+      return "@duck.heap$slot";
+    }
     if (!managedValue(type)) return "null";
     usesTextRuntime = true;
     return "@duck$slot.release";
@@ -460,6 +557,7 @@ class Generator {
   // releasing text and big values, or a container's heap cleanup, which runs
   // its destructor and releases its fields.
   std::string elementCleanup(const Type &type) {
+    if (trackedAlias(type)) return slotRelease(type);
     if (funcValue(type)) {
       usesFuncRuntime = true;
       return "@duck$slot.func";
@@ -570,11 +668,15 @@ class Generator {
     emit("br label %" + join);
     startBlock(replace);
     release(key);
-    if (managedValue(*type.element)) {
+    if (managedValue(*type.element) || trackedAlias(*type.element)) {
       auto previous = fresh(), old = fresh();
       emit(previous + " = call ptr @duck.pair$value(ptr " + c + ", ptr " + found + ")");
       emit(old + " = load ptr, ptr " + previous);
-      release({*type.element, old});
+      if (trackedAlias(*type.element)) {
+        usesHeapRuntime = true;
+        emit("call void @duck.heap$release(ptr " + old + ")");
+      } else
+        release({*type.element, old});
     }
     const auto replaceEnd = currentBlock;
     emit("br label %" + join);
@@ -797,6 +899,12 @@ class Generator {
   Value loadSlot(const std::string &slot, const Type &type) {
     auto value = fresh();
     emit(value + " = load " + irType(type) + ", ptr " + slot);
+    if (trackedAlias(type)) {
+      usesHeapRuntime = true;
+      auto payload = fresh();
+      emit(payload + " = call ptr @duck.heap$payload(ptr " + value + ", i1 false)");
+      return {type, payload};
+    }
     retain({type, value});
     return {type, value};
   }
@@ -947,23 +1055,181 @@ class Generator {
     return value;
   }
   static std::string ownerFlag(Type type) { return type.role == Type::Owner ? "true" : "false"; }
-  std::string moveOwner(const Token &source) {
-    auto slot = variable(source).value;
+  // Whether this owner-role value can turn out to be borrowed at run time.
+  bool mayBeBorrowed(const Expr &source) const {
+    if (source.kind == "name") return findBinding(source.token).lent;
+    if (source.kind != "call") return false;
+    const auto target = analysis.callTargets.find(&source);
+    return target != analysis.callTargets.end() && functions.at(target->second).lends;
+  }
+  std::string moveOwner(const Expr &source) {
+    auto slot = location(source).value;
     auto word = fresh();
     emit(word + " = load ptr, ptr " + slot);
+    if (mayBeBorrowed(source)) emit("call void @duck.heap$owned(ptr " + word + ")");
     emit("store ptr null, ptr " + slot);
     return word;
   }
   std::string aliasWord(const Expr &source) {
     if (source.kind == "null") return "null";
-    auto binding = variable(source.token);
+    usesHeapRuntime = true;
+    auto binding = location(source);
     auto word = fresh();
     emit(word + " = call ptr @duck.heap$alias(ptr " + binding.value + ", i1 " + ownerFlag(binding.type) + ")");
     return word;
   }
+  // A new heap object holding value, as an owner word.
+  std::string allocate(const Type &type, const std::string &value) {
+    usesHeapRuntime = true;
+    auto word = fresh();
+    emit(word + " = call ptr @duck.heap$alloc(i64 " + sizeOf(type) + ")");
+    emit("store " + irType(type) + " " + value + ", ptr " + word);
+    return word;
+  }
+  // @duck$reach.<record>(object, slot): whether slot lies inside the object
+  // or inside anything the object owns. Only owning fields, containers held
+  // by value, and dynamic arrays of containers can lead to more storage.
+  std::string reachHelper(const std::string &record) {
+    const auto name = "@duck$reach." + record;
+    if (helpers.count(name)) return name;
+    helpers[name] = ""; // Containers can own their own type.
+    usesHeapRuntime = usesCollectionRuntime = true;
+    Type type = Type::Record;
+    type.record = record;
+    std::string body = "define internal i1 " + name + "(ptr %self, ptr %slot) {\nentry:\n"
+                       "  %none = icmp eq ptr %self, null\n  br i1 %none, label %no, label %range\nrange:\n"
+                       "  %a = ptrtoint ptr %self to i64\n  %b = ptrtoint ptr %slot to i64\n"
+                       "  %offset = sub i64 %b, %a\n  %inside = icmp ult i64 %offset, " + sizeOf(type) +
+                       "\n  br i1 %inside, label %yes, label %f0\n";
+    const auto &fields = functions.records.at(record).fields;
+    for (size_t i = 0; i < fields.size(); ++i) {
+      const auto n = std::to_string(i), following = "f" + std::to_string(i + 1);
+      const auto &field = fields[i];
+      body += "f" + n + ":\n";
+      std::string part = "  %p" + n + " = getelementptr " + irType(type) + ", ptr %self, i32 0, i32 " + n + "\n";
+      auto test = [&](const std::string &target, const std::string &object, const std::string &id,
+                      const std::string &otherwise) {
+        return "  %r" + id + " = call i1 " + reachHelper(target) + "(ptr " + object + ", ptr %slot)\n  br i1 %r" + id +
+               ", label %yes, label %" + otherwise + "\n";
+      };
+      if (field.type.role == Type::Owner && recordValue(field.type.pointee())) {
+        body += part + "  %w" + n + " = load ptr, ptr %p" + n + "\n  %o" + n +
+                " = call ptr @duck.heap$payload(ptr %w" + n + ", i1 true)\n" +
+                test(field.type.record, "%o" + n, n, following);
+      } else if (recordValue(field.type) && functions.destructible(field.type.record)) {
+        body += part + test(field.type.record, "%p" + n, n, following);
+      } else if (dynamicArray(field.type) && recordValue(*field.type.element) &&
+                 functions.destructible(field.type.element->record)) {
+        body += part + "  %c" + n + " = load ptr, ptr %p" + n + "\n  %n" + n + " = call i64 @duck.seq$length(ptr %c" + n +
+                ")\n  br label %h" + n + "\nh" + n + ":\n  %i" + n + " = phi i64 [ 0, %f" + n + " ], [ %k" + n + ", %g" + n +
+                " ]\n  %m" + n + " = icmp slt i64 %i" + n + ", %n" + n + "\n  br i1 %m" + n + ", label %b" + n + ", label %" +
+                following + "\nb" + n + ":\n  %e" + n + " = call ptr @duck.seq$index(ptr %c" + n + ", i64 %i" + n + ")\n" +
+                test(field.type.element->record, "%e" + n, n, "g" + n) + "g" + n + ":\n  %k" + n + " = add i64 %i" + n +
+                ", 1\n  br label %h" + n + "\n";
+      } else
+        body += "  br label %" + following + "\n";
+    }
+    body += "f" + std::to_string(fields.size()) + ":\n  br label %no\nyes:\n  ret i1 true\nno:\n  ret i1 false\n}\n";
+    helpers[name] = body;
+    return name;
+  }
+  // i1 true when moving the object (payload) into the owning field at slot
+  // would make it own itself.
+  std::string ownershipCycle(const Expr &target, const std::string &slot, const std::string &payload,
+                             const std::string &record) {
+    const auto base = analysis.expressionTypes.at(target.args[0].get());
+    const auto holder = base.depth ? base.pointee().record : base.record;
+    if (!functions.canOwn(record, holder)) return "false";
+    // Follow embedded containers down to the object holding the slot.
+    const Expr *root = target.args[0].get();
+    while (root->kind == "." && !analysis.expressionTypes.at(root).depth) root = root->args[0].get();
+    if (root->kind == "name") {
+      const auto type = analysis.expressionTypes.at(root);
+      const auto binding = findBinding(root->token);
+      // A local is owned by no field, so nothing can own what it holds.
+      if (!type.depth && binding.owned) return "false";
+      if (type.role == Type::Owner && binding.owned && !binding.lent && !analysis.receiverStorage.count(root)) {
+        auto word = fresh(), own = fresh(), same = fresh();
+        emit(word + " = load ptr, ptr " + binding.value);
+        emit(own + " = call ptr @duck.heap$payload(ptr " + word + ", i1 true)");
+        emit(same + " = icmp eq ptr " + own + ", " + payload);
+        return same;
+      }
+    }
+    auto cycle = fresh();
+    emit(cycle + " = call i1 " + reachHelper(record) + "(ptr " + payload + ", ptr " + slot + ")");
+    return cycle;
+  }
+  // target :: source. The cycle check runs before anything changes, so a
+  // rejected move leaves the source's owner intact. With result, gives false
+  // for a rejected move; otherwise a rejected move traps.
+  Value moveIntoField(const Expr &target, const Expr &source, bool result) {
+    usesHeapRuntime = true;
+    const auto type = analysis.expressionTypes.at(&target);
+    const auto from = analysis.expressionTypes.at(&source);
+    const bool place = from.depth && source.kind != "call";
+    std::string word, sourceSlot;
+    if (place) sourceSlot = location(source).value;
+    else if (from.depth) word = expression(source).value;
+    else word = allocate(type.pointee(), expression(source).value);
+    const auto slot = location(target).value;
+    std::string cycle = "false";
+    if (from.depth) {
+      auto current = word;
+      if (place) {
+        current = fresh();
+        emit(current + " = load ptr, ptr " + sourceSlot);
+      }
+      if (recordValue(type.pointee())) {
+        auto payload = fresh();
+        emit(payload + " = call ptr @duck.heap$payload(ptr " + current + ", i1 true)");
+        cycle = ownershipCycle(target, slot, payload, type.record);
+      }
+      // A borrowed result has no ownership to give.
+      if (mayBeBorrowed(source)) {
+        auto borrowed = fresh(), refused = fresh();
+        emit(borrowed + " = call i1 @duck.heap$borrowed(ptr " + current + ")");
+        emit(refused + " = or i1 " + cycle + ", " + borrowed);
+        cycle = refused;
+      }
+    }
+    std::string rejected, done, accepted;
+    if (result) {
+      rejected = label();
+      done = label();
+      accepted = label();
+      emit("br i1 " + cycle + ", label %" + rejected + ", label %" + accepted);
+      startBlock(rejected);
+      // Only a call result has no other owner to stay with.
+      if (!place) {
+        auto temporary = fresh();
+        allocations << "  " << temporary << " = alloca ptr\n";
+        emit("store ptr " + word + ", ptr " + temporary);
+        releaseBinding({type, temporary});
+      }
+      emit("br label %" + done);
+      startBlock(accepted);
+    } else {
+      auto valid = fresh();
+      emit(valid + " = xor i1 " + cycle + ", true");
+      require(valid);
+    }
+    if (place) word = moveOwner(source);
+    // The old child may run a destructor, so the new one is stored after it.
+    releaseBinding({type, slot});
+    emit("store ptr " + word + ", ptr " + slot);
+    if (!result) return {};
+    const auto acceptedEnd = currentBlock;
+    emit("br label %" + done);
+    startBlock(done);
+    auto outcome = fresh();
+    emit(outcome + " = phi i1 [ false, %" + rejected + " ], [ true, %" + acceptedEnd + " ]");
+    return {Type::Bool, outcome};
+  }
   // destroy is false for a value moved out by `return local`: its storage
   // still drops its references, but the object lives on in the caller.
   void releaseBinding(const Binding &binding, bool destroy = true) {
+    if (binding.pin) return emit("call void @duck.heap$unpin(ptr " + binding.value + ")");
     if (!binding.box.empty()) {
       // The payload dies with the box's last reference, which may be a lambda's.
       auto cell = fresh();
@@ -1403,7 +1669,7 @@ class Generator {
   // `for i : a...b`: i is the counter itself, so a body that changes it
   // changes which values follow. A range always holds at least one value.
   void rangeFor(const Stmt &s) {
-    const auto first = expression(*s.expr->args[0]), last = expression(*s.expr->args[1]);
+    const auto first = condition(*s.expr->args[0]), last = condition(*s.expr->args[1]);
     scopes.emplace_back();
     auto name = s.token;
     name.text = s.name;
@@ -1549,15 +1815,35 @@ class Generator {
   Value expression(const Expr &e) {
     // The analysis artifact is required, including in release builds.
     auto expected = analysis.expressionTypes.at(&e);
+    auto conversion = analysis.conversions.find(&e);
+    // Storing a reference in an alias slot takes a counted reference, while
+    // reading one gives its payload.
+    if (conversion != analysis.conversions.end() && conversion->second.role == Type::Alias)
+      return {conversion->second, aliasWord(e)};
+    // A tracked reference borrowed into a raw parameter stays in use.
+    if (conversion != analysis.conversions.end() && expected.role != Type::Raw && pinning && pinnable(e, expected))
+      return convert({expected, pinUse(e)}, conversion->second);
     auto value = lowerExpression(e);
     if (value.type != expected)
       throw std::logic_error("lowering disagrees with semantic analysis");
-    auto conversion = analysis.conversions.find(&e);
+    if (analysis.pointerTests.count(&e)) {
+      auto test = fresh();
+      emit(test + " = icmp ne ptr " + value.value + ", null");
+      return {Type::Bool, test};
+    }
     return conversion == analysis.conversions.end()
                ? value
                : convert(value, conversion->second);
   }
   Value dereference(const Expr &e) {
+    const auto type = analysis.expressionTypes.at(&e);
+    if (auto link = guardedLinks.find(&e); link != guardedLinks.end()) return {type, link->second};
+    if (type.role != Type::Raw) {
+      if (auto use = analysis.checkedUses.find(&e); use != analysis.checkedUses.end())
+        if (auto payload = checkedPayloads.find(use->second); payload != checkedPayloads.end())
+          return {type, payload->second};
+      if (pinning && pinnable(e, type)) return {type, pinUse(e)};
+    }
     auto v = expression(e);
     if (v.type.role != Type::Raw) {
       auto valid = fresh();
@@ -1744,7 +2030,14 @@ class Generator {
   }
   Value lowerExpression(const Expr &e) {
     const auto &op = e.token.text;
+    if (e.kind == "compileTime") {
+      const auto type = analysis.expressionTypes.at(&e);
+      if (type == Type::Void) return {type, ""};
+      if (floating(type)) return {type, analysis.floatingConstants.at(&e)};
+      return {type, analysis.integerConstants.at(&e)};
+    }
     if (e.kind == "mutation") return mutate(*e.args[0], op, e.args.size() > 1 ? e.args[1].get() : nullptr, true);
+    if (e.kind == "moveCheck") return moveIntoField(*e.args[0], *e.args[1], true);
     if (e.kind == "lambda") return closure(e);
     if (e.kind == "invoke" || analysis.indirectCalls.count(&e)) return indirectCall(e);
     if (e.kind == "duckCall" || e.kind == "duckCheck" || e.kind == "duckExists") return duckCall(e, false);
@@ -1752,6 +2045,7 @@ class Generator {
     if (analysis.reflections.count(&e)) return reflect(e);
     if (auto function = analysis.functionValues.find(&e); function != analysis.functionValues.end())
       return functionClosure(function->second, analysis.expressionTypes.at(&e));
+    if (e.kind == "guard" && e.args[0]->kind == "call") return guardedCall(e);
     if (e.kind == "guard") return readOrDefault(elementSlot(*e.args[0], true), analysis.expressionTypes.at(&e));
     // Reading an unwritten grid cell gives the default without storing it.
     if (std::vector<const Expr *> coordinates; e.kind == "index")
@@ -2743,24 +3037,76 @@ class Generator {
       return true;
     }
     if (s.kind == "returnOwner") {
-      auto word = moveOwner(s.expr->token);
+      auto word = moveOwner(*s.expr);
+      cleanupScopes(0);
+      emit("ret ptr " + word);
+      return true;
+    }
+    if (analysis.handleReturns.count(&s)) {
+      usesHeapRuntime = true;
+      const auto uses = beginUses(runsCode(*s.expr));
+      // The alias is taken before local cleanup, so a local owner's object
+      // arrives already expired and a surviving owner's stays usable.
+      std::string word = "null";
+      if (s.expr->kind == "call") word = expression(*s.expr).value;
+      else if (s.expr->kind != "null") {
+        const auto alias = aliasWord(*s.expr);
+        word = fresh();
+        emit(word + " = call ptr @duck.heap$lend(ptr " + alias + ")");
+      }
+      endUses(uses);
       cleanupScopes(0);
       emit("ret ptr " + word);
       return true;
     }
     if (s.kind == "return") {
+      const auto uses = beginUses(s.expr && runsCode(*s.expr));
       Value v = s.expr ? expression(*s.expr) : Value{Type::Void, ""};
+      endUses(uses);
       cleanupScopes(0, analysis.moves.count(&s) ? variable(s.expr->token).value : "");
       emit("ret " + irType(v.type) +
            (v.type == Type::Void ? "" : " " + v.value));
       return true;
     }
     if (s.kind == "if") {
-      auto v = expression(*s.expr);
+      const auto tested = analysis.expressionTypes.at(s.expr.get());
+      // A bound condition holds a use of the object through its branch, so
+      // the branch can keep using it after its owner lets it go.
+      const bool bound = analysis.boundConditions.count(&s) &&
+                         !(s.expr->kind == "name" && findBinding(s.expr->token).scopedBorrow);
+      std::string truth, record, payload;
+      if (bound) {
+        record = useRecord();
+        payload = pinCall(location(*s.expr), record);
+        truth = fresh();
+        emit(truth + " = icmp ne ptr " + payload + ", null");
+      } else {
+        const auto v = condition(*s.expr);
+        truth = v.value;
+        if (tested.depth) {
+          truth = fresh();
+          emit(truth + " = icmp ne ptr " + v.value + ", null");
+        }
+      }
       auto yes = label(), no = label(), end = label();
-      emit("br i1 " + v.value + ", label %" + yes + ", label %" + no);
+      emit("br i1 " + truth + ", label %" + yes + ", label %" + no);
       startBlock(yes);
+      if (bound) {
+        // Every exit from the branch cleans up this scope and ends the use.
+        scopes.emplace_back();
+        Binding use{Type::Pointer, record};
+        use.owned = use.pin = true;
+        Token held = s.token;
+        held.text = "$use";
+        bind(held, use);
+        checkedPayloads[&s] = payload;
+      }
       bool a = block(s.body);
+      if (bound) {
+        checkedPayloads.erase(&s);
+        if (!a) cleanupScopes(scopes.size() - 1);
+        scopes.pop_back();
+      }
       if (!a)
         emit("br label %" + end);
       startBlock(no);
@@ -2782,8 +3128,8 @@ class Generator {
       loops.pop_back();
       startBlock(check);
       if (s.expr) {
-        auto condition = expression(*s.expr);
-        emit("br i1 " + condition.value + ", label %" + body + ", label %" + end);
+        auto tested = condition(*s.expr);
+        emit("br i1 " + tested.value + ", label %" + body + ", label %" + end);
       } else
         emit("br label %" + body);
       startBlock(end);
@@ -2808,7 +3154,7 @@ class Generator {
       auto check = label(), body = label(), end = label(), step = label();
       emit("br label %" + check);
       startBlock(check);
-      auto v = s.expr ? expression(*s.expr) : Value{Type::Bool, "1"};
+      auto v = s.expr ? condition(*s.expr) : Value{Type::Bool, "1"};
       emit("br i1 " + v.value + ", label %" + body + ", label %" + end);
       loops.push_back({end, s.kind == "for" ? step : check, scopes.size()});
       startBlock(body);
@@ -2826,6 +3172,108 @@ class Generator {
       scopes.pop_back();
       return false;
     }
+    const auto uses = beginUses(statementRuns(s));
+    const bool terminated = simpleStatement(s);
+    endUses(uses);
+    return terminated;
+  }
+  // Branches to skip unless ok holds, and continues in a new block.
+  void continueIf(const std::string &ok, const std::string &skip) {
+    auto proceed = label();
+    emit("br i1 " + ok + ", label %" + proceed + ", label %" + skip);
+    startBlock(proceed);
+  }
+  // Checks pointer e, once: it is valid from here on, and lowering the call
+  // reuses the payload found here. A tracked object stays in use until the
+  // statement ends, so a call that releases it still finishes first.
+  void guardLink(const Expr &e, const std::string &skip, std::vector<const Expr *> &links) {
+    const auto type = analysis.expressionTypes.at(&e);
+    if (!type.depth) return;
+    std::string payload;
+    if (auto use = analysis.checkedUses.find(&e); use != analysis.checkedUses.end() && checkedPayloads.count(use->second))
+      payload = checkedPayloads.at(use->second);
+    else if (type.role != Type::Raw && pinnable(e, type)) {
+      const auto slot = location(e);
+      const auto record = useRecord();
+      activeUses.push_back(record);
+      payload = pinCall(slot, record);
+    } else
+      payload = expression(e).value;
+    auto valid = fresh();
+    emit(valid + " = icmp ne ptr " + payload + ", null");
+    continueIf(valid, skip);
+    guardedLinks[&e] = payload;
+    links.push_back(&e);
+  }
+  // Checks each link of a receiver chain from its root outward.
+  void guardChain(const Expr &e, const std::string &skip, std::vector<const Expr *> &links) {
+    if (!analysis.expressionTypes.count(&e)) return; // A static path, not a value.
+    if (analysis.staticFields.count(&e)) return guardLink(e, skip, links);
+    if (e.kind == "." || (e.kind == "unary" && e.token.text == "*")) guardChain(*e.args[0], skip, links);
+    else if (e.kind == "call" && e.receiver) guardChain(*e.receiver, skip, links);
+    else if (e.kind == "index") {
+      // The guarded slot lookup walks any inner indexes itself.
+      const Expr *root = &e;
+      while (root->kind == "index") root = root->args[0].get();
+      guardChain(*root, skip, links);
+      const auto slot = elementSlot(e, true);
+      auto found = fresh();
+      emit(found + " = icmp ne ptr " + slot + ", null");
+      continueIf(found, skip);
+      guardedSlots[&e] = slot;
+      links.push_back(&e);
+    }
+    guardLink(e, skip, links);
+  }
+  // ?p.q.Foo(x): the arguments and the call run only if every link is valid;
+  // otherwise the result is its type's default.
+  Value guardedCall(const Expr &e) {
+    const auto &call = *e.args[0];
+    const auto type = analysis.expressionTypes.at(&e);
+    const bool produces = type != Type::Void;
+    auto skip = label(), done = label();
+    std::string result;
+    if (produces) {
+      result = fresh();
+      allocations << "  " << result << " = alloca " << irType(type) << '\n';
+    }
+    std::vector<const Expr *> links;
+    guardChain(*call.receiver, skip, links);
+    if (auto indirect = analysis.indirectCalls.find(&call);
+        indirect != analysis.indirectCalls.end() && call.receiver->addressable() &&
+        !analysis.properties.count(call.receiver.get())) {
+      // A func field can be empty.
+      const auto r = receiver(call.receiver.get(), call.token);
+      Type owner = Type::Record;
+      owner.record = indirect->second.owner;
+      auto field = fresh(), closure = fresh(), present = fresh();
+      emit(field + " = getelementptr " + irType(owner) + ", ptr " + r.address + ", i32 0" + indexList(indirect->second.path));
+      emit(closure + " = load ptr, ptr " + field);
+      emit(present + " = icmp ne ptr " + closure + ", null");
+      continueIf(present, skip);
+    }
+    const auto value = expression(call);
+    if (produces) emit("store " + irType(type) + " " + value.value + ", ptr " + result);
+    emit("br label %" + done);
+    startBlock(skip);
+    if (produces) emit("store " + irType(type) + " " + missingElement(type).value + ", ptr " + result);
+    emit("br label %" + done);
+    startBlock(done);
+    for (const auto *link : links) {
+      guardedLinks.erase(link);
+      guardedSlots.erase(link);
+    }
+    if (!produces) return {Type::Void, ""};
+    auto loaded = fresh();
+    emit(loaded + " = load " + irType(type) + ", ptr " + result);
+    return {type, loaded};
+  }
+  // A statement that evaluates expressions and has no branches of its own.
+  bool simpleStatement(const Stmt &s) {
+    if (s.kind == "moveInto") {
+      moveIntoField(*s.target, *s.expr, false);
+      return false;
+    }
     if (s.kind == "own" || s.kind == "let") {
       const auto type = analysis.localTypes.at(&s);
       if (type.role != Type::Raw) {
@@ -2835,18 +3283,17 @@ class Generator {
         if (scoped) word = expression(*s.expr).value;
         else if (type.role == Type::Alias) word = aliasWord(*s.expr);
         else if (s.expr && analysis.expressionTypes.at(s.expr.get()).role == Type::Owner) {
-          word = s.expr->kind == "call" ? expression(*s.expr).value : moveOwner(s.expr->token);
-        } else {
-          auto payload = irType(type.pointee());
-          auto value = s.expr ? expression(*s.expr).value : defaultValue(type.pointee());
-          word = fresh();
-          emit(word + " = call ptr @duck.heap$alloc(i64 ptrtoint (ptr getelementptr (" +
-               payload + ", ptr null, i32 1) to i64))");
-          emit("store " + payload + " " + value + ", ptr " + word);
-        }
+          word = s.expr->kind == "call" ? expression(*s.expr).value : moveOwner(*s.expr);
+          // `::` needs ownership; a borrowed result has none to give.
+          if (s.kind == "own" && s.expr->kind == "call" && mayBeBorrowed(*s.expr))
+            emit("call void @duck.heap$owned(ptr " + word + ")");
+        } else
+          word = allocate(type.pointee(), s.expr ? expression(*s.expr).value : defaultValue(type.pointee()));
         auto name = s.token;
         name.text = s.name;
         declare(name, {type, word}, s.constant, scoped);
+        if (s.kind == "let" && s.expr && s.expr->kind == "call" && mayBeBorrowed(*s.expr))
+          scopes.back()[name.text].lent = true;
         return false;
       }
       auto v = s.expr ? expression(*s.expr) : Value{s.type, ""};
@@ -3073,6 +3520,7 @@ void releaseFields(const Symbols &symbols, const std::string &record, const std:
     ir += "  " + part + " = extractvalue " + irType(type) + " " + value + ", " + std::to_string(i) + "\n";
     if (recordValue(fields[i].type)) releaseFields(symbols, fields[i].type.record, part, next, ir);
     else if (funcValue(fields[i].type)) ir += "  call void @duck.cell$release(ptr " + part + ")\n";
+    else if (trackedAlias(fields[i].type)) ir += "  call void @duck.heap$release(ptr " + part + ")\n";
     else ir += "  call void @duck.text.release(ptr " + part + ")\n";
   }
 }
@@ -3106,11 +3554,20 @@ std::string emitDestroys(const Symbols &symbols, std::set<std::string> container
     const auto &fields = symbols.records.at(record).fields;
     for (size_t i = fields.size(); i-- > 0;) {
       const auto &field = fields[i];
+      if (field.type.role == Type::Owner) {
+        const auto payload = field.type.pointee();
+        const std::string cleanup = symbols.needsCleanup(payload) ? "@duck$cleanup." + payload.record : "null";
+        const auto part = "%field" + std::to_string(i);
+        ir += "  " + part + " = getelementptr %struct." + record + ", ptr %self, i32 0, i32 " + std::to_string(i) +
+              "\n  call void @duck.heap$drop(ptr " + part + ", i1 true, ptr " + cleanup + ")\n";
+        continue;
+      }
       if (dynamicArray(field.type)) {
         const auto part = "%field" + std::to_string(i), held = "%held" + std::to_string(i);
         const auto &element = *field.type.element;
         const std::string cleanup = managedValue(element) ? "@duck$slot.release"
                                     : funcValue(element) ? "@duck$slot.func"
+                                    : trackedAlias(element) ? "@duck.heap$slot"
                                     : recordValue(element) && symbols.needsCleanup(element)
                                         ? "@duck$cleanup." + element.record
                                         : "null";
@@ -3120,19 +3577,22 @@ std::string emitDestroys(const Symbols &symbols, std::set<std::string> container
         continue;
       }
       if (fixedArray(field.type) && symbols.needsCleanup(field.type)) {
-        // Only func elements reach here: validateLifetimes rejects the others.
+        // Only func and alias elements reach here: validateLifetimes rejects the others.
         const auto part = "%field" + std::to_string(i);
         unsigned long long count = 1;
         Type leaf = field.type;
         for (; fixedArray(leaf); leaf = *leaf.element) count *= leaf.extent;
         ir += "  " + part + " = getelementptr %struct." + record + ", ptr %self, i32 0, i32 " + std::to_string(i) +
               "\n  call void @duck.array$each(ptr " + part + ", i64 " + std::to_string(count) +
-              ", i64 ptrtoint (ptr getelementptr (ptr, ptr null, i32 1) to i64), ptr @duck$slot.func)\n";
+              ", i64 ptrtoint (ptr getelementptr (ptr, ptr null, i32 1) to i64), ptr " +
+              (trackedAlias(leaf) ? "@duck.heap$slot" : "@duck$slot.func") + ")\n";
         continue;
       }
       if (collectionValue(field.type)) {
         const auto part = "%field" + std::to_string(i), held = "%held" + std::to_string(i);
-        auto release = [](const Type &t) { return managedValue(t) ? "@duck$slot.release" : "null"; };
+        auto release = [](const Type &t) {
+          return managedValue(t) ? "@duck$slot.release" : trackedAlias(t) ? "@duck.heap$slot" : "null";
+        };
         ir += "  " + part + " = getelementptr %struct." + record + ", ptr %self, i32 0, i32 " +
               std::to_string(i) + "\n  " + held + " = load ptr, ptr " + part + "\n";
         if (field.type.base == Type::Pair)

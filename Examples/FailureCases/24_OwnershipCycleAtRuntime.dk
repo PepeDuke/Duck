@@ -1,0 +1,15 @@
+// EXPECT: runtime trap at the move; the original owner is never changed.
+// PITFALL: through an alias, only execution can see the cycle.
+// FIX: use (below.Next :: top) to get false instead of a trap.
+Node
+{
+    Node* Next :: null
+}
+
+Main()
+{
+    Node* top()
+    top.Next :: Node()
+    below : top.Next
+    below.Next :: top
+}

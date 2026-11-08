@@ -206,6 +206,7 @@ class Parser {
                             "make every dimension [-]");
         return Type::grid(t, unsigned(dimensions.size()));
       }
+      t = trackedElement(t);
       for (size_t i = dimensions.size(); i-- > 0;) t = Type::array(t, dimensions[i].extent);
       return t;
     }
@@ -217,7 +218,7 @@ class Parser {
         const auto value = plainType();
         if (collectionWord() && peek().text == "pair") {
           pop();
-          return Type::collection(Type::Pair, value, t);
+          return Type::collection(Type::Pair, trackedElement(value), t);
         }
       }
       pos = saved;
@@ -227,10 +228,15 @@ class Parser {
     // `T queue`, `T stack`, and `T pair` (keyed by name).
     if (collectionWord()) {
       const auto word = pop().text;
-      if (word == "queue") return Type::collection(Type::Queue, t);
-      if (word == "stack") return Type::collection(Type::Stack, t);
-      return Type::collection(Type::Pair, t, Type::Name);
+      if (word == "queue") return Type::collection(Type::Queue, trackedElement(t));
+      if (word == "stack") return Type::collection(Type::Stack, trackedElement(t));
+      return Type::collection(Type::Pair, trackedElement(t), Type::Name);
     }
+    return t;
+  }
+  // A pointer to a heap value stored in a collection is a tracked alias.
+  static Type trackedElement(Type t) {
+    if (t.depth == 1 && heapValue(t.pointee())) t.role = Type::Alias;
     return t;
   }
   Type plainType() {
@@ -434,17 +440,26 @@ class Parser {
   std::unique_ptr<Expr> expression(int minimum = 1, bool stopAtPipe = false) {
     auto e = std::make_unique<Expr>();
     e->token = peek();
-    if (accept("-") || accept("!") || accept("~") || accept("&") || accept("*")) {
+    if (accept("#")) {
+      e->kind = "compileTime";
+      e->args.push_back(expression(11, stopAtPipe));
+      if (e->args[0]->kind != "call")
+        fail(e->token, "'#' requires an explicit function call, as in #Call(1); "
+                       "a constant declaration requires an explicit type");
+    } else if (accept("-") || accept("!") || accept("~") || accept("&") || accept("*")) {
       e->kind = "unary";
       e->args.push_back(expression(11, stopAtPipe));
     } else if (accept("?")) {
+      // `?p.q.Foo()` skips the call, arguments included, at the first invalid
+      // link and reads as the result type's default.
       // `?a[i]` guards an index: a missing element skips a write and reads
       // as the element type's default. `?e..Foo()` skips a missing method.
       e->kind = "guard";
       e->args.push_back(expression(11, stopAtPipe));
-      if (e->args[0]->kind != "index" && e->args[0]->kind != "duckCall")
-        fail(e->token, "'?' guards an index such as ?a[i] or a duck call such as ?e..Foo(); "
-                       "guarded member and call chains are not supported yet");
+      if (e->args[0]->kind != "index" && e->args[0]->kind != "duckCall" &&
+          !(e->args[0]->kind == "call" && e->args[0]->receiver))
+        fail(e->token, "'?' guards an index such as ?a[i], a method call such as ?p.Foo(), "
+                       "or a duck call such as ?e..Foo()");
     } else if (accept("@")) {
       lambdaExpression(*e);
     } else if (accept("(")) {
@@ -459,6 +474,17 @@ class Parser {
       } else {
         e = expression();
         lines();
+        if (at("::") && e->kind == ".") {
+          // `(a.Child :: b)` gives false instead of trapping on an ownership
+          // cycle, and leaves b's owner as it was.
+          auto move = std::make_unique<Expr>();
+          move->kind = "moveCheck";
+          move->token = pop();
+          move->args.push_back(std::move(e));
+          move->args.push_back(expression());
+          e = std::move(move);
+          lines();
+        }
         if (at("+=") || at("-=") || at("++") || at("--")) {
           // `(s += x)` gives the inserted index; `(s--)` and `(s -= [i])`
           // give the removed element.
@@ -875,7 +901,11 @@ class Parser {
   std::unique_ptr<Stmt> simpleStatement(bool stopAtPipe = false) {
     auto s = std::make_unique<Stmt>();
     s->token = peek();
-    s->constant = accept("#");
+    // A leading # can mark either a typed constant or a call expression.
+    if (accept("#")) {
+      s->constant = declarationType();
+      if (!s->constant) --pos;
+    }
     if (s->constant && !declarationType())
       fail(peek(), "constant declaration requires an explicit type");
     if (declarationType()) {
@@ -917,7 +947,12 @@ class Parser {
     } else {
       unreachableNestedType();
       auto target = expression(1, stopAtPipe);
-      if (at(":") || at("::")) {
+      if (at("::") && target->kind == ".") {
+        pop();
+        s->kind = "moveInto";
+        s->target = std::move(target);
+        s->expr = expression();
+      } else if (at(":") || at("::")) {
         if (target->kind != "name") fail(target->token, "expected local name");
         s->kind = pop().text == "::" ? "own" : "let";
         s->name = target->token.text;
@@ -970,6 +1005,20 @@ class Parser {
       }
     }
     return f;
+  }
+  // After a pointer-typed member name: `Item* Child()` with no body is an
+  // owning field, while `Item* Get() { ... }` is a method.
+  bool owningFieldAhead(const Type &t) const {
+    if (t.depth != 1 || !heapValue(t.pointee())) return false;
+    auto punct = [&](size_t k, const char *text) { return !tokens.at(k).string && tokens.at(k).text == text; };
+    size_t k = pos;
+    for (int depth = 0;; ++k) {
+      if (punct(k, "<eof>")) return false;
+      if (punct(k, "(")) ++depth;
+      else if (punct(k, ")") && --depth == 0) break;
+    }
+    for (++k; punct(k, "\n"); ++k) {}
+    return !punct(k, "{");
   }
   // A '+' (public, the default) or '-' (protected) prefix must touch the
   // member it modifies, as in -int Cash or -Helper().
@@ -1034,7 +1083,7 @@ class Parser {
       }
       if (!members.insert(name.text).second) fail(name, "duplicate container member");
       if (name.text == "this") fail(name, "this is reserved for the receiver");
-      if (at("(")) {
+      if (at("(") && !(typed && owningFieldAhead(t))) {
         name.text = methodKey(tag.text, name.text);
         program.push_back(function(std::move(name), t, false, "", tag.text));
         program.back().protectedAccess = isProtected;
@@ -1043,7 +1092,38 @@ class Parser {
         if (!typed || t == Type::Void)
           fail(name, "container fields require a known value type");
         std::shared_ptr<Expr> initializer;
-        if (accept("=")) initializer = expression();
+        if (at("(")) {
+          // `Item* Child()` is an owning field built with its container.
+          if (!recordValue(t.pointee()))
+            fail(name, "field '" + name.text + "' cannot be constructed; write " + typeName(t.pointee()) + "* " +
+                           name.text + " :: value");
+          initializer = std::make_shared<Expr>();
+          initializer->kind = "call";
+          initializer->token = name;
+          initializer->token.text = t.record;
+          initializer->castType = t.pointee();
+          expect("(");
+          lines();
+          if (!at(")"))
+            do {
+              lines();
+              initializer->args.push_back(expression());
+              lines();
+            } while (accept(","));
+          expect(")");
+          t.role = Type::Owner;
+        } else if (accept("::")) {
+          // `Item* Child :: null` is an owning field that starts empty.
+          if (t.depth != 1 || !heapValue(t.pointee()))
+            fail(name, "an owning field needs a typed heap pointer");
+          t.role = Type::Owner;
+          if (!accept("null")) initializer = expression();
+        } else {
+          if (accept("=")) initializer = expression();
+          // A pointer to a container is a tracked alias. void* and pointers
+          // to scalars stay raw, in the container's C layout.
+          if (t.depth == 1 && recordValue(t.pointee())) t.role = Type::Alias;
+        }
         const bool lambdaDefault = initializer && initializer->kind == "lambda";
         if (funcValue(t) && !t.signature) {
           if (!lambdaDefault)

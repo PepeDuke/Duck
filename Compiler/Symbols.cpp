@@ -164,17 +164,25 @@ bool borrowsOnly(const Expr &e, const std::string &name, bool pointee = false,
   const bool nullCheck = e.kind == "binary" && (e.token.text == "==" || e.token.text == "!=") &&
                          (e.args[0]->kind == "null" || e.args[1]->kind == "null");
   // A lambda body is not inspected, so it may capture or keep anything.
-  if (e.kind == "lambda" || e.kind == "duckCall") return false;
+  if (e.kind == "lambda" || e.kind == "duckCall" || e.kind == "moveCheck") return false;
   mayEscape = mayEscape || (e.kind == "unary" && e.token.text == "&") ||
               (e.kind == "call" && e.token.text != "Print");
   if (e.receiver && !borrowsOnly(*e.receiver, name, false, true)) return false;
-  for (const auto &child : e.args)
-    if (!borrowsOnly(*child, name, indirect || nullCheck, mayEscape)) return false;
+  // Used as a condition, the pointer itself is only compared with null.
+  const bool tests = (e.kind == "unary" && e.token.text == "!") ||
+                     (e.kind == "binary" && (e.token.text == "&&" || e.token.text == "||"));
+  for (size_t i = 0; i < e.args.size(); ++i) {
+    const bool selects = e.kind == "conditional" && i == 0;
+    if (!borrowsOnly(*e.args[i], name, indirect || nullCheck || tests || selects, mayEscape)) return false;
+  }
   return true;
 }
 } // namespace
 bool borrowsOnly(const Stmt &s, const std::string &name) {
-  if ((s.expr && !borrowsOnly(*s.expr, name)) || (s.target && !borrowsOnly(*s.target, name)) ||
+  // `if p`, `while p`, and their relatives only test the pointer.
+  const bool nullTest = (s.kind == "if" || s.kind == "while" || s.kind == "do" || s.kind == "for") && s.expr &&
+                        s.expr->kind == "name" && s.expr->token.text == name;
+  if ((s.expr && !nullTest && !borrowsOnly(*s.expr, name)) || (s.target && !borrowsOnly(*s.target, name)) ||
       (s.initializer && !borrowsOnly(*s.initializer, name)) ||
       (s.step && !borrowsOnly(*s.step, name))) return false;
   for (const auto &child : s.body) if (!borrowsOnly(*child, name)) return false;
@@ -383,8 +391,23 @@ Symbols::const_iterator Symbols::findMethod(const std::string &record, const std
 }
 bool Symbols::managedRecord(const std::string &record) const {
   for (const auto &field : records.at(record).fields)
-    if (managed(field.type)) return true;
+    if (managed(field.type) || field.type.role == Type::Owner) return true;
   return false;
+}
+bool Symbols::canOwn(const std::string &holder, const std::string &held) const {
+  std::set<std::string> seen;
+  std::function<bool(const std::string &)> visit = [&](const std::string &current) {
+    if (current == held) return true;
+    if (!seen.insert(current).second) return false;
+    for (const auto &field : records.at(current).fields) {
+      Type inner = field.type;
+      while (arrayValue(inner)) inner = *inner.element;
+      if (inner.role == Type::Owner) inner = inner.pointee();
+      if (recordValue(inner) && visit(inner.record)) return true;
+    }
+    return false;
+  };
+  return visit(holder);
 }
 std::vector<std::string> Symbols::constructors(const std::string &record, bool partial) const {
   std::vector<std::string> keys;
@@ -430,7 +453,7 @@ bool Symbols::zeroDefault(const Type &type) const {
 bool Symbols::destructible(const std::string &record) const {
   if (count(destructorKey(record))) return true;
   for (const auto &field : records.at(record).fields)
-    if (collectionValue(field.type) || dynamicArray(field.type) ||
+    if (field.type.role == Type::Owner || collectionValue(field.type) || dynamicArray(field.type) ||
         (fixedArray(field.type) && needsCleanup(field.type)) ||
         (recordValue(field.type) && destructible(field.type.record)))
       return true;
@@ -672,7 +695,7 @@ void validateOverrides(const Symbols &symbols) {
     return text + ")" + (signature.result == Type::Void ? "" : " -> " + typeName(signature.result));
   };
   auto same = [](const Signature &a, const Signature &b) {
-    if (a.result != b.result || a.protectedAccess != b.protectedAccess ||
+    if (a.result != b.result || a.lends != b.lends || a.protectedAccess != b.protectedAccess ||
         a.parameters.size() != b.parameters.size())
       return false;
     for (size_t i = 1; i < a.parameters.size(); ++i)
@@ -752,6 +775,32 @@ void validateNativeSymbols(const Symbols &symbols) {
   }
 }
 void validateLifetimes(const Symbols &symbols) {
+  // An owning field built with its container runs that construction again for
+  // every object it creates, so such fields cannot lead back to the container.
+  std::set<std::string> building, built;
+  std::function<void(const std::string &)> visit = [&](const std::string &name) {
+    if (built.count(name)) return;
+    building.insert(name);
+    for (const auto &field : symbols.records.at(name).fields) {
+      Type next = field.type;
+      while (fixedArray(next)) next = *next.element;
+      const bool eager = field.type.role == Type::Owner && field.initializer && field.initializer->kind == "call" &&
+                         recordValue(field.initializer->castType);
+      if (eager) next = field.initializer->castType;
+      if (!recordValue(next) || !symbols.records.count(next.record)) continue;
+      if (eager && building.count(next.record))
+        fail(field.name, "owning field '" + field.name.text + "' would build '" + next.record +
+                             "' without end; declare it empty, as in " + next.record + "* " + field.name.text +
+                             " :: null");
+      visit(next.record);
+    }
+    building.erase(name);
+    built.insert(name);
+  };
+  for (const auto &[name, record] : symbols.records) {
+    (void)record;
+    visit(name);
+  }
   for (const auto &[name, record] : symbols.records)
     for (const auto &field : record.fields) {
       // A field without a default is built from the zero-argument overload
@@ -789,10 +838,10 @@ void validateLifetimes(const Symbols &symbols) {
                                      " has no zero-argument overload");
   // A fixed array field starts zeroed inside its container's constant
   // default, so its elements must be valid as zero bits.
-  // A null func is valid as zero bits, and its container releases it.
+  // A null func or alias is valid as zero bits, and its container releases it.
   auto holdsFunc = [](Type type) {
     while (fixedArray(type)) type = *type.element;
-    return funcValue(type);
+    return funcValue(type) || trackedAlias(type);
   };
   for (const auto &[name, record] : symbols.records)
     for (const auto &field : record.fields)

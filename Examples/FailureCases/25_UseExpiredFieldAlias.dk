@@ -1,0 +1,21 @@
+// EXPECT: runtime trap at the last call.
+// PITFALL: a field does not keep the object it refers to alive.
+// FIX: check it first with if holder.Ref.
+Item
+{
+    Use() { Print("used") }
+}
+
+Holder
+{
+    Item* Ref
+}
+
+Main()
+{
+    Item* owner()
+    Holder holder
+    holder.Ref = owner
+    owner = null
+    holder.Ref.Use()
+}

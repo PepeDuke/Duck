@@ -10,19 +10,19 @@ Concurrency and locking
    Proposal: Parse an ordered-block statement. Acquire its transitive resource set in stable identity order and reuse locks held by an enclosing block. For effects that cannot be resolved before entry, begin with a shared scheduler-wide exclusion mechanism.
 
 Ownership and null safety
-[] Support owning container fields and reject moves that would create an ownership cycle.
+[x] Support owning container fields and reject moves that would create an ownership cycle.
    Proposal: Represent an owning field separately from a raw C-layout pointer. Check the proposed parent's ancestor chain before committing a move so a rejected cycle leaves the original owner intact.
-[] Track aliases stored in fields, collection entries, and captured lambdas so they expire when the owner releases the resource.
+[x] Track aliases stored in fields, collection entries, and captured lambdas so they expire when the owner releases the resource.
    Proposal: Promote an escaping local alias to the existing heap control block. Generate retain/release operations when aggregate slots are copied, overwritten, or destroyed. Test that an expired collection entry stays present and compares equal to null.
-[] Defer destruction until active uses of a resource finish.
+[x] Defer destruction until active uses of a resource finish.
    Proposal: Extend heap control blocks with an active-use count. Atomically close the object to new uses on destruction, then let the last active user trigger cleanup exactly once.
-[] Support pointer conditions such as if p and protect the checked use.
+[x] Support pointer conditions such as if p and protect the checked use.
    Proposal: In condition analysis, recognize a checked pointer and bind the successful branch to its evaluated reference. For tracked objects, pin that object through the guarded use and release it on every branch exit.
-[] Support guarded call chains such as ?o.ex.Foo().
+[x] Support guarded call chains such as ?o.ex.Foo().
    Proposal: Parse a leading guard on a call chain. Evaluate each receiver once, skip the remainder on the first invalid link, and retain each live receiver through the call. Test that skipped arguments have no side effects.
-[] Support factories that return ownership on one path and a tracked alias on another.
+[x] Support factories that return ownership on one path and a tracked alias on another.
    Proposal: Infer the possible return roles across all branches and carry the actual role with the returned handle. Promote escaping aliases before local cleanup so an alias to a local owner arrives expired while one to a surviving owner remains usable.
-[] Resolve how ordinary inference (cake : MakeCake(...)) should receive a returned owner, then align the compiler and README example.
+[x] Resolve how ordinary inference (cake : MakeCake(...)) should receive a returned owner, then align the compiler and README example.
    Proposal: Proposed rule for review: a fresh inferred local consumes an owning result and preserves a borrowed result as an alias. Specify how explicit :: handles a borrowed result before enabling mixed factories; cover both return paths in the factory tutorial.
 
 Containers and namespaces
@@ -116,7 +116,7 @@ Entry points and scripts
    Proposal: Collect executable file-scope statements into a hidden function per source file. Propose a table of project source paths for Exec dispatch; specify path resolution and missing-file behavior before supporting computed paths.
 
 Compile-time execution and macros
-[] Evaluate explicit #Call(...) expressions at compile time.
+[x] Evaluate explicit #Call(...) expressions at compile time.
    Proposal: Evaluate the typed function body and constant arguments in a bounded interpreter that shares Duck's numeric and trap rules. Define allowed effects and report failures at the marked call before substituting the result.
 [] Expand typed macro functions at their call sites.
    Proposal: Capture macro bodies as syntax fragments, bind typed arguments once, then expand and validate in the caller's grammar context. Define name hygiene and expansion limits and report both definition and call locations on failure.

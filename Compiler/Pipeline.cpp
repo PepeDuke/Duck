@@ -124,6 +124,8 @@ std::string compileModule(const Program &program, const Program &imports,
   for (const auto &[name, info] : symbols.statics) symbols.validateType(info.type, info.declaration);
   resolveFieldDefaults(symbols);
   resolveStaticInitializers(symbols);
+  resolveReturnRoles(symbols, {&program, &imports}, {&symbols, &imported});
+  validateOverrides(symbols); // Inferred roles are part of a method's signature.
   for (const auto &[name, signature] : imported) {
     symbols.validateType(signature.result, signature.declaration);
     for (const auto &parameter : signature.parameters)
@@ -137,6 +139,13 @@ std::string compileModule(const Program &program, const Program &imports,
   std::vector<FunctionAnalysis> analyses;
   for (const auto &function : program)
     analyses.push_back(analyzeFunction(function, symbols));
+  std::vector<const Function *> evaluatedFunctions;
+  for (const auto &function : program) evaluatedFunctions.push_back(&function);
+  for (const auto &function : generated) {
+    evaluatedFunctions.push_back(&function);
+    analyses.push_back(analyzeFunction(function, symbols));
+  }
+  evaluateCompileTimeCalls(evaluatedFunctions, analyses);
   // Exec paths are literals, so a file nothing runs is known here. Its
   // statements would otherwise be dead code that looks like it executes.
   std::set<std::string> executed;
@@ -164,14 +173,18 @@ std::string compileModule(const Program &program, const Program &imports,
   for (size_t i = 0; i < program.size(); ++i)
     fragments.push_back(lowerFunction(program[i], symbols, analyses[i]));
   // Generated initializers run sequentially; they are never task candidates.
-  for (const auto &function : generated)
-    fragments.push_back(lowerFunction(function, symbols, analyzeFunction(function, symbols)));
+  for (size_t i = 0; i < generated.size(); ++i)
+    fragments.push_back(lowerFunction(generated[i], symbols, analyses[program.size() + i]));
   // A heap cleanup can release a func field in a function that never touches one.
   for (const auto &[name, record] : symbols.records)
     for (const auto &field : record.fields) {
       Type leaf = field.type;
       while (arrayValue(leaf)) leaf = *leaf.element;
       if (funcValue(leaf) && !fragments.empty()) fragments.front().usesFuncRuntime = true;
+      if ((leaf.role != Type::Raw || field.type.role != Type::Raw) && !fragments.empty())
+        fragments.front().usesHeapRuntime = true;
+      if (collectionValue(leaf) && trackedAlias(*leaf.element) && !fragments.empty())
+        fragments.front().usesHeapRuntime = true;
     }
   std::set<std::string> cleanups, destroys;
   std::set<DispatchTable> tables;
@@ -200,6 +213,8 @@ std::string compileModule(const Program &program, const Program &imports,
           pending.insert(field.type.record);
           changed = true;
         }
+        if (field.type.role == Type::Owner && symbols.needsCleanup(field.type.pointee()))
+          changed |= cleanups.insert(field.type.record).second;
         if (dynamicArray(field.type) && recordValue(*field.type.element) &&
             symbols.needsCleanup(*field.type.element))
           changed |= cleanups.insert(field.type.element->record).second;
@@ -211,7 +226,7 @@ std::string compileModule(const Program &program, const Program &imports,
     (void)symbol;
     helperIR += definition;
   }
-  return helperIR + emitRecords(symbols) + emitEnums(symbols) + emitStatics(symbols) + emitCleanups(symbols, cleanups) +
+  return emitRecords(symbols) + helperIR + emitEnums(symbols) + emitStatics(symbols) + emitCleanups(symbols, cleanups) +
          emitDestroys(symbols, destroys) + emitTables(symbols, tables, types) +
          emitDeclarations(declarations) +
          assembleModule(fragments, entry, nativeSymbols,

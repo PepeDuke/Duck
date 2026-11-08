@@ -6,7 +6,8 @@ add_library(duck_compiler
   Compiler/Semantics.cpp Compiler/Codegen.cpp Compiler/Pipeline.cpp Compiler/TextRuntime.cpp Compiler/HeapRuntime.cpp
   Compiler/CalendarRuntime.cpp Compiler/WideRuntime.cpp Compiler/BigRuntime.cpp
   Compiler/DecimalRuntime.cpp Compiler/CollectionRuntime.cpp
-  Compiler/Scheduling.cpp Compiler/TaskRuntime.cpp Compiler/FuncRuntime.cpp)
+  Compiler/Scheduling.cpp Compiler/TaskRuntime.cpp Compiler/FuncRuntime.cpp
+  Compiler/CompileTime.cpp)
 target_compile_features(duck_compiler PUBLIC cxx_std_17)
 target_include_directories(duck_compiler PUBLIC Compiler)
 add_executable(duckc Compiler/main.cpp)
@@ -34,6 +35,9 @@ if(BUILD_TESTING)
   find_program(DUCK_CLANG NAMES clang HINTS "C:/Program Files/LLVM/bin" REQUIRED)
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_FOUND)
+    add_test(NAME compiler.compile_time COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/Tests/compile_time.py
+      --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
     add_test(NAME buildtool.integration COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/Tests/build_tool.py
       --builder $<TARGET_FILE:duck> --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
@@ -48,6 +52,9 @@ if(BUILD_TESTING)
       --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
     add_test(NAME compiler.arbitrary_numbers COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/Tests/arbitrary_numbers.py
+      --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
+    add_test(NAME compiler.ownership COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/Tests/ownership.py
       --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
     add_test(NAME compiler.native COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/Tests/native_interop.py

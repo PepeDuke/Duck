@@ -1,0 +1,38 @@
+// EXPECT: 1, 2, 3, list ended, empty, both, false.
+// PITFALL: a pointer is true when it is not null, in any condition, but only
+// `if p` keeps the object alive through its branch. A `while p` test says
+// nothing about what happens to the object later in the body.
+Link
+{
+    int Id
+    Link* Next :: null
+}
+
+Main()
+{
+    Link* head()
+    head.Id = 1
+    head.Next :: Link()
+    head.Next.Id = 2
+    head.Next.Next :: Link()
+    head.Next.Next.Id = 3
+
+    cursor : head
+    while cursor
+    {
+        Print(cursor.Id)
+        cursor = cursor.Next
+    }
+
+    if !cursor
+        Print("list ended")
+
+    Print(cursor ? "more" | "empty")
+
+    other : head.Next
+    if head && other
+        Print("both")
+
+    head = null
+    Print(other && other.Id == 2) // The list died with its head.
+}

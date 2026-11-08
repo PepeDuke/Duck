@@ -1,0 +1,38 @@
+// EXPECT: 9, false, true, 1, true.
+// PITFALL: a plain return of a reference lends it. It works as long as the real
+// owner survives, and it expires with that owner. Clearing it changes nothing.
+Book
+{
+    int Pages = 9
+}
+
+Library
+{
+    Book* Shelved()
+
+    Book* Find() { return Shelved }
+
+    Book* Lend(bool forKeeps)
+    {
+        if forKeeps
+            return ::Shelved // The library gives this one away.
+        return Shelved
+    }
+}
+
+Main()
+{
+    Library library
+
+    found : library.Find()
+    Print(found.Pages)
+    found = null                   // Only the loan ends.
+    Print(library.Shelved == null) // The library still has it.
+
+    kept : library.Lend(true)
+    Print(library.Shelved == null) // Now it does not.
+    Print(kept != null)
+
+    kept = null
+    Print(kept == null)
+}

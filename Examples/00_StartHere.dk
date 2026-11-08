@@ -9,7 +9,7 @@ declare their own Main and reuse container names.
 Read in this order:
   Tutorial/01..06       Values, functions, containers, and access.
   Collections/01..05    Arrays, bounds, maps, ranges, and loop chaining.
-  Ownership/01..09      Owners, aliases, transfers, factories, destruction.
+  Ownership/01..17      Owners, aliases, transfers, factories, owning fields, destruction.
   Concurrency/01..04    Resource synchronization and explicit $ protection.
   Containers/01..05     Inheritance, duck calls, properties, initialization.
   Features/01..05       Enums, reflection, lambdas, baking, built-in tests.
