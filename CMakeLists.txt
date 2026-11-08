@@ -7,7 +7,7 @@ add_library(duck_compiler
   Compiler/CalendarRuntime.cpp Compiler/WideRuntime.cpp Compiler/BigRuntime.cpp
   Compiler/DecimalRuntime.cpp Compiler/CollectionRuntime.cpp
   Compiler/Scheduling.cpp Compiler/TaskRuntime.cpp Compiler/FuncRuntime.cpp
-  Compiler/CompileTime.cpp)
+  Compiler/CompileTime.cpp Compiler/TestRuntime.cpp)
 target_compile_features(duck_compiler PUBLIC cxx_std_17)
 target_include_directories(duck_compiler PUBLIC Compiler)
 add_executable(duckc Compiler/main.cpp)
@@ -55,6 +55,9 @@ if(BUILD_TESTING)
       --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
     add_test(NAME compiler.ownership COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/Tests/ownership.py
+      --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
+    add_test(NAME compiler.unit_tests COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/Tests/unit_tests.py
       --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
     add_test(NAME compiler.native COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/Tests/native_interop.py

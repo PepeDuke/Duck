@@ -2092,6 +2092,13 @@ class Analyzer {
         if (const auto *script = symbols.execTarget(e)) analysis.callTargets[&e] = *script;
         return Type::Void;
       }
+      // Parts of a lowered T assertion. A value Print cannot show is left out
+      // of the report rather than rejected: such values can still be compared.
+      if (op == "$T.fail") return Type::Void;
+      if (op == "$T.show") {
+        expression(*e.args[0]);
+        return Type::Void;
+      }
       if (op == "Print") {
         if (e.args.size() != 1)
           fail(e.token, "Print expects one argument");

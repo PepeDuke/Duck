@@ -184,6 +184,10 @@ inline int integerWidth(const Type &t) {
 inline bool integral(const Type &t) { return integerWidth(t) != 0; }
 inline bool numeric(const Type &t) { return integral(t) || floating(t); }
 inline bool heapValue(const Type &t) { return numeric(t) || t == Type::Bool || recordValue(t); }
+// Whether Print accepts a value of this type.
+inline bool printable(const Type &t) {
+  return t != Type::Void && !t.depth && !recordValue(t) && !arrayValue(t) && !collectionValue(t) && !funcValue(t);
+}
 inline int integerLiteralBase(const std::string &text) {
   if (text.size() >= 2 && text[0] == '0') {
     if (text[1] == 'x' || text[1] == 'X') return 16;
@@ -332,6 +336,9 @@ struct Function {
   // The hidden function holding a file's executable statements, run by Exec.
   bool script = false;
   std::vector<Tag> tags;
+  // A test from a T{ } block: its stable name, as in Container.Test. Empty
+  // for every other function.
+  std::string testName;
 };
 struct Record {
   Token name;
@@ -366,5 +373,8 @@ struct Program : std::vector<Function> {
   std::vector<EnumFragment> enums;
   std::vector<StaticField> statics;
   std::vector<std::string> sources; // Source names in input order.
+  // T{ } tests. They stay out of the program unless enableTests moves them in,
+  // so an ordinary build compiles exactly what it would without them.
+  std::vector<Function> tests;
 };
 } // namespace duck

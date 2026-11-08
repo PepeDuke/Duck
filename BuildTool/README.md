@@ -134,6 +134,29 @@ lifecycle hooks, and dynamic unloading need a separate design. Parallel jobs,
 incremental caching, package downloads, and distribution commands are not yet
 implemented; each invocation recompiles its selected modules.
 
+## Running Duck tests
+
+`duck test` builds and runs the `T{ }` tests of a project without touching the
+program's own build output:
+
+```powershell
+.\duck.cmd test path\to\project.dkp
+.\duck.cmd test path\to\project.dkp --module core
+.\duck.cmd test path\to\project.dkp --filter Inventory --filter Combat
+.\duck.cmd test path\to\project.dkp --list
+```
+
+Each module with tests becomes its own executable,
+`<build_dir>/<profile>/tests/<project>.<module>.test[.exe]`: that module's test
+build linked with the ordinary objects of its dependencies. Those executables can
+also be run directly, with `--list` and name filters. Library projects work the
+same way, and the entry module's `Main` is not called. `--filter` selects tests
+whose stable name contains the text. `--module`, `--enable`, `--disable`,
+`--profile`, `--compiler`, and `--clang` behave as they do for `duck build`.
+
+The command exits with `0` when every module passed and `1` when any test failed
+or crashed, or when filters matched no test in any module.
+
 ## Tests
 
 `Tests/build_tool.py` invokes the C++ executable to verify graph validation,

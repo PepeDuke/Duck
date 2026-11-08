@@ -126,7 +126,7 @@ Compile-time execution and macros
    Proposal: Introduce switch and case nodes, evaluate the selector once, and type-check labels in its context. Specify fallthrough and break targets and test a case produced by macro expansion.
 
 Language tests, markup, and lifecycle
-[] Discover and run T blocks as Duck tests and provide T assertions.
+[x] Discover and run T blocks as Duck tests and provide T assertions.
    Proposal: Recognize T blocks attached to containers and collect test functions in a test build. Generate a runner with stable test names and implement assertions that report the test and source location on failure.
 [] Use Duck test results and timings when evaluating scheduling optimizations.
    Proposal: Run the same tests with sequential and candidate schedules, discard candidates that fail, and compare repeated timing samples on the same inputs. Keep dependency analysis authoritative because passing tests cannot establish race freedom.

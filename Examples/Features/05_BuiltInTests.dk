@@ -1,4 +1,5 @@
-// EXPECT: both tests pass when supported by a Duck test runner.
+// EXPECT: both tests pass. Build the runner with duckc --test, or use duck test
+// for a project; an ordinary build leaves the T{ } block out.
 // PITFALL: testing a few executions does not prove a concurrency guarantee.
 // Tests complement the language's synchronization rules.
 Arithmetic

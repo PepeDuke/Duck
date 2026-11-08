@@ -1,4 +1,5 @@
 #include "Pipeline.h"
+#include <algorithm>
 
 namespace duck {
 Program combineUnits(std::vector<Program> units) {
@@ -12,12 +13,22 @@ Program combineUnits(std::vector<Program> units) {
     for (auto &fragment : unit.enums) program.enums.push_back(std::move(fragment));
     for (auto &field : unit.statics) program.statics.push_back(std::move(field));
     for (auto &source : unit.sources) program.sources.push_back(std::move(source));
+    for (auto &test : unit.tests) program.tests.push_back(std::move(test));
     for (auto &function : unit) {
       if (function.script) function.name.text = "$exec." + std::to_string(scripts++);
       program.push_back(std::move(function));
     }
   }
   return program;
+}
+void enableTests(Program &program) {
+  std::map<std::string, Token> seen;
+  for (auto &test : program.tests) {
+    const auto [existing, added] = seen.emplace(test.testName, test.name);
+    if (!added) fail(test.name, "test '" + test.testName + "' is already declared at " + where(existing->second));
+    program.push_back(std::move(test));
+  }
+  program.tests.clear();
 }
 std::string assembleModule(const std::vector<FunctionIR> &functions,
                            bool entry, const std::set<std::string> &nativeSymbols,
@@ -75,7 +86,7 @@ std::string compile(const Program &program, bool parallel) {
   return compileModule(program, {}, true, parallel);
 }
 std::string compileModule(const Program &program, const Program &imports,
-                          bool entry, bool parallel) {
+                          bool entry, bool parallel, bool tests) {
   // Each module emits its own member tables, so only the defining module may
   // add members; otherwise indices from the two modules would disagree.
   for (const auto &fragment : program.enums)
@@ -88,7 +99,7 @@ std::string compileModule(const Program &program, const Program &imports,
   for (const auto &source : imports.sources) symbols.importedSources.insert(sourceKey(source));
   for (const auto &function : program)
     if (function.script) symbols.scripts.emplace(sourceKey(function.name.source), function.name.text);
-  if (!entry && symbols.count("Main"))
+  if (!entry && !tests && symbols.count("Main"))
     for (const auto &f : program)
       if (f.name.text == "Main")
         fail(f.name, "library module cannot define Main");
@@ -226,10 +237,20 @@ std::string compileModule(const Program &program, const Program &imports,
     (void)symbol;
     helperIR += definition;
   }
+  std::string runner;
+  if (tests) {
+    // Sorted so output order does not depend on the order of the input files.
+    std::vector<std::pair<std::string, std::string>> cases;
+    for (const auto &function : program)
+      if (!function.testName.empty()) cases.emplace_back(function.testName, "@duck." + function.name.text);
+    std::sort(cases.begin(), cases.end());
+    runner = testRunnerIR(cases, nativeSymbols);
+  }
   return emitRecords(symbols) + helperIR + emitEnums(symbols) + emitStatics(symbols) + emitCleanups(symbols, cleanups) +
          emitDestroys(symbols, destroys) + emitTables(symbols, tables, types) +
          emitDeclarations(declarations) +
          assembleModule(fragments, entry, nativeSymbols,
-                        entry && !symbols.at("Main").parameters.empty());
+                        entry && !symbols.at("Main").parameters.empty()) +
+         runner;
 }
 } // namespace duck

@@ -12,7 +12,7 @@ Read in this order:
   Ownership/01..17      Owners, aliases, transfers, factories, owning fields, destruction.
   Concurrency/01..04    Resource synchronization and explicit $ protection.
   Containers/01..05     Inheritance, duck calls, properties, initialization.
-  Features/01..05       Enums, reflection, lambdas, baking, built-in tests.
+  Features/01..05       Enums, reflection, lambdas, baking, T{ } tests (duckc --test).
   Lifecycle/01..03      Custom scopes and frame lifetimes.
   Markup/01..02         Components and repeated children.
   CompileTime/01..07    Definitions, conditional blocks, and macros.

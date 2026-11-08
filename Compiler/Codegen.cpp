@@ -2261,7 +2261,18 @@ class Generator {
           emit("call void @duck." + script->second + "()");
         return {Type::Void, ""};
       }
-      if (op == "Print") {
+      if (op == "$T.fail") {
+        emit("call i32 (ptr, ...) @printf(ptr " + textConstant("%s\n") + ", ptr " +
+             textConstant(e.args[0]->token.text) + ")");
+        emit("store i1 true, ptr @duck$test.failed");
+        return {Type::Void, ""};
+      }
+      if (op == "$T.show") {
+        if (!printable(analysis.expressionTypes.at(e.args[0].get()))) return {Type::Void, ""};
+        emit("call i32 (ptr, ...) @printf(ptr " + textConstant("%s") + ", ptr " +
+             textConstant(e.args[1]->token.text) + ")");
+      }
+      if (op == "Print" || op == "$T.show") {
 
         auto v = expression(*e.args[0]);
 

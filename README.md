@@ -1752,6 +1752,46 @@ T{ // <- Testing block
 
 ``` 
 
+A `T{` block, written without a space, follows one of a container's bodies with no blank line between them. Each member is a test: a name, an empty parameter list, and a body. Tests can use anything the container's own members can, including protected members. A test's stable name is its container's qualified name and its own, such as `Example.Test1` or `Outer.Inner.Test1`. Two tests with one name in a test build are an error, and the name is what `--list` prints and filters match. `T {` with a space is still an ordinary container named `T`.
+
+Tests run apart from the program. An ordinary build leaves `T{` blocks out after parsing them, so its output is byte for byte the same with or without tests, and test bodies are checked only in a test build. A test build replaces the entry point with a generated runner, and `Main` is compiled but never called.
+
+``` powershell
+# One file or a set of files
+duckc --test Example.dk -o Example.test.ll
+clang Example.test.ll -o Example.test.exe
+.\Example.test.exe                 # run every test
+.\Example.test.exe --list          # print test names
+.\Example.test.exe Example.Test1   # run tests whose name contains this text; repeat for more
+
+# A project: one test executable per module, under <build>/<profile>/tests
+duck test Game.dkp
+duck test Game.dkp --module core --filter Example.Test1
+```
+
+The runner exits with `0` when every selected test passed, `1` when any failed, and `2` for bad usage or filters that match nothing.
+
+| Assertion | Fails when |
+| --- | --- |
+| `T.AreEqual(actual, expected)` | `actual == expected` is false |
+| `T.AreNotEqual(a, b)` | `a == b` is true |
+| `T.IsTrue(condition)` | the condition is false |
+| `T.IsFalse(condition)` | the condition is true |
+| `T.Fail()`, `T.Fail("reason")` | always |
+
+Assertions are statements, available directly in a test body, including inside its loops, branches, and macros, but not inside a lambda. Each operand runs once, and the comparison accepts exactly what `==` accepts. The first failed assertion reports and ends that test through its normal cleanup, and the run moves on to the next test:
+
+``` text
+RUN  Example.Test1
+C:\src\Example.dk:17:9: test Example.Test1: T.AreEqual failed
+  actual:   5
+  expected: 6
+FAIL Example.Test1
+0 passed, 1 failed, 1 total
+```
+
+Values `Print` cannot show, such as pointers, are compared but left out of the report. Tests share one process and its static fields, in name order, and a test that traps stops the run; its `RUN` line is the last one printed.
+
 ## Markup in Duck
 Markup is based on XML style markup where we have single root node and elements of that node. Duck allows to use normal code along with markup to achieve similar capabilities to JSX in React or WPF, inside object block in container we define block using this keyword. root node can be set or omitted and is always the name of the container
 

@@ -2,12 +2,14 @@
 #include "vendor/tomlplusplus/toml.hpp"
 #include <algorithm>
 #include <cctype>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
 #include <random>
 #include <regex>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #ifdef _WIN32
 #define NOMINMAX
@@ -132,7 +134,8 @@ static Paths glob(const fs::path& root, const std::string& pattern) {
 struct Options {
     fs::path project;
     std::string module, profile = "debug", compiler, clang;
-    Strings enable, disable;
+    Strings enable, disable, filters;
+    bool list = false;
 };
 struct Link {
     Strings libraries, directories;
@@ -344,6 +347,99 @@ struct WorkDirectory {
     ~WorkDirectory() { std::error_code error; fs::remove_all(path, error); }
 };
 
+using Plan = std::vector<std::pair<std::string, Paths>>;
+// mode is "--library", "--test", or empty for an entry module.
+static Strings compileCommand(const Project& project, const Plan& sources, const std::string& compiler,
+                              const std::string& id, const std::string& mode, const fs::path& ir) {
+    Strings command{compiler};
+    if (!mode.empty()) command.push_back(mode);
+    for (const auto& dependency : project.modules.at(id).depends) {
+        auto found = std::find_if(sources.begin(), sources.end(), [&](const auto& item) { return item.first == dependency; });
+        for (const auto& source : found->second) command.insert(command.end(), {"--dependency", source.u8string()});
+    }
+    const auto own = std::find_if(sources.begin(), sources.end(), [&](const auto& item) { return item.first == id; });
+    for (const auto& file : own->second) command.push_back(file.u8string());
+    command.insert(command.end(), {"-o", ir.u8string()});
+    return command;
+}
+
+static bool definesTests(const fs::path& ir) {
+    std::ifstream input(ir, std::ios::binary);
+    std::stringstream text;
+    text << input.rdbuf();
+    return text.str().find("; duck-tests: 0\n") == std::string::npos;
+}
+
+// Each module's tests become their own executable under <build>/<profile>/tests:
+// the module's test build linked with the ordinary objects of its dependencies.
+// Nothing in the program's own build output is read or replaced.
+static int test(const Options& options, const fs::path& bin) {
+    Project project(options);
+    const auto selected = project.plan(options.module);
+    auto compiler = project.tool("compiler", options.compiler, bin);
+    auto clang = project.tool("clang", options.clang, bin);
+    const auto destination = project.buildDir / options.profile / "tests";
+    WorkDirectory work(destination);
+    const std::string optimize = options.profile == "debug" ? "-O0" : "-O2";
+    std::map<std::string, fs::path> dependencies;
+    int passed = 0, failed = 0, unmatched = 0;
+    for (const auto& [id, files] : selected) {
+        (void)files;
+        if (!options.module.empty() && id != options.module) continue;
+        const auto sources = project.plan(id);
+        const auto ir = work.path / (id + ".test.ll"), object = work.path / (id + ".test.o");
+        run(compileCommand(project, sources, compiler, id, "--test", ir), false);
+        if (!definesTests(ir)) continue;
+        run({clang, "-c", optimize, ir.u8string(), "-o", object.u8string()}, false);
+        Strings link{clang, object.u8string()}, flags;
+        for (const auto& [dependency, unused] : sources) {
+            (void)unused;
+            if (dependency == id) continue;
+            auto known = dependencies.find(dependency);
+            if (known == dependencies.end()) {
+                const auto library = work.path / (dependency + ".ll"), output = work.path / (dependency + ".o");
+                run(compileCommand(project, sources, compiler, dependency, "--library", library), false);
+                run({clang, "-c", optimize, library.u8string(), "-o", output.u8string()}, false);
+                known = dependencies.emplace(dependency, output).first;
+            }
+            link.push_back(known->second.u8string());
+        }
+        for (auto it = sources.rbegin(); it != sources.rend(); ++it) project.linkFlags(project.modules.at(it->first), flags);
+        project.linkFlags(project.link, flags);
+        auto output = work.path / (project.projectName + "." + id + ".test");
+#ifdef _WIN32
+        output += ".exe";
+#endif
+        link.insert(link.end(), flags.begin(), flags.end());
+        link.insert(link.end(), {"-o", output.u8string()});
+        run(link, false);
+        const auto executablePath = destination / output.filename();
+        duckbuild::publish(output, executablePath);
+        std::cout << "== module " << id << std::endl;
+        Strings command{executablePath.u8string()};
+        if (options.list) command.push_back("--list");
+        command.insert(command.end(), options.filters.begin(), options.filters.end());
+        const int status = duckbuild::execute(command);
+        if (status == 0) ++passed;
+        else if (status == 2 && !options.filters.empty()) ++unmatched;
+        else {
+            ++failed;
+            if (status != 1) std::cout << "module " << id << " stopped with exit code " << status
+                                       << "; the last RUN line above names the test" << std::endl;
+        }
+    }
+    if (failed) {
+        std::cout << "duck test: " << failed << " module(s) failed, " << passed << " passed" << std::endl;
+        return 1;
+    }
+    if (!passed && unmatched) {
+        std::cerr << "duck test: error: no test matches the filter\n";
+        return 1;
+    }
+    if (!passed) std::cout << "duck test: no tests found" << std::endl;
+    return 0;
+}
+
 static void build(const Options& options, const fs::path& bin) {
     Project project(options);
     auto sources = project.plan(options.module);
@@ -360,15 +456,8 @@ static void build(const Options& options, const fs::path& bin) {
     Strings objects;
     for (const auto& [id, files] : sources) {
         auto ir = work.path / (id + ".ll"), object = work.path / (id + ".o");
-        Strings command{compiler};
-        if (id != project.entry) command.push_back("--library");
-        for (const auto& dependency : project.modules.at(id).depends) {
-            auto found = std::find_if(sources.begin(), sources.end(), [&](const auto& item) { return item.first == dependency; });
-            for (const auto& source : found->second) command.insert(command.end(), {"--dependency", source.u8string()});
-        }
-        for (const auto& file : files) command.push_back(file.u8string());
-        command.insert(command.end(), {"-o", ir.u8string()});
-        run(command);
+        (void)files;
+        run(compileCommand(project, sources, compiler, id, id != project.entry ? "--library" : "", ir));
         run({clang, "-c", options.profile == "debug" ? "-O0" : "-O2", ir.u8string(), "-o", object.u8string()});
         objects.push_back(object.u8string());
         artifacts.insert(artifacts.end(), {ir, object});
@@ -395,13 +484,20 @@ static void help() {
         "Usage: duck build PROJECT [--module MODULE] [--enable MODULE] [--disable MODULE]\n"
         "                        [--profile debug|release] [--compiler PATH] [--clang PATH]\n"
         "--module builds objects for the module and its dependencies without linking.\n"
-        "--enable and --disable may be repeated. Tool overrides resolve from the working directory.\n";
+        "--enable and --disable may be repeated. Tool overrides resolve from the working directory.\n"
+        "\n"
+        "Usage: duck test PROJECT [--module MODULE] [--filter TEXT] [--list] [build options above]\n"
+        "Builds each module's T{ } tests into its own executable, separate from the program, and runs them.\n"
+        "--module tests one module. --filter runs tests whose name contains TEXT and may be repeated.\n"
+        "--list prints test names without running them.\n";
 }
 static int mainImpl(const Strings& arguments) {
     try {
         if (std::find(arguments.begin() + 1, arguments.end(), "--help") != arguments.end() ||
             std::find(arguments.begin() + 1, arguments.end(), "-h") != arguments.end()) { help(); return 0; }
-        if (arguments.size() < 3 || arguments[1] != "build") fail("expected: duck build PROJECT (see --help)");
+        if (arguments.size() < 3 || (arguments[1] != "build" && arguments[1] != "test"))
+            fail("expected: duck build PROJECT or duck test PROJECT (see --help)");
+        const bool testing = arguments[1] == "test";
         Options options;
         for (size_t i = 2; i < arguments.size(); ++i) {
             auto argument = arguments[i];
@@ -410,9 +506,14 @@ static int mainImpl(const Strings& arguments) {
                 options.project = fs::u8path(argument);
                 continue;
             }
+            if (testing && argument == "--list") {
+                options.list = true;
+                continue;
+            }
             auto equals = argument.find('=');
             auto key = argument.substr(0, equals);
-            if (key != "--module" && key != "--enable" && key != "--disable" && key != "--profile" && key != "--compiler" && key != "--clang")
+            if (key != "--module" && key != "--enable" && key != "--disable" && key != "--profile" && key != "--compiler" && key != "--clang" &&
+                !(testing && key == "--filter"))
                 fail("unknown option: " + key);
             std::string value;
             if (equals != std::string::npos) value = argument.substr(equals + 1);
@@ -423,6 +524,10 @@ static int mainImpl(const Strings& arguments) {
             if (value.empty()) fail("missing value for " + key);
             if (key == "--enable") options.enable.push_back(value);
             else if (key == "--disable") options.disable.push_back(value);
+            else if (key == "--filter") {
+                if (value.front() == '-') fail("a test filter cannot start with '-': " + value);
+                options.filters.push_back(value);
+            }
             else if (key == "--module") options.module = value;
             else if (key == "--profile") options.profile = value;
             else if (key == "--compiler") options.compiler = value;
@@ -439,10 +544,11 @@ static int mainImpl(const Strings& arguments) {
 #else
         auto bin = executable(arguments.front(), fs::current_path()).parent_path();
 #endif
+        if (testing) return test(options, bin);
         build(options, bin);
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << "duck build: error: " << error.what() << '\n';
+        std::cerr << "duck " << arguments[1] << ": error: " << error.what() << '\n';
         return 1;
     }
 }

@@ -1,7 +1,10 @@
 #include "Pipeline.h"
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <optional>
+#include <set>
+#include <utility>
 namespace duck {
 namespace {
 class Parser {
@@ -20,6 +23,8 @@ class Parser {
   // The using directives visible here, outermost scope first.
   Usings usings = std::make_shared<const std::vector<Using>>();
   bool returnsOwner = false;
+  // The stable name of the test whose body is being parsed, or empty.
+  std::string currentTest;
   const Token &peek() const { return tokens[pos]; }
   bool at(const std::string &s) const {
     return !peek().string && peek().text == s;
@@ -712,7 +717,10 @@ class Parser {
     parameterList(f);
     const bool outerOwner = returnsOwner;
     returnsOwner = false;
+    // An assertion leaves its test, and a lambda body cannot do that.
+    const auto outerTest = std::exchange(currentTest, "");
     f.body = block();
+    currentTest = outerTest;
     hygiene.pop_back();
     if (returnsOwner) fail(name, "a lambda cannot return ownership with return ::");
     returnsOwner = outerOwner;
@@ -1020,6 +1028,134 @@ class Parser {
     expect("}");
     return result;
   }
+  // Whether `T.Name(` here is an assertion. A program's own container named
+  // T keeps its members, so only the assertion names are claimed.
+  bool assertionAhead() const {
+    if (!at("T") || !punctuation(tokens.at(pos + 1), ".") || !word(tokens.at(pos + 2)) ||
+        !punctuation(tokens.at(pos + 3), "("))
+      return false;
+    const bool container = containerNames.count("T") || containerNames.count("#{T");
+    if (assertionNames().count(tokens[pos + 2].text)) return !currentTest.empty() || !container;
+    return !currentTest.empty() && !container;
+  }
+  static const std::map<std::string, std::pair<size_t, size_t>> &assertionNames() {
+    static const std::map<std::string, std::pair<size_t, size_t>> names{
+        {"AreEqual", {2, 2}}, {"AreNotEqual", {2, 2}}, {"IsTrue", {1, 1}}, {"IsFalse", {1, 1}}, {"Fail", {0, 1}}};
+    return names;
+  }
+  // An assertion lowers to ordinary statements: evaluate its operands once,
+  // test them, and on failure report and return. Returning runs the test's
+  // normal scope cleanup, so a failed test still releases what it holds.
+  std::unique_ptr<Stmt> assertion() {
+    const auto start = pop();
+    expect(".");
+    const auto check = identifier();
+    const auto label = "T." + check.text;
+    if (currentTest.empty())
+      fail(start, label + " is available only directly inside a test in a T{ } block");
+    const auto arity = assertionNames().find(check.text);
+    if (arity == assertionNames().end())
+      fail(check, "unknown assertion '" + label + "'; use AreEqual, AreNotEqual, IsTrue, IsFalse, or Fail");
+    expect("(");
+    auto arguments = callArguments();
+    if (arguments.size() < arity->second.first || arguments.size() > arity->second.second)
+      fail(start, label + " expects " + std::to_string(arity->second.second) + " argument" +
+                      (arity->second.second == 1 ? "" : "s"));
+    auto node = [&](const std::string &kind, const std::string &text) {
+      auto e = std::make_unique<Expr>();
+      e->token = start;
+      e->token.text = text;
+      e->kind = kind;
+      return e;
+    };
+    auto literal = [&](const std::string &value) {
+      auto e = node("text", value);
+      e->token.string = true;
+      return e;
+    };
+    auto unary = [&](std::unique_ptr<Expr> operand) {
+      auto e = node("unary", "!");
+      e->args.push_back(std::move(operand));
+      return e;
+    };
+    std::vector<std::unique_ptr<Stmt>> failure;
+    auto report = [&](const std::string &op, std::unique_ptr<Expr> first, std::unique_ptr<Expr> second = nullptr) {
+      auto call = node("call", op);
+      call->args.push_back(std::move(first));
+      if (second) call->args.push_back(std::move(second));
+      auto s = std::make_unique<Stmt>();
+      s->token = start;
+      s->kind = "expr";
+      s->expr = std::move(call);
+      failure.push_back(std::move(s));
+    };
+    report("$T.fail", literal(where(start) + ": test " + currentTest + ": " + label +
+                              (check.text == "Fail" ? "" : " failed")));
+    std::vector<std::unique_ptr<Stmt>> statements;
+    std::unique_ptr<Expr> condition;
+    if (arity->second.second == 2) {
+      // A literal stays in place, so the comparison type-checks exactly as a
+      // written `a == 5` would and `null` keeps the other operand's type.
+      struct Operand {
+        std::string kind;
+        Token token;
+      };
+      auto operand = [&](std::unique_ptr<Expr> value, const std::string &local) {
+        static const std::set<std::string> literals{"int", "real", "bool", "null", "text"};
+        if (literals.count(value->kind)) return Operand{value->kind, value->token};
+        auto let = std::make_unique<Stmt>();
+        let->token = start;
+        let->token.text = local;
+        let->kind = "let";
+        let->name = local;
+        let->expr = std::move(value);
+        statements.push_back(std::move(let));
+        return Operand{"name", node("name", local)->token};
+      };
+      auto read = [](const Operand &o) {
+        auto e = std::make_unique<Expr>();
+        e->kind = o.kind;
+        e->token = o.token;
+        return e;
+      };
+      const auto actual = operand(std::move(arguments[0]), "$actual");
+      const auto expected = operand(std::move(arguments[1]), "$expected");
+      auto equal = node("binary", "==");
+      equal->args.push_back(read(actual));
+      equal->args.push_back(read(expected));
+      const bool wantEqual = check.text == "AreEqual";
+      condition = wantEqual ? unary(std::move(equal)) : std::move(equal);
+      auto show = [&](const char *title, const Operand &o) {
+        if (o.kind != "null") report("$T.show", read(o), literal(title));
+      };
+      if (wantEqual) {
+        show("  actual:   ", actual);
+        show("  expected: ", expected);
+      } else
+        show("  both:     ", actual);
+    } else if (check.text == "Fail") {
+      // Conditional in form only: statements after T.Fail stay reachable.
+      condition = node("bool", "true");
+      if (!arguments.empty()) report("$T.show", std::move(arguments[0]), literal("  message:  "));
+    } else
+      condition = check.text == "IsTrue" ? unary(std::move(arguments[0])) : std::move(arguments[0]);
+    auto leave = std::make_unique<Stmt>();
+    leave->token = start;
+    leave->kind = "return";
+    failure.push_back(std::move(leave));
+    auto test = std::make_unique<Stmt>();
+    test->token = start;
+    test->kind = "if";
+    test->expr = std::move(condition);
+    test->body = std::move(failure);
+    if (statements.empty()) return test;
+    statements.push_back(std::move(test));
+    auto group = std::make_unique<Stmt>();
+    group->token = start;
+    group->kind = "block";
+    group->body = std::move(statements);
+    return group;
+  }
   std::unique_ptr<Stmt> statement() {
     expandStatementMacro();
     if (at("Switch")) return switchStatement();
@@ -1029,6 +1165,11 @@ class Parser {
       const auto &next = tokens.at(pos + 1);
       if (next.string || next.text == "-" || word(next) || std::isdigit(static_cast<unsigned char>(next.text[0])))
         fail(peek(), "'case' is valid only directly inside a Switch body");
+    }
+    if (assertionAhead()) {
+      auto check = assertion();
+      if (!at("\n") && !at("}")) fail(peek(), "expected newline or '}' after statement");
+      return check;
     }
     auto s = std::make_unique<Stmt>();
     s->token = peek();
@@ -1490,6 +1631,44 @@ class Parser {
     }
     scope = enclosing;
   }
+  // `T{`, written without a space, attaches tests to the container before it.
+  // `T {` stays an ordinary container named T.
+  bool testBody() const {
+    if (!at("T")) return false;
+    const auto &next = tokens.at(pos + 1);
+    return !next.string && next.text == "{" && next.source == peek().source && next.line == peek().line &&
+           next.column == peek().column + 1;
+  }
+  // Each member is a test: `Name() { ... }`. Tests are static members of their
+  // container, so they see what its other members see, protected ones too.
+  void testBlock(Program &program, const std::string &container) {
+    pop();
+    const auto enclosing = scope;
+    scope = container;
+    expect("{");
+    lines();
+    while (!accept("}")) {
+      if (macroDeclaration()) {
+        skipMacroDeclaration();
+        continue;
+      }
+      const auto start = peek();
+      if (declarationType())
+        fail(start, "a T{ } block holds only tests, written Name() { ... } with no result type");
+      auto name = identifier();
+      if (!at("(")) fail(name, "a T{ } block holds only tests, written Name() { ... }");
+      auto key = name;
+      key.text = container + ".$test$" + name.text;
+      currentTest = container + "." + name.text;
+      auto test = function(std::move(key), Type::Void, false, "");
+      test.testName = std::exchange(currentTest, "");
+      if (!test.params.empty()) fail(name, "a test takes no parameters");
+      program.tests.push_back(std::move(test));
+      if (!at("}") && !at("\n")) fail(peek(), "expected member terminator");
+      lines();
+    }
+    scope = enclosing;
+  }
   // `#{` starts a static body.
   bool staticBody() const {
     return at("#") && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == "{";
@@ -1573,13 +1752,17 @@ class Parser {
         accept("\n");
         if (at("\n")) {
           lines();
-          if (at("{") || staticBody() || accessorBody())
+          if (at("{") || staticBody() || accessorBody() || testBody())
             fail(peek(), "chained container bodies must be adjacent, without a blank line");
         }
-        if (!at("{") && !staticBody() && !accessorBody()) {
+        if (!at("{") && !staticBody() && !accessorBody() && !testBody()) {
           pos = saved;
           break;
         }
+      }
+      if (testBody()) {
+        testBlock(program, qualified.text);
+        continue;
       }
       if (accept("#")) {
         declarations(program, prefix + tag.text + ".", true, true);
@@ -1753,6 +1936,8 @@ class Parser {
     usingDirectives();
     std::vector<std::unique_ptr<Stmt>> statements;
     while (!at("<eof>") && !(nested && at("}"))) {
+      if (testBody())
+        fail(peek(), "a T{ } test block must directly follow a container's body, with no blank line between them");
       if (at("using"))
         fail(peek(), "using directives must come before the other declarations in their scope");
       if (macroDeclaration()) {
@@ -2076,6 +2261,16 @@ void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
     size_t last = std::string::npos;
     for (size_t k = chain;;) {
       size_t open;
+      // A chained T{ } block declares no type; only macros matter inside it.
+      if (last != std::string::npos && punctuation(tokens, k, "T") && punctuation(tokens, k + 1, "{") &&
+          tokens[k + 1].line == tokens[k].line && tokens[k + 1].column == tokens[k].column + 1) {
+        const size_t close = closingBrace(tokens, k + 1);
+        if (macros) collectScope(tokens, k + 2, close, prefix + t.text + ".", names, macros);
+        last = close;
+        k = close + 1;
+        if (punctuation(tokens, k, "\n")) ++k;
+        continue;
+      }
       if (punctuation(tokens, k, "{")) open = k;
       else if (punctuation(tokens, k, "#") && punctuation(tokens, k + 1, "{")) open = k + 1;
       else break;

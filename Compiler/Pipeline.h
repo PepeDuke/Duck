@@ -548,6 +548,10 @@ std::string decimalRuntimeIR();
 std::string funcRuntimeIR();
 std::string metaRuntimeIR();
 std::string taskRuntimeIR(const std::set<std::string> &nativeSymbols);
+// The native entry of a test build: runs the tests given as (name, symbol),
+// honoring --list and name filters from the command line.
+std::string testRunnerIR(const std::vector<std::pair<std::string, std::string>> &tests,
+                         const std::set<std::string> &nativeSymbols);
 std::string emitRecords(const Symbols &symbols);
 std::string emitEnums(const Symbols &symbols);
 std::string emitDeclarations(const Symbols &symbols);
@@ -567,6 +571,10 @@ std::string emitTables(const Symbols &symbols, std::set<DispatchTable> tables, s
 // Sequential orchestration. Analysis finishes before lowering begins.
 // parallel = false keeps every call on the calling thread.
 std::string compile(const Program &program, bool parallel = true);
+// tests builds a test module: its entry is the generated runner and Main, if
+// any, is compiled but not called. It requires entry = false.
 std::string compileModule(const Program &program, const Program &imports,
-                          bool entry, bool parallel = true);
+                          bool entry, bool parallel = true, bool tests = false);
+// Moves the program's T{ } tests in among its functions and rejects duplicates.
+void enableTests(Program &program);
 } // namespace duck

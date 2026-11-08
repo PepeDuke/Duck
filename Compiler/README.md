@@ -1801,6 +1801,28 @@ Recursion is rejected by walking the origin chain; macros have no conditions,
 so a cycle could never end. Nesting is limited to 32 levels and output to 200000
 tokens per file. Macros cannot produce declarations yet.
 
+## Test blocks
+
+`Parser.cpp` recognizes `T{` chained to a container and stores its tests in
+`Program::tests`, away from the program's functions. Each test is a static
+function keyed `Container.$test$Name`, which `$` keeps out of reach of source
+code, and carries its stable name in `Function::testName`. An ordinary build
+never looks at that list, so its LLVM IR is identical with or without tests.
+
+`duckc --test` calls `enableTests`, which moves the tests into the program and
+rejects duplicate names, and passes `tests = true` to `compileModule`. The
+module is compiled as a non-entry module that may contain `Main`, and
+`TestRuntime.cpp` appends a native `main`. Static initializers still run from
+the module's constructor. A dependency's tests are always dropped, because each
+module's test build owns its own tests.
+
+An assertion lowers in the parser to ordinary statements: operands bound once
+to hidden locals, an `if`, and a body of report calls and `return`. Using
+`return` gives a failed test the same joins and scope cleanup as any other exit.
+`$T.fail` prints the location and test name and sets `@duck$test.failed`;
+`$T.show` prints a labeled operand through the `Print` lowering when its type
+is printable. The runner clears the flag before each test and reads it after.
+
 ## Switch
 
 `Switch` parses to a `switch` statement holding one `case` statement per

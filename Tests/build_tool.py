@@ -370,6 +370,87 @@ class Projects(unittest.TestCase):
             if previous is not None:
                 ctypes.windll.kernel32.SetErrorMode(previous)
 
+    def duck_test(self, *args, status=0):
+        result = subprocess.run([options.builder, "test", str(self.project), "--compiler", options.compiler,
+                                 "--clang", options.clang, *args], capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+        return result.stdout
+
+    def add_tests(self):
+        (self.root / "core.dk").write_text(
+            "Core #{ int Add(int a, int b) { return a + b } }\n"
+            "T{\n Adds() { T.AreEqual(Add(1, 2), 3) }\n Zero() { T.AreEqual(Add(0, 0), 0) }\n}\n", encoding="utf-8")
+        (self.root / "app.dk").write_text(
+            'App #{ int Twice(int n) { return Core.Add(n, n) } }\n'
+            'T{\n Doubles() { T.AreEqual(Twice(2), 4) }\n}\n'
+            'Main() { Print("program ran") }\n', encoding="utf-8")
+
+    def test_duck_test_builds_and_runs_each_module_separately(self):
+        self.add_tests()
+        output = self.duck_test()
+        self.assertIn("== module core\n", output)
+        self.assertIn("PASS Core.Adds\n", output)
+        self.assertIn("== module app\n", output)
+        self.assertIn("PASS App.Doubles\n", output)
+        self.assertNotIn("program ran", output)
+        tests = self.root / ".duck/build/debug/tests"
+        suffix = ".exe" if os.name == "nt" else ""
+        self.assertTrue((tests / f"Demo.core.test{suffix}").exists())
+        self.assertTrue((tests / f"Demo.app.test{suffix}").exists())
+        # Testing leaves the program's own output alone.
+        self.assertFalse((self.root / f".duck/build/debug/Demo{suffix}").exists())
+
+    def test_program_build_is_independent_of_tests(self):
+        self.add_tests()
+        self.invoke()
+        exe = self.root / ".duck/build/debug" / ("Demo.exe" if os.name == "nt" else "Demo")
+        before = exe.read_bytes()
+        self.duck_test()
+        self.assertEqual(exe.read_bytes(), before)
+        self.assertEqual(subprocess.check_output([str(exe)], text=True).strip(), "program ran")
+        self.assertFalse((self.root / ".duck/build/debug/core.test.o").exists())
+
+    def test_duck_test_selection(self):
+        self.add_tests()
+        output = self.duck_test("--module", "core")
+        self.assertIn("PASS Core.Adds\n", output)
+        self.assertNotIn("App.Doubles", output)
+        output = self.duck_test("--filter", "Doubles")
+        self.assertIn("PASS App.Doubles\n", output)
+        self.assertNotIn("PASS Core", output)
+        listed = self.duck_test("--list")
+        self.assertIn("Core.Adds\nCore.Zero\n", listed)
+        self.assertNotIn("RUN ", listed)
+        self.assertIn("no test matches", self.run_failing("--filter", "Missing"))
+
+    def run_failing(self, *args):
+        result = subprocess.run([options.builder, "test", str(self.project), "--compiler", options.compiler,
+                                 "--clang", options.clang, *args], capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        return result.stdout + result.stderr
+
+    def test_duck_test_reports_failures(self):
+        self.add_tests()
+        (self.root / "app.dk").write_text(
+            'App #{ Noop() {} }\nT{\n Bad() { T.Fail("nope") }\n}\nMain() { }\n', encoding="utf-8")
+        output = self.run_failing()
+        self.assertIn(f'{self.root / "app.dk"}:3:', output.replace("/", os.sep))
+        self.assertIn("test App.Bad: T.Fail", output)
+        self.assertIn("PASS Core.Adds\n", output)
+        self.assertIn("1 module(s) failed, 1 passed", output)
+
+    def test_duck_test_without_tests(self):
+        self.assertIn("no tests found", self.duck_test())
+
+    def test_duck_test_on_a_library_project(self):
+        self.add_tests()
+        self.write('version = 1\n[project]\nname = "Lib"\nkind = "library"\n[modules.core]\nsources = ["core.dk"]\n')
+        self.assertIn("PASS Core.Adds\n", self.duck_test())
+
+    def test_filter_is_only_for_duck_test(self):
+        result = self.invoke("--filter", "x", success=False)
+        self.assertIn("unknown option: --filter", result.stderr)
+
     def test_link_native_object(self):
         source = self.root / "native.c"
         source.write_text("int duck_native_marker(void) { return 7; }", encoding="utf-8")

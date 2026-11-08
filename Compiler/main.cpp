@@ -6,10 +6,12 @@
 #include <sstream>
 int main(int argc, char **argv) {
   if (argc == 2 && std::string(argv[1]) == "--help") {
-    std::cout << "Usage: duckc [--library] [--sequential] [--dependency file.dk] <source.dk> "
+    std::cout << "Usage: duckc [--library | --test] [--sequential] [--dependency file.dk] <source.dk> "
                  "[more.dk ...] -o <output.ll>\nEmits "
                  "LLVM IR; "
                  "compile and link with clang output.ll -o program\n"
+                 "--test builds a test runner from the T{ } blocks instead of the "
+                 "program;\nits executable takes --list and name filters.\n"
                  "--sequential keeps every call on the calling thread. At run "
                  "time,\nDUCK_WORKERS=n limits threads running Duck code "
                  "(default: CPU count).\n";
@@ -25,11 +27,15 @@ int main(int argc, char **argv) {
     std::vector<std::pair<bool, std::vector<duck::Token>>> sources;
     std::set<std::string> containerNames;
     duck::MacroTable macros;
-    bool entry = true, parallel = true;
+    bool entry = true, parallel = true, test = false;
     for (int i = 1; i < argc - 2; ++i) {
       std::string path = argv[i];
       if (path == "--library") {
         entry = false;
+        continue;
+      }
+      if (path == "--test") {
+        test = true;
         continue;
       }
       if (path == "--sequential") {
@@ -68,15 +74,19 @@ int main(int argc, char **argv) {
         unit.erase(std::remove_if(unit.begin(), unit.end(),
                                   [](const duck::Function &f) { return f.script; }),
                    unit.end());
+        unit.tests.clear(); // A dependency's tests belong to its own test build.
         importedUnits.push_back(std::move(unit));
       } else
         units.push_back(std::move(unit));
     }
     if (units.empty())
       throw std::runtime_error("at least one source file is required");
+    if (test && !entry)
+      throw std::runtime_error("--test and --library cannot be combined");
     auto program = duck::combineUnits(std::move(units));
     auto imports = duck::combineUnits(std::move(importedUnits));
-    auto ir = duck::compileModule(program, imports, entry, parallel);
+    if (test) duck::enableTests(program);
+    auto ir = duck::compileModule(program, imports, entry && !test, parallel, test);
     std::ofstream output(outputPath, std::ios::binary);
     if (!output || !(output << ir) || !output.flush())
       throw std::runtime_error(outputPath.string() +

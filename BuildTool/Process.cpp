@@ -70,9 +70,8 @@ static std::wstring quote(const std::wstring& value) {
 }
 #endif
 
-void run(const std::vector<std::string>& arguments) {
-    for (const auto& argument : arguments) std::cout << '"' << argument << "\" ";
-    std::cout << std::endl;
+int execute(const std::vector<std::string>& arguments) {
+    std::cout.flush();
 #ifdef _WIN32
     std::wstring command;
     for (const auto& argument : arguments) {
@@ -106,6 +105,15 @@ void run(const std::vector<std::string>& arguments) {
     }
     int status = WIFEXITED(waitStatus) ? WEXITSTATUS(waitStatus) : 128 + WTERMSIG(waitStatus);
 #endif
+    return static_cast<int>(status);
+}
+
+void run(const std::vector<std::string>& arguments, bool echo) {
+    if (echo) {
+        for (const auto& argument : arguments) std::cout << '"' << argument << "\" ";
+        std::cout << std::endl;
+    }
+    const int status = execute(arguments);
     if (status != 0) throw std::runtime_error("tool failed with exit code " +
         std::to_string(status) + ": " + arguments.front());
 }
