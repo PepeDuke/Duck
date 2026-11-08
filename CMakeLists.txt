@@ -1,16 +1,18 @@
 cmake_minimum_required(VERSION 3.20)
 project(Duck VERSION 0.1.0 LANGUAGES CXX)
 
-add_library(duck_compiler
-  Compiler/Lexer.cpp Compiler/Preprocessor.cpp Compiler/Parser.cpp Compiler/Symbols.cpp
-  Compiler/Semantics.cpp Compiler/Codegen.cpp Compiler/Pipeline.cpp Compiler/TextRuntime.cpp Compiler/HeapRuntime.cpp
-  Compiler/CalendarRuntime.cpp Compiler/WideRuntime.cpp Compiler/BigRuntime.cpp
-  Compiler/DecimalRuntime.cpp Compiler/CollectionRuntime.cpp
-  Compiler/Scheduling.cpp Compiler/TaskRuntime.cpp Compiler/FuncRuntime.cpp
-  Compiler/CompileTime.cpp Compiler/TestRuntime.cpp Compiler/MarkupRuntime.cpp Compiler/ScopeRuntime.cpp)
+set(DUCK_COMPILER_SOURCES
+  Lexer.cpp Preprocessor.cpp Parser.cpp Symbols.cpp
+  Semantics.cpp Codegen.cpp Pipeline.cpp TextRuntime.cpp HeapRuntime.cpp
+  CalendarRuntime.cpp WideRuntime.cpp BigRuntime.cpp
+  DecimalRuntime.cpp CollectionRuntime.cpp
+  Scheduling.cpp TaskRuntime.cpp FuncRuntime.cpp
+  CompileTime.cpp TestRuntime.cpp MarkupRuntime.cpp ScopeRuntime.cpp)
+list(TRANSFORM DUCK_COMPILER_SOURCES PREPEND Compiler/Private/)
+add_library(duck_compiler ${DUCK_COMPILER_SOURCES})
 target_compile_features(duck_compiler PUBLIC cxx_std_17)
-target_include_directories(duck_compiler PUBLIC Compiler)
-add_executable(duckc Compiler/main.cpp)
+target_include_directories(duck_compiler PUBLIC Compiler/Public PRIVATE Compiler/Private)
+add_executable(duckc Compiler/Private/main.cpp)
 target_link_libraries(duckc PRIVATE duck_compiler)
 add_executable(duck BuildTool/main.cpp BuildTool/Process.cpp)
 target_compile_features(duck PRIVATE cxx_std_17)

@@ -22,57 +22,73 @@ struct Bits {
   int compare(const Bits &b) const {
     for (size_t i = words.size(); i > 0; --i)
       if (words[i - 1] != b.words[i - 1]) return words[i - 1] < b.words[i - 1] ? -1 : 1;
+
     return 0;
   }
   Bits add(const Bits &b) const {
     Bits r; uint64_t carry = 0;
+
     for (size_t i = 0; i < words.size(); ++i) {
       carry += uint64_t(words[i]) + b.words[i];
       r.words[i] = uint32_t(carry); carry >>= 32;
     }
+
     return r;
   }
   Bits negate() const {
     Bits r;
+
     for (size_t i = 0; i < words.size(); ++i) r.words[i] = ~words[i];
+
     return r.add(Bits(1));
   }
   Bits multiply(const Bits &b) const {
     Bits r;
+
     for (size_t i = 0; i < words.size(); ++i) {
       uint64_t carry = 0;
+
       for (size_t j = 0; i + j < words.size(); ++j) {
         const uint64_t n = uint64_t(words[i]) * b.words[j] + r.words[i + j] + carry;
         r.words[i + j] = uint32_t(n); carry = n >> 32;
       }
     }
+
     return r;
   }
   Bits shift(unsigned count, unsigned width, bool right, bool sign = false) const {
     Bits r;
+
     for (unsigned i = 0; i < width; ++i) {
       const bool value = right ? (i + count < width ? bit(i + count) : sign)
                                : (i >= count && bit(i - count));
+
       if (value) r.set(i);
     }
+
     return r;
   }
   std::pair<Bits, Bits> divide(const Bits &b, unsigned width) const {
     Bits q, r;
+
     for (unsigned i = width; i > 0; --i) {
       // Preserve the carry out of a full-width remainder.
       const bool carry = r.bit(width - 1);
       r = r.shift(1, width, false);
+
       if (bit(i - 1)) r.set(0);
       if (carry || r.compare(b) >= 0) { r = r.add(b.negate()); r.trim(width); q.set(i - 1); }
     }
+
     return {q, r};
   }
   static Bits parse(const std::string &s) {
     const bool negative = s[0] == '-';
     const auto m = Magnitude::parse(negative ? s.substr(1) : s, 10);
     Bits r;
+
     for (size_t i = 0; i < m.limbs.size() && i < r.words.size(); ++i) r.words[i] = m.limbs[i];
+
     return negative ? r.negate() : r;
   }
   std::string decimal() const {
@@ -106,8 +122,10 @@ struct EvaluationFailure : std::runtime_error { using std::runtime_error::runtim
 std::optional<Value> &binding(Environment &env, const std::string &name) {
   for (auto i = env.rbegin(); i != env.rend(); ++i) {
     auto found = i->find(name);
+
     if (found != i->end()) return found->second;
   }
+
   reject("'" + name + "' is not a constant local argument");
 }
 Value integer(Type type, Bits bits) {
@@ -116,6 +134,7 @@ Value integer(Type type, Bits bits) {
 Value real(Type type, double number) {
   // Round after every float operation, just as the LLVM float instructions do.
   if (type == Type::Float) number = static_cast<float>(number);
+
   return {type, {}, number};
 }
 std::string encode(double number) {
@@ -142,57 +161,77 @@ class Interpreter {
   };
   void tick(size_t cost = 1) {
     if (cost > remaining) reject("evaluation exceeded the 100000-step limit");
+
     remaining -= cost;
   }
   Value convert(Value v, Type target) {
     if (!scalar(v.type) || !scalar(target)) reject("only fixed-width numbers and bool are supported");
     if (v.type == target) return v;
     if (target == Type::Bool) return integer(target, Bits(v.truth()));
+
     if (floating(target)) {
       if (floating(v.type)) return real(target, v.real);
+
       // Accumulate in the destination precision. For wide integers, retain
       // the top significand plus guard/sticky bits to avoid double rounding.
       const bool negative = v.negative();
       auto magnitude = negative ? v.bits.negate() : v.bits;
       magnitude.trim(width(v.type));
       unsigned top = 512;
+
       while (top && !magnitude.bit(top - 1)) --top;
+
       const unsigned precision = target == Type::Float ? 24 : 53;
       unsigned shift = top > precision ? top - precision : 0;
       uint64_t significant = 0;
+
       for (unsigned i = top; i > shift; --i) significant = (significant << 1) | uint64_t(magnitude.bit(i - 1));
+
       if (shift) {
         bool sticky = false;
+
         for (unsigned i = 0; i + 1 < shift; ++i) sticky |= magnitude.bit(i);
         if (magnitude.bit(shift - 1) && (sticky || (significant & 1))) ++significant;
       }
+
       double result = std::ldexp(double(significant), int(shift));
       return real(target, negative ? -result : result);
     }
+
     if (floating(v.type)) {
       const double rounded = std::floor(v.real);
       const unsigned exponent = width(target) - (unsignedInteger(target) ? 0 : 1);
       const double high = std::ldexp(1.0, int(exponent));
       const double low = unsignedInteger(target) ? 0 : -high;
+
       if (!std::isfinite(rounded) || rounded < low || rounded >= high)
         reject("floating-to-integer conversion is out of range");
+
       double magnitude = std::fabs(rounded);
       Bits bits;
+
       for (unsigned i = width(target); i > 0; --i) {
         const double place = std::ldexp(1.0, int(i - 1));
+
         if (magnitude >= place) { bits.set(i - 1); magnitude -= place; }
       }
+
       return integer(target, rounded < 0 ? bits.negate() : bits);
     }
+
     auto bits = v.bits;
+
     if (v.negative()) for (unsigned i = width(v.type); i < 512; ++i) bits.set(i);
+
     return integer(target, bits);
   }
   Value binary(const std::string &op, Value a, Value b) {
     tick();
     const bool comparison = op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=";
+
     if (comparison) {
       bool result = false;
+
       if (floating(a.type)) {
         if (op == "==") result = a.real == b.real;
         if (op == "!=") result = a.real != b.real;
@@ -202,6 +241,7 @@ class Interpreter {
         if (op == ">=") result = a.real >= b.real;
       } else {
         const int order = a.negative() != b.negative() ? (a.negative() ? -1 : 1) : a.bits.compare(b.bits);
+
         if (op == "==") result = order == 0;
         if (op == "!=") result = order != 0;
         if (op == "<") result = order < 0;
@@ -209,69 +249,93 @@ class Interpreter {
         if (op == "<=") result = order <= 0;
         if (op == ">=") result = order >= 0;
       }
+
       return integer(Type::Bool, Bits(result));
     }
+
     if (floating(a.type)) {
       if (op == "+") return real(a.type, a.real + b.real);
       if (op == "-") return real(a.type, a.real - b.real);
       if (op == "*") return real(a.type, a.real * b.real);
       if (op == "/") return real(a.type, a.real / b.real);
+
       reject("unsupported floating operator '" + op + "'");
     }
+
     const unsigned n = width(a.type);
     Bits bits;
+
     if (op == "+") bits = a.bits.add(b.bits);
     else if (op == "-") bits = a.bits.add(b.bits.negate());
     else if (op == "*") bits = a.bits.multiply(b.bits);
     else if (op == "<<" || op == ">>") {
       if (b.negative() || b.bits.compare(Bits(n)) >= 0) reject("shift count is outside the operand width");
+
       bits = a.bits.shift(b.bits.words[0], n, op == ">>", a.negative());
     } else if (op == "/" || op == "%") {
       if (b.bits.zero()) reject("integer division or remainder by zero");
+
       auto x = a.negative() ? a.bits.negate() : a.bits;
       auto y = b.negative() ? b.bits.negate() : b.bits;
       x.trim(n); y.trim(n);
       Bits minimum; minimum.set(n - 1);
+
       if (a.negative() && b.negative() && a.bits.compare(minimum) == 0 && y.compare(Bits(1)) == 0)
         reject("signed minimum divided by -1");
+
       tick(n);
       const auto qr = x.divide(y, n);
       bits = op == "/" ? qr.first : qr.second;
+
       if (op == "/" ? a.negative() != b.negative() : a.negative()) bits = bits.negate();
     } else if (op == "&" || op == "|" || op == "^") {
       for (size_t i = 0; i < bits.words.size(); ++i)
         bits.words[i] = op == "&" ? a.bits.words[i] & b.bits.words[i]
                       : op == "|" ? a.bits.words[i] | b.bits.words[i] : a.bits.words[i] ^ b.bits.words[i];
     } else reject("unsupported operator '" + op + "'");
+
     return integer(a.type, bits);
   }
   size_t target(const Expr &e, size_t owner) {
     const auto &a = analyses[owner];
+
     if (e.token.text == "Exec" || e.token.text == "Print")
       reject("I/O and Exec are forbidden");
+
     auto call = a.callTargets.find(&e);
+
     if (call == a.callTargets.end() || a.indirectCalls.count(&e) || a.receiverPaths.count(&e))
       reject("only direct Duck function calls are allowed; I/O, native calls and runtime dispatch are forbidden");
+
     auto found = indices.find(call->second);
+
     if (found == indices.end()) reject("function body is unavailable for '" + call->second + "'");
+
     return found->second;
   }
   void validateExpression(const Expr &e, size_t owner) {
     tick();
+
     if (validationExpressionDepth >= 64)
       reject("evaluation exceeded the 64-expression depth limit while checking effects");
+
     Frame frame(validationExpressionDepth);
     const auto &a = analyses[owner];
+
     if (a.staticFields.count(&e)) reject("static storage reads and writes are forbidden");
+
     if (!scalar(a.expressionTypes.at(&e)) &&
         !((e.kind == "call" || e.kind == "compileTime") && a.expressionTypes.at(&e) == Type::Void))
       reject("only fixed-width numbers and bool are supported");
+
     if (a.integerConstants.count(&e) || a.floatingConstants.count(&e)) return;
+
     if (e.kind == "call") validate(target(e, owner));
     else if (e.kind != "int" && e.kind != "real" && e.kind != "bool" && e.kind != "name" &&
              e.kind != "typeMember" && e.kind != "cast" && e.kind != "unary" && e.kind != "binary" &&
              e.kind != "conditional" && e.kind != "compileTime" && e.kind != "macroValue")
       reject("expression '" + e.kind + "' is not allowed");
+
     if (e.kind == "unary" && (e.token.text == "&" || e.token.text == "*")) reject("pointer access is forbidden");
     for (const auto &bound : e.bindings) validateStatement(*bound, owner);
     // A qualified static function's syntactic receiver is a namespace, not a value.
@@ -282,15 +346,19 @@ class Interpreter {
     const std::set<std::string> allowed{"let", "expr", "assign", "++", "--", "+=", "-=", "*=", "/=", "%=",
       "&=", "|=", "^=", "<<=", ">>=", "block", "ordered", "if", "while", "for", "rangefor", "do", "break", "continue", "return",
       "switch", "case"};
+
     if (!allowed.count(s.kind)) reject("statement '" + s.kind + "' is not allowed");
     if (s.kind == "let" && !scalar(analyses[owner].localTypes.at(&s))) reject("only scalar locals are allowed");
+
     if (s.target) {
       if (s.target->kind != "name" || analyses[owner].staticFields.count(s.target.get()))
         reject("only local scalar mutation is allowed");
     }
+
     if (s.kind == "rangefor") {
       for (const auto &endpoint : s.expr->args) validateExpression(*endpoint, owner);
     } else if (s.expr) validateExpression(*s.expr, owner);
+
     if (s.initializer) validateStatement(*s.initializer, owner);
     if (s.step) validateStatement(*s.step, owner);
     for (const auto &label : s.labels) validateExpression(*label, owner);
@@ -299,23 +367,32 @@ class Interpreter {
   }
   void validate(size_t index) {
     if (!validated.insert(index).second) return;
+
     tick();
+
     if (validationDepth >= 32) reject("evaluation exceeded the 32-call depth limit while checking effects");
+
     Frame frame(validationDepth);
     const auto &f = *functions[index];
+
     if (!f.nativeSymbol.empty() || f.method || (!scalar(f.result) && f.result != Type::Void))
       reject("only direct Duck functions with scalar or void results are allowed");
+
     for (const auto &p : f.params)
       if (p.reference || !scalar(p.type)) reject("reference and non-scalar parameters are forbidden");
+
     for (const auto &s : f.body) validateStatement(*s, index);
   }
   Value expression(const Expr &e, size_t owner, Environment &env) {
     tick();
+
     if (expressionDepth >= 64) reject("evaluation exceeded the 64-expression depth limit");
+
     Frame frameDepth(expressionDepth);
     const auto &a = analyses[owner];
     const auto type = a.expressionTypes.at(&e);
     Value result;
+
     if (auto i = a.integerConstants.find(&e); i != a.integerConstants.end()) result = integer(type, Bits::parse(i->second));
     else if (auto floatingConstant = a.floatingConstants.find(&e); floatingConstant != a.floatingConstants.end()) {
       auto bits = std::stoull(floatingConstant->second.substr(2), nullptr, 16);
@@ -323,25 +400,35 @@ class Interpreter {
     } else if (e.kind == "bool") result = integer(Type::Bool, Bits(e.token.text == "true"));
     else if (e.kind == "name") {
       if (a.staticFields.count(&e)) reject("static storage reads and writes are forbidden");
+
       auto value = binding(env, e.token.text);
+
       if (!value) reject("'" + e.token.text + "' is not a constant argument");
+
       result = *value;
     } else if (e.kind == "cast") result = convert(expression(*e.args[0], owner, env), e.castType);
     else if (e.kind == "compileTime") result = expression(*e.args[0], owner, env);
     else if (e.kind == "macroValue") {
       env.emplace_back();
+
       for (const auto &bound : e.bindings) statement(*bound, owner, env);
+
       result = expression(*e.args[0], owner, env);
       env.pop_back();
     } else if (e.kind == "call") {
       const size_t index = target(e, owner);
       validate(index);
+
       if (depth >= 32) reject("evaluation exceeded the 32-call depth limit");
+
       Environment frame(1);
       const auto &f = *functions[index];
+
       if (e.args.size() != f.params.size()) reject("only ordinary direct function calls are allowed");
+
       for (size_t arg = 0; arg < e.args.size(); ++arg)
         frame.back()[f.params[arg].name.text] = expression(*e.args[arg], owner, env);
+
       ++depth;
       const auto flow = sequence(f.body, index, frame);
       --depth;
@@ -351,6 +438,7 @@ class Interpreter {
       result = expression(*e.args[yes ? 1 : 2], owner, env);
     } else if (e.kind == "unary") {
       result = expression(*e.args[0], owner, env);
+
       if (e.token.text == "!") result = integer(Type::Bool, Bits(!result.truth()));
       else if (e.token.text == "-" && floating(result.type)) result = real(result.type, -result.real);
       else if (e.token.text == "-") result = integer(result.type, result.bits.negate());
@@ -358,6 +446,7 @@ class Interpreter {
       else reject("unsupported unary operator");
     } else if (e.kind == "binary") {
       auto left = expression(*e.args[0], owner, env);
+
       if (e.token.text == "&&" || e.token.text == "||") {
         const bool skip = e.token.text == "&&" ? !left.truth() : left.truth();
         result = skip ? left : expression(*e.args[1], owner, env);
@@ -366,6 +455,7 @@ class Interpreter {
         result = binary(e.token.text, left, right);
       }
     } else reject("expression '" + e.kind + "' is not a constant argument");
+
     auto conversion = a.conversions.find(&e);
     return conversion == a.conversions.end() ? result : convert(result, conversion->second);
   }
@@ -373,78 +463,111 @@ class Interpreter {
   Flow sequence(const std::vector<std::unique_ptr<Stmt>> &body, size_t owner, Environment &env) {
     env.emplace_back();
     Flow result;
+
     for (const auto &s : body) { result = statement(*s, owner, env); if (result.kind != Flow::Next) break; }
+
     env.pop_back(); return result;
   }
   Flow statement(const Stmt &s, size_t owner, Environment &env) {
     tick();
+
     if (s.kind == "block" || s.kind == "ordered") return sequence(s.body, owner, env);
     if (s.kind == "return") return {Flow::Return, s.expr ? expression(*s.expr, owner, env) : Value{}};
     if (s.kind == "break") return {Flow::Break, {}};
     if (s.kind == "continue") return {Flow::Continue, {}};
     if (s.kind == "if") return sequence(expression(*s.expr, owner, env).truth() ? s.body : s.alternate, owner, env);
+
     if (s.kind == "switch") {
       env.emplace_back();
       statement(*s.initializer, owner, env);
+
       for (const auto &bound : s.alternate) statement(*bound, owner, env);
+
       const auto selected = expression(*s.target, owner, env);
       const Stmt *chosen = nullptr, *otherwise = nullptr;
+
       for (const auto &section : s.body) {
         if (section->isDefault) otherwise = section.get();
+
         for (const auto &label : section->labels)
           if (!chosen && binary("==", selected, expression(*label, owner, env)).truth()) chosen = section.get();
       }
+
       if (!chosen) chosen = otherwise;
+
       Flow result;
+
       if (chosen) result = sequence(chosen->body, owner, env);
+
       env.pop_back();
       return result.kind == Flow::Break ? Flow{} : result;
     }
+
     if (s.kind == "rangefor") {
       const auto first = expression(*s.expr->args[0], owner, env);
       const auto last = expression(*s.expr->args[1], owner, env);
       const bool ascending = binary("<=", first, last).truth();
       env.emplace_back(); env.back()[s.name] = first;
       Flow result;
+
       for (;;) {
         tick();
         result = sequence(s.body, owner, env);
+
         if (result.kind == Flow::Return || result.kind == Flow::Break) break;
+
         auto &counter = binding(env, s.name);
+
         if (binary(ascending ? ">=" : "<=", *counter, last).truth()) break;
+
         counter = binary(ascending ? "+" : "-", *counter, integer(first.type, Bits(1)));
       }
+
       env.pop_back(); return result.kind == Flow::Return ? result : Flow{};
     }
+
     if (s.kind == "while" || s.kind == "for" || s.kind == "do") {
       env.emplace_back();
+
       if (s.initializer) statement(*s.initializer, owner, env);
+
       Flow result;
       bool first = true;
+
       for (;;) {
         tick();
+
         if (s.kind != "do" || !first) if (s.expr && !expression(*s.expr, owner, env).truth()) break;
+
         first = false;
         result = sequence(s.body, owner, env);
+
         if (result.kind == Flow::Return || result.kind == Flow::Break) break;
         if (s.step) statement(*s.step, owner, env);
       }
+
       env.pop_back(); return result.kind == Flow::Return ? result : Flow{};
     }
+
     if (s.kind == "let") {
       env.back()[s.name] = s.expr ? std::optional<Value>(expression(*s.expr, owner, env)) : std::nullopt;
       return {};
     }
+
     if (s.kind == "expr") { expression(*s.expr, owner, env); return {}; }
+
     auto &slot = binding(env, s.target->token.text);
+
     if (s.kind == "assign") slot = expression(*s.expr, owner, env);
     else {
       if (!slot) reject("read of uninitialized local");
+
       const auto old = *slot;
       const auto op = s.kind == "++" ? "+" : s.kind == "--" ? "-" : s.kind.substr(0, s.kind.size() - 1);
       auto right = s.expr ? expression(*s.expr, owner, env) : convert(integer(Type::Int, Bits(1)), old.type);
       slot = convert(binary(op, old, right), old.type);
     }
+
     return {};
   }
 public:
@@ -471,25 +594,34 @@ class MarkerPass {
       try {
         const auto v = interpreter.evaluate(*e.args[0], owner, env);
         auto &a = analyses[owner];
+
         if (floating(v.type)) a.floatingConstants[&e] = encode(v.real);
         else if (v.type != Type::Void) a.integerConstants[&e] = v.bits.decimal();
       } catch (const EvaluationFailure &error) {
         fail(e.token, "compile-time call failed: " + std::string(error.what()));
       }
+
       return;
     }
+
     if (e.kind == "macroValue") {
       env.emplace_back();
+
       for (const auto &bound : e.bindings) statement(*bound);
+
       expression(*e.args[0]);
       env.pop_back();
       return;
     }
+
     if (e.receiver) expression(*e.receiver);
     for (const auto &child : e.args) expression(*child);
+
     if (e.lambda) {
       env.emplace_back();
+
       for (const auto &p : e.lambda->params) env.back()[p.name.text] = std::nullopt;
+
       list(e.lambda->body);
       env.pop_back();
     }
@@ -497,6 +629,7 @@ class MarkerPass {
   void statement(const Stmt &s) {
     const bool isSwitch = s.kind == "switch";
     const bool loop = s.kind == "for" || s.kind == "rangefor" || s.kind == "foreach" || isSwitch;
+
     if (loop) env.emplace_back();
     if (s.initializer) statement(*s.initializer);
     if (s.expr) expression(*s.expr);
@@ -504,26 +637,35 @@ class MarkerPass {
     for (const auto &label : s.labels) expression(*label);
     // A Switch's macro bindings are visible to its sections.
     if (isSwitch) for (const auto &bound : s.alternate) statement(*bound);
+
     if (s.kind == "rangefor" || s.kind == "foreach") {
       env.back()[s.name] = std::nullopt;
+
       if (!s.key.empty()) env.back()[s.key] = std::nullopt;
     }
+
     if (s.kind == "let" || s.kind == "own") {
       std::optional<Value> value;
+
       if (s.constant && s.expr) {
         try { value = interpreter.evaluate(*s.expr, owner, env); }
         catch (const EvaluationFailure &) { /* A # binding may have a runtime initializer. */ }
       }
+
       env.back()[s.name] = value;
     }
+
     list(s.body);
+
     if (!isSwitch) list(s.alternate);
     if (s.step) statement(*s.step);
     if (loop) env.pop_back();
   }
   void list(const std::vector<std::unique_ptr<Stmt>> &body) {
     env.emplace_back();
+
     for (const auto &s : body) statement(*s);
+
     env.pop_back();
   }
 public:
@@ -531,7 +673,9 @@ public:
       : analyses(analyses), interpreter(functions, analyses) {
     for (owner = 0; owner < functions.size(); ++owner) {
       env = Environment(1);
+
       for (const auto &p : functions[owner]->params) env.back()[p.name.text] = std::nullopt;
+
       list(functions[owner]->body);
     }
   }

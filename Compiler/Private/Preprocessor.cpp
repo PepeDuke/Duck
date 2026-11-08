@@ -1,3 +1,4 @@
+#include "Literals.h"
 #include "Pipeline.h"
 #include <limits>
 
@@ -12,9 +13,6 @@ struct Constant {
 };
 const char *kindName(Constant::Kind kind) {
   return kind == Constant::Bool ? "bool" : kind == Constant::Integer ? "integer" : "string";
-}
-bool isWord(const Token &t) {
-  return !t.string && !t.text.empty() && (std::isalpha(static_cast<unsigned char>(t.text[0])) || t.text[0] == '_');
 }
 
 class Preprocessor {
@@ -34,15 +32,18 @@ class Preprocessor {
   }
   size_t skipLines(size_t k) const {
     while (punct(k, "\n")) ++k;
+
     return k;
   }
   // The '}' matching the '{' at open. Strings never count as braces.
   size_t closing(size_t open, const std::string &directiveName) const {
     int depth = 0;
+
     for (size_t k = open; k < in.size(); ++k) {
       if (punct(k, "{")) ++depth;
       else if (punct(k, "}") && --depth == 0) return k;
     }
+
     fail(in[open], "unterminated " + directiveName + " block");
   }
 
@@ -52,6 +53,7 @@ class Preprocessor {
   bool at(const char *text) const { return cursor < end && punct(cursor, text); }
   bool accept(const char *text) {
     if (!at(text)) return false;
+
     ++cursor;
     return true;
   }
@@ -65,69 +67,96 @@ class Preprocessor {
     value.kind = Constant::Integer;
     const int base = integerLiteralBase(t.text);
     const std::string digits = base == 10 ? t.text : t.text.substr(2);
+
     if (digits.empty()) fail(t, "integer literal requires digits after its prefix");
+
     for (char c : digits) {
-      const int digit = c >= '0' && c <= '9' ? c - '0'
-                      : c >= 'a' && c <= 'f' ? c - 'a' + 10
-                      : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 99;
-      if (digit >= base) fail(t, "#define and #if support bool, integer, and string values, not '" + t.text + "'");
+      const int digit = digitValue(c);
+
+      if (digit < 0 || digit >= base) fail(t, "#define and #if support bool, integer, and string values, not '" + t.text + "'");
+
       if (value.number > (std::numeric_limits<long long>::max() - digit) / base)
         fail(t, "integer in #define or #if is out of range for int64");
+
       value.number = value.number * base + digit;
     }
+
     return value;
   }
   Constant primary() {
     if (cursor >= end) fail(current(), "expected a value in #define or #if expression");
+
     const auto &t = in[cursor];
+
     if (accept("(")) {
       auto value = logicalOr();
+
       if (!accept(")")) fail(current(), "expected ')' in #define or #if expression");
+
       return value;
     }
+
     ++cursor;
+
     if (t.character) fail(t, "#define and #if support bool, integer, and string values, not char");
+
     if (t.string) {
       Constant value;
       value.kind = Constant::Text;
       value.text = t.text;
       return value;
     }
+
     if (std::isdigit(static_cast<unsigned char>(t.text[0]))) return literal(t);
+
     if (t.text == "true" || t.text == "false") {
       Constant value;
       value.truth = t.text == "true";
       return value;
     }
+
     if (!isWord(t)) fail(t, "unexpected '" + t.text + "' in #define or #if expression");
+
     const auto found = defines.find(t.text);
+
     if (found == defines.end())
       fail(t, "'" + t.text + "' is not defined here; a #define is visible from its line to the end of its file");
+
     return found->second.value;
   }
   Constant unary() {
     const auto &t = current();
+
     if (accept("!")) {
       auto value = unary();
+
       if (value.kind != Constant::Bool) wrongType(t, "!", value);
+
       value.truth = !value.truth;
       return value;
     }
+
     if (accept("-")) {
       auto value = unary();
+
       if (value.kind != Constant::Integer) wrongType(t, "-", value);
+
       value.number = -value.number;
       return value;
     }
+
     return primary();
   }
   Constant relational() {
     auto left = unary();
+
     while (at("<") || at(">") || at("<=") || at(">=")) {
       const auto &op = in[cursor++];
       const auto right = unary();
+
       if (left.kind != Constant::Integer) wrongType(op, op.text, left);
       if (right.kind != Constant::Integer) wrongType(op, op.text, right);
+
       Constant result;
       result.truth = op.text == "<"    ? left.number < right.number
                      : op.text == ">"  ? left.number > right.number
@@ -135,53 +164,69 @@ class Preprocessor {
                                        : left.number >= right.number;
       left = result;
     }
+
     return left;
   }
   Constant equality() {
     auto left = relational();
+
     while (at("==") || at("!=")) {
       const auto &op = in[cursor++];
       const auto right = relational();
+
       if (left.kind != right.kind)
         fail(op, std::string("cannot compare ") + kindName(left.kind) + " with " + kindName(right.kind) +
                      " in #define or #if");
+
       const bool same = left.truth == right.truth && left.number == right.number && left.text == right.text;
       Constant result;
       result.truth = op.text == "==" ? same : !same;
       left = result;
     }
+
     return left;
   }
   // Both operands of && and || are always checked: a misspelled define must
   // not hide behind a short circuit.
   Constant logicalAnd() {
     auto left = equality();
+
     while (at("&&")) {
       const auto &op = in[cursor++];
       const auto right = equality();
+
       if (left.kind != Constant::Bool) wrongType(op, "&&", left);
       if (right.kind != Constant::Bool) wrongType(op, "&&", right);
+
       left.truth = left.truth && right.truth;
     }
+
     return left;
   }
   Constant logicalOr() {
     auto left = logicalAnd();
+
     while (at("||")) {
       const auto &op = in[cursor++];
       const auto right = logicalAnd();
+
       if (left.kind != Constant::Bool) wrongType(op, "||", left);
       if (right.kind != Constant::Bool) wrongType(op, "||", right);
+
       left.truth = left.truth || right.truth;
     }
+
     return left;
   }
   Constant evaluate(size_t first, size_t last, const Token &directiveToken) {
     if (first >= last) fail(directiveToken, "'#" + directiveToken.text + "' requires a value");
+
     cursor = first;
     end = last;
     auto value = logicalOr();
+
     if (cursor != end) fail(in[cursor], "unexpected '" + in[cursor].text + "' in #define or #if expression");
+
     return value;
   }
 
@@ -190,14 +235,20 @@ class Preprocessor {
     requireLineStart(k);
     const auto &keyword = in[k + 1];
     const size_t nameAt = k + 2;
+
     if (nameAt >= in.size() || !isWord(in[nameAt]) || in[nameAt].text == "<eof>")
       fail(keyword, "#define requires a name, as in #define WIN_64 true");
+
     size_t last = nameAt + 1;
+
     while (last < in.size() && !punct(last, "\n") && !punct(last, "<eof>")) ++last;
+
     if (const auto existing = defines.find(in[nameAt].text); existing != defines.end())
       fail(in[nameAt], "'" + in[nameAt].text + "' is already defined at " + where(existing->second.name));
+
     if (in[nameAt].text == "true" || in[nameAt].text == "false")
       fail(in[nameAt], "cannot #define '" + in[nameAt].text + "'");
+
     auto value = evaluate(nameAt + 1, last, keyword);
     defines[in[nameAt].text] = {in[nameAt], std::move(value)};
     return last - 1;
@@ -209,25 +260,40 @@ class Preprocessor {
     requireLineStart(k);
     const auto &keyword = in[k + 1];
     size_t last = k + 2;
+
     while (last < in.size() && !punct(last, "\n") && !punct(last, "{") && !punct(last, "<eof>")) ++last;
+
     const auto condition = evaluate(k + 2, last, keyword);
+
     if (condition.kind != Constant::Bool)
       fail(keyword, std::string("#if requires a bool condition, got ") + kindName(condition.kind));
+
     const size_t open = skipLines(last);
+
     if (!punct(open, "{")) fail(keyword, "#if requires a { ... } block");
+
     const size_t close = closing(open, "#if");
+
     if (condition.truth) run(open + 1, close);
+
     size_t finish = close;
     const size_t elseAt = skipLines(close + 1);
+
     if (directive(elseAt, "else")) {
       const size_t elseOpen = skipLines(elseAt + 2);
+
       if (!punct(elseOpen, "{")) fail(in[elseAt + 1], "#else requires a { ... } block");
+
       const size_t elseClose = closing(elseOpen, "#else");
+
       if (!condition.truth) run(elseOpen + 1, elseClose);
+
       finish = elseClose;
     }
+
     if (!punct(finish + 1, "\n") && !punct(finish + 1, "}") && !punct(finish + 1, "<eof>"))
       fail(in[finish + 1], "expected a new line after the #if block");
+
     return finish;
   }
   void run(size_t first, size_t last) {

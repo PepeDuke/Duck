@@ -5,11 +5,13 @@ namespace {
 std::string constant(const std::string &symbol, const std::string &value) {
   const char *hex = "0123456789ABCDEF";
   std::string escaped;
+
   for (unsigned char c : value) {
     escaped += '\\';
     escaped += hex[c >> 4];
     escaped += hex[c & 15];
   }
+
   return symbol + " = private unnamed_addr constant [" + std::to_string(value.size() + 1) + " x i8] c\"" + escaped +
          "\\00\"\n";
 }
@@ -30,15 +32,19 @@ std::string testRunnerIR(const std::vector<std::pair<std::string, std::string>> 
   const std::pair<const char *, const char *> imports[] = {{"fflush", "declare i32 @fflush(ptr)\n"},
                                                            {"strcmp", "declare i32 @strcmp(ptr, ptr)\n"},
                                                            {"strstr", "declare ptr @strstr(ptr, ptr)\n"}};
+
   for (const auto &[symbol, declaration] : imports)
     if (!nativeSymbols.count(symbol)) ir += declaration;
+
   // The compiler emits for its own host, so the host picks the clock.
 #ifdef _WIN32
   const std::pair<const char *, const char *> clocks[] = {
       {"QueryPerformanceCounter", "declare i32 @QueryPerformanceCounter(ptr)\n"},
       {"QueryPerformanceFrequency", "declare i32 @QueryPerformanceFrequency(ptr)\n"}};
+
   for (const auto &[symbol, declaration] : clocks)
     if (!nativeSymbols.count(symbol)) ir += declaration;
+
   ir += R"IR(
 define internal i64 @duck$test.now() {
 entry:
@@ -58,7 +64,9 @@ entry:
 }
 )IR";
 #else
+
   if (!nativeSymbols.count("clock_gettime")) ir += "declare i32 @clock_gettime(i32, ptr)\n";
+
   ir += R"IR(
 define internal i64 @duck$test.now() {
 entry:
@@ -87,12 +95,14 @@ entry:
   ir += constant("@duck$test.summary", "%d passed, %d failed, %d total\n");
   const auto count = std::to_string(tests.size());
   std::string names, bodies;
+
   for (size_t i = 0; i < tests.size(); ++i) {
     const auto symbol = "@duck$test.name." + std::to_string(i);
     ir += constant(symbol, tests[i].first);
     names += (i ? ", ptr " : "ptr ") + symbol;
     bodies += (i ? ", ptr " : "ptr ") + tests[i].second;
   }
+
   const auto table = "[" + count + " x ptr]";
   ir += "@duck$test.names = internal constant " + table + " " + (tests.empty() ? "zeroinitializer" : "[" + names + "]") + "\n";
   ir += "@duck$test.bodies = internal constant " + table + " " + (tests.empty() ? "zeroinitializer" : "[" + bodies + "]") + "\n";

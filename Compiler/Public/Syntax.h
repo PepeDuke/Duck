@@ -32,9 +32,11 @@ inline std::string where(const Token &t) {
 // A failure inside macro output names every expansion that produced the token.
 [[noreturn]] inline void fail(const Token &t, const std::string &message) {
   std::string text = where(t) + ": error: " + message;
+
   for (const auto *e = t.origin.get(); e; e = e->call.origin.get())
     text += "\n  note: in expansion of macro '" + e->macro + "' defined at " + where(e->definition) +
             ", called at " + where(e->call);
+
   throw std::runtime_error(text);
 }
 struct FuncSignature;
@@ -84,7 +86,9 @@ struct Type {
   static Type collection(Kind kind, const Type &element, const Type &key = Type()) {
     Type t(kind);
     t.element = std::make_shared<const Type>(element);
+
     if (kind == Pair) t.key = std::make_shared<const Type>(key);
+
     return t;
   }
   // iN/uN for 1, 2, 4, and 8 bytes are the exact host-width types.
@@ -95,6 +99,7 @@ struct Type {
     case 32: return isUnsigned ? UInt32 : Int;
     case 64: return isUnsigned ? UInt64 : Long;
     }
+
     Type t(isUnsigned ? UIntN : IntN);
     t.bits = width;
     return t;
@@ -127,10 +132,12 @@ struct FuncSignature {
 inline bool sameSignature(const FuncSignature *a, const FuncSignature *b) {
   if (a == b) return true;
   if (!a || !b || a->result != b->result || a->parameters.size() != b->parameters.size()) return false;
+
   for (size_t i = 0; i < a->parameters.size(); ++i)
     if (a->parameters[i].type != b->parameters[i].type ||
         a->parameters[i].reference != b->parameters[i].reference)
       return false;
+
   return true;
 }
 // A non-owning heap reference held in a field or collection slot: the address
@@ -218,25 +225,32 @@ inline int integerLiteralBase(const std::string &text) {
     if (text[1] == 'x' || text[1] == 'X') return 16;
     if (text[1] == 'b' || text[1] == 'B') return 2;
   }
+
   return 10;
 }
 inline Type commonNumeric(Type a, Type b) {
   if (a == Type::Double || b == Type::Double)
     return Type::Double;
+
   if (a == Type::Float || b == Type::Float)
     return Type::Float;
+
   if (unsignedInteger(a) == unsignedInteger(b))
     return integerWidth(a) >= integerWidth(b) ? a : b;
+
   const auto signedType = unsignedInteger(a) ? b : a;
   const auto unsignedType = unsignedInteger(a) ? a : b;
   // Host widths first. Custom byte widths are considered only when an operand
   // already uses one, so uint64 mixed with a signed host type still needs a cast.
   std::vector<int> widths{8, 16, 32, 64};
+
   if (customInteger(a) || customInteger(b))
     for (int bytes = 9; bytes <= 64; ++bytes) widths.push_back(8 * bytes);
+
   for (auto width : widths)
     if (width >= integerWidth(signedType) && width > integerWidth(unsignedType))
       return Type::integer(unsigned(width), false);
+
   return Type::Void; // No lossless common integer type in this bootstrap.
 }
 // Common type of big/ubig or tiny/utiny with each other or with an integer of
@@ -244,11 +258,15 @@ inline Type commonNumeric(Type a, Type b) {
 // tiny never mix, and floating values never mix with either.
 inline Type arbitraryCommon(const Type &a, const Type &b) {
   const bool big = bigInteger(a) || bigInteger(b), decimal = decimalValue(a) || decimalValue(b);
+
   if (big == decimal) return Type::Void;
+
   auto compatible = [&](const Type &t) {
     return (big ? bigInteger(t) : decimalValue(t)) || (integral(t) && integerWidth(t) <= 64);
   };
+
   if (!compatible(a) || !compatible(b)) return Type::Void;
+
   auto nonnegative = [](const Type &t) {
     return t == Type::UBig || t == Type::UTiny || unsignedInteger(t);
   };

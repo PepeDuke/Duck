@@ -49,8 +49,10 @@ std::string typeName(Type type);
 inline std::string constructorKey(const std::string &record, const std::vector<Parameter> &params,
                                   bool partial = false) {
   std::string member = partial ? "$part" : "$new";
+
   for (const auto &p : params) {
     member += '$';
+
     for (unsigned char c : typeName(p.type)) {
       if (std::isalnum(c)) member += char(c);
       else if (c == '_') member += "__";
@@ -58,8 +60,10 @@ inline std::string constructorKey(const std::string &record, const std::vector<P
       else if (c == '*') member += "_p";
       else member += "_x" + std::to_string(int(c));
     }
+
     if (p.reference) member += "_r";
   }
+
   return methodKey(record, member);
 }
 inline std::string destructorKey(const std::string &record) { return methodKey(record, "$destroy"); }
@@ -98,7 +102,9 @@ struct ConstructionPart {
   std::string automatic;
   std::string id() const {
     std::string text;
+
     for (auto index : path) text += std::to_string(index) + ".";
+
     return text + (partial ? "partial" : "regular");
   }
   // How diagnostics name the part, such as -Entity(...) or Gun(...).
@@ -129,8 +135,10 @@ struct Signature {
 // The text a duck call site and a method descriptor compare: "void(float,int&)".
 inline std::string signatureText(const Type &result, const std::vector<Parameter> &parameters, size_t first) {
   std::string text = typeName(result) + "(";
+
   for (size_t i = first; i < parameters.size(); ++i)
     text += (i > first ? "," : "") + typeName(parameters[i].type) + (parameters[i].reference ? "&" : "");
+
   return text + ")";
 }
 // One member of a type descriptor. Fields come first in layout order, then
@@ -166,7 +174,9 @@ struct EnumInfo {
   bool attribute = false; // Marked [args]: members can be used as attributes.
   size_t find(const std::string &member) const {
     size_t i = 0;
+
     while (i < members.size() && members[i].text != member) ++i;
+
     return i;
   }
 };
@@ -192,6 +202,12 @@ struct StaticInfo {
   std::string scope;                 // A `[@Name]` field's scope, with its declared type.
   Type scopedType = Type::Void;
 };
+inline bool hasField(const Record &record, const std::string &name) {
+  for (const auto &field : record.fields)
+    if (field.name.text == name) return true;
+
+  return false;
+}
 struct Symbols : std::map<std::string, Signature> {
   std::map<std::string, Record> records;
   std::map<std::string, EnumInfo> enums;
@@ -272,29 +288,37 @@ struct Symbols : std::map<std::string, Signature> {
   void validateType(const Type &type, const Token &token) const {
     if (funcValue(type)) {
       if (!type.signature) return; // Inferred from the initializer.
+
       validateType(type.signature->result, token);
+
       for (const auto &parameter : type.signature->parameters) validateType(parameter.type, token);
+
       return;
     }
+
     if (arrayValue(type)) {
       const auto &element = *type.element;
       const bool plain = trackedAlias(element) ||
                          (!element.depth && (numeric(element) || element == Type::Bool || element == Type::Char ||
                                              enumValue(element) || managedValue(element) || funcValue(element) ||
                                              decimalValue(element) || calendarValue(element)));
+
       if (!plain && !recordValue(element) && !arrayValue(element))
         fail(token, "an array cannot hold " + typeName(element) +
                         "; elements are numbers, bool, char, enums, string, name, big, tiny, dates and times, "
                         "func, containers, and arrays");
+
       validateType(element, token);
       return;
     }
+
     if (collectionValue(type)) {
       // Elements are plain values or reference-counted text and big
       // integers; keys must also compare by value.
       auto element = [&](const Type &t) {
         if (elementValue(t)) return markupValue(type);
         if (trackedAlias(t)) return !gridValue(type);
+
         return !t.depth && (numeric(t) || t == Type::Bool || t == Type::Char || enumValue(t) ||
                             managedValue(t) || decimalValue(t) || calendarValue(t));
       };
@@ -302,21 +326,29 @@ struct Symbols : std::map<std::string, Signature> {
         return !t.depth && (integral(t) || t == Type::Bool || t == Type::Char || enumValue(t) ||
                             managedValue(t) || calendarValue(t));
       };
+
       if (!element(*type.element))
         fail(token, std::string(gridValue(type) ? "a grid" : "a collection") + " cannot hold " +
                         typeName(*type.element) +
                         "; elements are numbers, bool, char, enums, string, name, big, tiny, dates and times, "
                         "and heap references");
+
       if (gridValue(type)) return validateType(*type.element, token);
+
       if (type.key && !key(*type.key))
         fail(token, "a pair cannot be keyed by " + typeName(*type.key) +
                         "; keys are integers, bool, char, enums, string, name, big, and dates and times");
+
       validateType(*type.element, token);
+
       if (type.key) validateType(*type.key, token);
+
       return;
     }
+
     if (type.base == Type::Record && !records.count(type.record))
       fail(token, "unknown container '" + type.record + "'");
+
     if (type.base == Type::Enum && !enums.count(type.record))
       fail(token, "unknown enum '" + type.record + "'");
   }
@@ -547,6 +579,7 @@ struct Resource {
   }
   bool overlaps(const Resource &o) const {
     if (kind != o.kind || root != o.root || parameter != o.parameter) return false;
+
     const auto common = std::min(path.size(), o.path.size());
     return std::equal(path.begin(), path.begin() + common, o.path.begin());
   }
@@ -571,6 +604,7 @@ struct EffectSet {
       for (const auto &x : a)
         for (const auto &y : b)
           if (x.overlaps(y)) return true;
+
       return false;
     };
     return meet(writes, o.writes) || meet(writes, o.reads) || meet(reads, o.writes);

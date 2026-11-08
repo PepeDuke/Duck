@@ -19,8 +19,10 @@ std::string taskRuntimeIR(const std::set<std::string> &nativeSymbols) {
       {"GetActiveProcessorCount", "declare i32 @GetActiveProcessorCount(i16)\n"},
       {"getenv", "declare ptr @getenv(ptr)\n"},
       {"atoi", "declare i32 @atoi(ptr)\n"}};
+
   for (const auto &[symbol, declaration] : imports)
     if (!nativeSymbols.count(symbol)) ir += declaration;
+
   return ir + R"IR(
 @duck.task.limit = internal global i32 0
 @duck.task.active = internal global i32 0
@@ -124,8 +126,10 @@ std::string lockRuntimeIR(const std::set<std::string> &nativeSymbols) {
       {"ReleaseSRWLockExclusive", "declare void @ReleaseSRWLockExclusive(ptr)\n"},
       {"AcquireSRWLockShared", "declare void @AcquireSRWLockShared(ptr)\n"},
       {"ReleaseSRWLockShared", "declare void @ReleaseSRWLockShared(ptr)\n"}};
+
   for (const auto &[symbol, declaration] : imports)
     if (!nativeSymbols.count(symbol)) ir += declaration;
+
   return ir + R"IR(
 declare i64 @llvm.cttz.i64(i64, i1)
 $duck$lock.global = comdat any

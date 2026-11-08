@@ -6,6 +6,12 @@ the native executable against the C runtime. LLVM C++ headers and libraries
 are not required. This allows the bootstrap to work with the installed
 Windows LLVM tools distribution.
 
+## Source layout
+
+`Public/` holds the headers other targets include: `Pipeline.h`, the stage
+entry points and their artifacts, and `Syntax.h`, the tokens and AST. The
+implementation and its internal headers live in `Private/`.
+
 ## Build and run on Windows
 
 Prerequisites: CMake 3.20+, a C++17 compiler (the commands below use Visual
