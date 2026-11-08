@@ -1,0 +1,79 @@
+// Dimensions are written in index order: int [3][4] holds 3 rows of 4.
+// [N] dimensions are fixed and [] dimensions dynamic; they mix freely.
+// int [-][-] is a sparse grid with int coordinates from int.Min to int.Max:
+// only written cells are stored, and an unwritten cell reads as the default.
+// EXPECT: 12, 3, 4, 20, 1, 4, 6, 4, 1, 5, 3, 4, then ... / ### / ..., then 2.
+
+// Pascal's triangle: each row is one longer than the one before.
+int [][] Pascal(int height)
+{
+    int [][] rows
+    for int r = 0; r < height; r++
+    {
+        rows++
+        for int c = 0; c <= r; c++
+        {
+            if c == 0 || c == r
+                rows[r] += 1
+            else
+                rows[r] += rows[r - 1][c - 1] + rows[r - 1][c]
+        }
+    }
+    return rows
+}
+
+// One step of Conway's Game of Life inside a window of the infinite grid.
+int Neighbors(bool [-][-]& alive, int x, int y)
+{
+    int count = 0
+    for int dx = -1; dx <= 1; dx++
+        for int dy = -1; dy <= 1; dy++
+            if (dx != 0 || dy != 0) && alive[x + dx][y + dy]
+                count++
+    return count
+}
+
+Main()
+{
+    int [3][4] table
+    for int r = 0; r < 3; r++
+        for int c = 0; c < 4; c++
+            table[r][c] = (r + 1) * (c + 1)
+    Print(table[2][3])
+    Print(table.Len)
+    Print(table[0].Len)
+    Print(?table[3][0] + table[1][3] + table[2][1] + 6)   // row 3 is missing: 0
+
+    int [][] triangle = Pascal(5)
+    int [] last = (triangle--)
+    Print(last[0])
+    Print(last[1])
+    Print(last[2])
+    Print(last[3])
+    Print(last[4])
+    Print(triangle.Len + 1)
+    Print(triangle[3].Len - 1)
+    Print(triangle[3][1] + 1)
+
+    // A vertical blinker around the origin flips to horizontal.
+    bool [-][-] alive
+    alive[0][-1] = true
+    alive[0][0] = true
+    alive[0][1] = true
+    bool [-][-] next
+    for int y = -1; y <= 1; y++
+        for int x = -1; x <= 1; x++
+        {
+            int n = Neighbors(alive, x, y)
+            if n == 3 || (n == 2 && alive[x][y])
+                next[x][y] = true
+        }
+    for int y = -1; y <= 1; y++
+    {
+        string row = ""
+        for int x = -1; x <= 1; x++
+            row += next[x][y] ? "#" | "."
+        Print(row)
+    }
+    Print(alive.Len - 1)            // reading empty cells stored nothing
+}

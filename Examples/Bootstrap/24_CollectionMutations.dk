@@ -1,0 +1,36 @@
+// += adds, ++ adds a default element, -- removes from the end, -= [i]
+// removes one element, and Clear() removes everything. In parentheses,
+// adding gives the inserted index and removing gives the removed element.
+// EXPECT: 0, 1, 2, 3, write, 2, 1, 15, 0, 0, 1, 2, 0.
+Main()
+{
+    string [] history
+    Print((history += "open"))     // the index it was inserted at
+    Print((history += "edit"))
+    Print((history += "write"))
+    Print(history.Len)
+
+    // Undo removes the newest entry and gives it back.
+    string undone = (history--)
+    Print(undone)
+    Print(history.Len)
+
+    int [] scores = {5, 9, 1, 6}
+    scores -= [1]                   // later elements shift down
+    Print(scores[1])
+    int removed = (scores -= [0])
+    Print(removed + scores[0] + scores[1] + 3)
+
+    scores.Clear()
+    Print(scores.Len)
+    Print((scores += 4))           // a cleared array starts over at index 0
+
+    // p++ adds the next integer key with a default value.
+    int, string pair lines
+    lines++
+    lines++
+    lines[1] = "second"
+    Print(lines.LastKey)
+    Print((lines++))               // the new entry's position
+    Print(lines.Len - 3)
+}

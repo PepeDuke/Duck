@@ -49,6 +49,12 @@ bodies, and standalone scopes.
 `Examples/Bootstrap/16_CharsAndDates.dk` demonstrates `char`, `date`, `time`, and `datetime`.
 `Examples/Bootstrap/17_ByteWidthIntegers.dk` demonstrates `iN`/`uN` integers up to 512 bits.
 `Examples/Bootstrap/18_BigAndTiny.dk` demonstrates `big`/`ubig` and 69-digit `tiny` decimals.
+`Examples/Bootstrap/21_Arrays.dk` demonstrates fixed and dynamic arrays and literals.
+`Examples/Bootstrap/22_QueuesStacksPairs.dk` demonstrates a bracket checker, a round-robin queue, and pairs.
+`Examples/Bootstrap/23_BoundsChecks.dk` demonstrates `IsValid` and guarded `?a[i]` reads and writes.
+`Examples/Bootstrap/24_CollectionMutations.dk` demonstrates undo history, removal, `Clear()`, and mutation results.
+`Examples/Bootstrap/25_GridsAndTables.dk` demonstrates a table, Pascal's triangle, and a Game of Life step on a sparse grid.
+`Examples/Collections/01_ArrayMutation.dk`, `02_BoundsChecks.dk`, and `03_Maps.dk` now compile unchanged.
 Other tutorial files still demonstrate the larger language design.
 
 For another Clang location, configure with `-DDUCK_CLANG=<path-to-clang>`.

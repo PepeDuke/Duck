@@ -3149,6 +3149,23 @@ reject(enum_native "E : int #@{ A }\nextern \"C\" F(E e)\nMain() {}" "native par
 file(READ "${SOURCE}/Examples/Bootstrap/20_TypeLimits.dk" limits)
 run_program(type_limits_example "${limits}"
   "2147483647\n-2147483648\n255\n8388607\n340282366920938463463374607431768211455\n2147483647\n1\n")
+# Collection examples, each checked against its EXPECT comment.
+file(READ "${SOURCE}/Examples/Bootstrap/21_Arrays.dk" arrays_example)
+run_program(arrays_example "${arrays_example}" "5\n18\n3.6\n4\n9\n64\n3\nAda|Grace|\n3\n")
+file(READ "${SOURCE}/Examples/Bootstrap/22_QueuesStacksPairs.dk" queues_example)
+run_program(queues_example "${queues_example}" "1\n0\n0\n3\n1\n2\n3\n10\n7\n2\nBob\n")
+file(READ "${SOURCE}/Examples/Bootstrap/23_BoundsChecks.dk" bounds_example)
+run_program(bounds_example "${bounds_example}" "1\n0\n40\n0\n12\n0\n0\n|\n0\n1\n")
+file(READ "${SOURCE}/Examples/Bootstrap/24_CollectionMutations.dk" mutations_example)
+run_program(mutations_example "${mutations_example}" "0\n1\n2\n3\nwrite\n2\n1\n15\n0\n0\n1\n2\n0\n")
+file(READ "${SOURCE}/Examples/Bootstrap/25_GridsAndTables.dk" grids_example)
+run_program(grids_example "${grids_example}" "12\n3\n4\n20\n1\n4\n6\n4\n1\n5\n3\n4\n...\n###\n...\n2\n")
+file(READ "${SOURCE}/Examples/Collections/01_ArrayMutation.dk" array_mutation_design)
+run_program(array_mutation_design "${array_mutation_design}" "3\n9\n2\n")
+file(READ "${SOURCE}/Examples/Collections/02_BoundsChecks.dk" bounds_design)
+run_program(bounds_design "${bounds_design}" "10\n")
+file(READ "${SOURCE}/Examples/Collections/03_Maps.dk" maps_design)
+run_program(maps_design "${maps_design}" "Bob\nTom\n")
 run_program(type_limits "Main() {
   Print(int8.Min)
   Print(short.Max)

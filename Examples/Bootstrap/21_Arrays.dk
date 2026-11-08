@@ -1,0 +1,61 @@
+// Fixed arrays (T [N]) store their elements inline; dynamic arrays (T [])
+// grow on the heap. Both index from 0, and an index outside 0 <= i < Len traps.
+// EXPECT: 5, 18, 3.6, 4, 9, 64, 3, Ada|Grace|, 3.
+double Average(int [5]& scores)
+{
+    int total = 0
+    for long i = 0; i < scores.Len; i++
+    {
+        total += scores[i]
+    }
+    return (double)total / (double)scores.Len
+}
+
+// A dynamic array is move-only: take it by reference, or return a local.
+int [] Squares(int count)
+{
+    int [] result
+    for int i = 1; i <= count; i++
+    {
+        result += i * i
+    }
+    return result
+}
+
+Point
+{
+    int X
+    int Y = 1
+}
+
+Main()
+{
+    int [5] scores = {3, 7, 1, 4, 3}
+    Print(scores.Len)
+    scores[2] = 0                  // replace an element
+    scores[4] += 1                 // compound assignment on an element
+    int total = 0
+    for long i = 0; i < scores.Len; i++
+    {
+        total += scores[i]
+    }
+    Print(total)
+    Print(Average(scores))
+
+    int [] squares = Squares(8)
+    Print(squares[1])
+    Print(squares[2])
+    Print(squares[squares.Len - 1])
+
+    guesses : {5, 1, 2}            // inferred as int []
+    Print(guesses.Len)
+
+    string [3] names               // text elements start empty
+    names[0] = "Ada"
+    names[1] = "Grace"
+    Print(names[0] + "|" + names[1] + "|" + names[2])
+
+    Point [] path = {{X: 1}, {X: 4, Y: 5}}
+    path += {X: 9}                 // unnamed fields take their defaults
+    Print(path[2].Y + path[1].X - 2)
+}

@@ -1,0 +1,38 @@
+// IsValid(a[i]) checks an index (or a pair key) without reading it.
+// A leading ? guards an index: a guarded write is skipped when the element
+// is missing, right side and all, and a guarded read gives the element
+// type's default (0, false, "", ...).
+// EXPECT: 1, 0, 40, 0, 12, 0, 0, |, 0, 1.
+int Lookups(int& count)
+{
+    count++
+    return 7
+}
+
+Main()
+{
+    int [] levels = {10, 20, 30}
+    Print(IsValid(levels[2]))
+    Print(IsValid(levels[3]))
+
+    ?levels[1] += 20              // present: becomes 40
+    ?levels[9] = 99               // missing: skipped
+    Print(levels[1])
+    Print(?levels[9])             // missing: the default of int
+
+    string, int pair ages = {"Ada" : 11}
+    ?ages["Ada"]++
+    Print(ages["Ada"])
+    Print(?ages["Zed"])
+
+    int calls = 0
+    ?ages["Zed"] = Lookups(calls) // the right side is not evaluated
+    Print(calls)
+
+    string [2] words
+    Print(words[0] + "|" + ?words[5])
+
+    // The index is evaluated once: Lookups runs one more time here.
+    Print(IsValid(levels[Lookups(calls)]))
+    Print(calls)
+}

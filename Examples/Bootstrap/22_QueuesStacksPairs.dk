@@ -1,0 +1,67 @@
+// A queue is first in, first out; a stack is last in, first out; a pair maps
+// keys to values in insertion order.
+// EXPECT: 1, 0, 0, 3, 1, 2, 3, 10, 7, 2, Bob.
+
+// Checks that every bracket closes the most recent one still open.
+bool Balanced(string text)
+{
+    uint32 stack open
+    for long i = 0; i < Length(text); i++
+    {
+        uint32 unit = CodeUnitAt(text, i)
+        if unit == 40 || unit == 91 || unit == 123      // ( [ {
+            open += unit
+        else if unit == 41 || unit == 93 || unit == 125 // ) ] }
+        {
+            if open.Len == 0
+                return false
+            uint32 expected = 40                          // the opener this closer needs
+            if unit == 93
+                expected = 91
+            else if unit == 125
+                expected = 123
+            if (open--) != expected                       // pop the most recent opener
+                return false
+        }
+    }
+    return open.Len == 0
+}
+
+Main()
+{
+    Print(Balanced("f(a[1], {b})"))
+    Print(Balanced("(]"))
+    Print(Balanced("(("))
+
+    // Round-robin: each job runs one step, then waits at the back.
+    int queue jobs = {3, 1, 2}        // steps left per job
+    int finished = 0
+    while jobs.Len > 0
+    {
+        int steps = (jobs--) - 1
+        if steps > 0
+            jobs += steps
+        else
+            finished++
+    }
+    Print(finished)
+
+    int stack undo
+    undo += 1
+    undo += 2
+    undo += 3
+    Print(undo.Len - 2)
+    Print((undo--) - 1)
+    Print(undo.Top + 1)
+
+    string, int pair stock = {"apple" : 4, "pear" : 6}
+    stock += "plum" : 3
+    stock["apple"] += 6               // write the value of a present key
+    Print(stock["apple"])
+    stock -= ["pear"]
+    Print(stock["apple"] - stock["plum"])
+    Print(stock.Len)
+
+    string pair roles = {admin: "Bob", guest: "Ann"}    // keyed by name
+    Print(roles["admin"])              // outside a literal, quote the key
+}
