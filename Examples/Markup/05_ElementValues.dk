@@ -1,0 +1,36 @@
+// EXPECT: hello, 42, then a "quoted" word.
+// PITFALL: a literal gives its element a value field of the literal's type.
+// One container cannot hold a string value in one place and an int in another.
+Text
+{
+}
+
+Count
+{
+}
+
+Quote
+{
+}
+
+Panel
+{
+    this{
+        <Text>"hello"</Text>
+        <Count>42</Count>
+        <Quote>"a \"quoted\" word"</Quote>
+    }
+
+    Show()
+    {
+        Print(this.Text.value)
+        Print(this.Count.value)
+        Print(this.Quote.value)
+    }
+}
+
+Main()
+{
+    Panel panel()
+    panel.Show()
+}

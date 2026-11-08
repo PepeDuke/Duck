@@ -1,0 +1,30 @@
+// EXPECT: 2, 0, then 0.
+// PITFALL: scoped values do not survive their scope. Each start begins again
+// from the type's default, including statics and dynamic collections.
+PlayerManager
+#{
+    [@Play]
+    int [] Scores
+
+    [@Play]
+    int Rounds
+
+    Record(int score)
+    {
+        Scores += score
+        Rounds += 1
+    }
+}
+
+Main()
+{
+    @start Play
+    PlayerManager.Record(40)
+    PlayerManager.Record(2)
+    Print(PlayerManager.Scores.Len)
+    @end Play
+
+    @start Play
+    Print(PlayerManager.Scores.Len)
+    Print(PlayerManager.Rounds)
+}

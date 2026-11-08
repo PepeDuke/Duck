@@ -18,6 +18,9 @@ std::string constant(const std::string &symbol, const std::string &value) {
 // no entry path with the program. Arguments starting with '-' are options; any
 // other argument is a filter, and a test runs when its name contains a filter.
 //
+// --timing adds a line `TIME <nanoseconds> <name>` after each test's result,
+// measured around the test body on a monotonic clock.
+//
 // Exit status: 0 when every selected test passed, 1 when any failed, and 2 for
 // bad usage or filters that select nothing. A trapping test ends the process
 // with the platform's own status; its RUN line is already flushed.
@@ -29,9 +32,53 @@ std::string testRunnerIR(const std::vector<std::pair<std::string, std::string>> 
                                                            {"strstr", "declare ptr @strstr(ptr, ptr)\n"}};
   for (const auto &[symbol, declaration] : imports)
     if (!nativeSymbols.count(symbol)) ir += declaration;
+  // The compiler emits for its own host, so the host picks the clock.
+#ifdef _WIN32
+  const std::pair<const char *, const char *> clocks[] = {
+      {"QueryPerformanceCounter", "declare i32 @QueryPerformanceCounter(ptr)\n"},
+      {"QueryPerformanceFrequency", "declare i32 @QueryPerformanceFrequency(ptr)\n"}};
+  for (const auto &[symbol, declaration] : clocks)
+    if (!nativeSymbols.count(symbol)) ir += declaration;
+  ir += R"IR(
+define internal i64 @duck$test.now() {
+entry:
+  %ticks = alloca i64
+  %rate = alloca i64
+  call i32 @QueryPerformanceCounter(ptr %ticks)
+  call i32 @QueryPerformanceFrequency(ptr %rate)
+  %count = load i64, ptr %ticks
+  %frequency = load i64, ptr %rate
+  %seconds = sdiv i64 %count, %frequency
+  %rest = srem i64 %count, %frequency
+  %whole = mul i64 %seconds, 1000000000
+  %scaled = mul i64 %rest, 1000000000
+  %part = sdiv i64 %scaled, %frequency
+  %nanos = add i64 %whole, %part
+  ret i64 %nanos
+}
+)IR";
+#else
+  if (!nativeSymbols.count("clock_gettime")) ir += "declare i32 @clock_gettime(i32, ptr)\n";
+  ir += R"IR(
+define internal i64 @duck$test.now() {
+entry:
+  %time = alloca { i64, i64 }
+  call i32 @clock_gettime(i32 1, ptr %time)
+  %secondsSlot = getelementptr { i64, i64 }, ptr %time, i32 0, i32 0
+  %nanosSlot = getelementptr { i64, i64 }, ptr %time, i32 0, i32 1
+  %seconds = load i64, ptr %secondsSlot
+  %rest = load i64, ptr %nanosSlot
+  %whole = mul i64 %seconds, 1000000000
+  %nanos = add i64 %whole, %rest
+  ret i64 %nanos
+}
+)IR";
+#endif
   ir += "@duck$test.failed = internal global i1 false\n";
   ir += constant("@duck$test.list", "--list");
-  ir += constant("@duck$test.usage", "usage: <test program> [--list] [name-filter ...]\n");
+  ir += constant("@duck$test.timing", "--timing");
+  ir += constant("@duck$test.time", "TIME %lld %s\n");
+  ir += constant("@duck$test.usage", "usage: <test program> [--list | --timing] [name-filter ...]\n");
   ir += constant("@duck$test.none", "no test matches the filter\n");
   ir += constant("@duck$test.line", "%s\n");
   ir += constant("@duck$test.run", "RUN  %s\n");
@@ -54,8 +101,8 @@ define internal i32 @duck$test.mode(i32 %argc, ptr %argv) {
 entry:
   br label %next
 next:
-  %i = phi i32 [ 1, %entry ], [ %following, %filter ], [ %following, %listing ]
-  %mode = phi i32 [ 0, %entry ], [ %mode, %filter ], [ 1, %listing ]
+  %i = phi i32 [ 1, %entry ], [ %following, %filter ], [ %following, %listing ], [ %following, %timed ]
+  %mode = phi i32 [ 0, %entry ], [ %mode, %filter ], [ 1, %listing ], [ 3, %timed ]
   %more = icmp slt i32 %i, %argc
   br i1 %more, label %read, label %done
 read:
@@ -70,8 +117,14 @@ filter:
 option:
   %compared = call i32 @strcmp(ptr %argument, ptr @duck$test.list)
   %isList = icmp eq i32 %compared, 0
-  br i1 %isList, label %listing, label %bad
+  br i1 %isList, label %listing, label %timingOption
+timingOption:
+  %comparedTiming = call i32 @strcmp(ptr %argument, ptr @duck$test.timing)
+  %isTiming = icmp eq i32 %comparedTiming, 0
+  br i1 %isTiming, label %timed, label %bad
 listing:
+  br label %next
+timed:
   br label %next
 bad:
   ret i32 2
@@ -125,6 +178,7 @@ usage:
   ret i32 2
 start:
   %listing = icmp eq i32 %mode, 1
+  %timing = icmp eq i32 %mode, 3
   br label %loop
 loop:
   %current = load i32, ptr %index
@@ -149,7 +203,10 @@ run:
   store i1 false, ptr @duck$test.failed
   %bodySlot = getelementptr TABLE, ptr @duck$test.bodies, i32 0, i32 %current
   %test = load ptr, ptr %bodySlot
+  %started = call i64 @duck$test.now()
   call void %test()
+  %stopped = call i64 @duck$test.now()
+  %elapsed = sub i64 %stopped, %started
   %didFail = load i1, ptr @duck$test.failed
   br i1 %didFail, label %onFail, label %onPass
 onFail:
@@ -157,12 +214,17 @@ onFail:
   %failedCount = load i32, ptr %failed
   %failedNext = add i32 %failedCount, 1
   store i32 %failedNext, ptr %failed
-  br label %advance
+  br label %afterRun
 onPass:
   call i32 (ptr, ...) @printf(ptr @duck$test.pass, ptr %name)
   %passedCount = load i32, ptr %passed
   %passedNext = add i32 %passedCount, 1
   store i32 %passedNext, ptr %passed
+  br label %afterRun
+afterRun:
+  br i1 %timing, label %reportTime, label %advance
+reportTime:
+  call i32 (ptr, ...) @printf(ptr @duck$test.time, i64 %elapsed, ptr %name)
   br label %advance
 advance:
   %following = add i32 %current, 1
@@ -171,7 +233,8 @@ advance:
 finish:
   %total = load i32, ptr %selected
   %none = icmp eq i32 %total, 0
-  %optionCount = select i1 %listing, i32 2, i32 1
+  %hasOption = icmp ne i32 %mode, 0
+  %optionCount = select i1 %hasOption, i32 2, i32 1
   %hasFilter = icmp sgt i32 %argc, %optionCount
   %unmatched = and i1 %none, %hasFilter
   br i1 %unmatched, label %noMatch, label %report

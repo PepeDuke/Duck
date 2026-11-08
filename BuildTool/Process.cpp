@@ -108,6 +108,90 @@ int execute(const std::vector<std::string>& arguments) {
     return static_cast<int>(status);
 }
 
+int capture(const std::vector<std::string>& arguments, std::string& output) {
+    std::cout.flush();
+    output.clear();
+    char buffer[4096];
+#ifdef _WIN32
+    SECURITY_ATTRIBUTES inherit{};
+    inherit.nLength = sizeof(inherit);
+    inherit.bInheritHandle = TRUE;
+    HANDLE readEnd = nullptr, writeEnd = nullptr;
+    if (!CreatePipe(&readEnd, &writeEnd, &inherit, 0) || !SetHandleInformation(readEnd, HANDLE_FLAG_INHERIT, 0))
+        throw std::runtime_error("cannot create pipe for: " + arguments.front());
+    std::wstring command;
+    for (const auto& argument : arguments) {
+        if (!command.empty()) command += L' ';
+        command += quote(fs::u8path(argument).wstring());
+    }
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdOutput = writeEnd;
+    startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION process{};
+    const auto application = fs::u8path(arguments.front()).wstring();
+    if (!CreateProcessW(application.c_str(), command.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &startup, &process)) {
+        const auto error = GetLastError();
+        CloseHandle(readEnd);
+        CloseHandle(writeEnd);
+        throw std::runtime_error("cannot launch tool: " + arguments.front() + " (Windows error " + std::to_string(error) + ")");
+    }
+    CloseHandle(writeEnd);
+    CloseHandle(process.hThread);
+    DWORD count = 0;
+    while (ReadFile(readEnd, buffer, sizeof(buffer), &count, nullptr) && count) output.append(buffer, count);
+    CloseHandle(readEnd);
+    DWORD status = 1;
+    bool finished = WaitForSingleObject(process.hProcess, INFINITE) == WAIT_OBJECT_0 &&
+        GetExitCodeProcess(process.hProcess, &status);
+    CloseHandle(process.hProcess);
+    if (!finished) throw std::runtime_error("cannot wait for tool: " + arguments.front());
+    return static_cast<int>(status);
+#else
+    int ends[2];
+    if (pipe(ends) != 0) throw std::runtime_error("cannot create pipe for: " + arguments.front());
+    std::vector<char*> argv;
+    for (const auto& argument : arguments) argv.push_back(const_cast<char*>(argument.c_str()));
+    argv.push_back(nullptr);
+    auto child = fork();
+    if (child < 0) throw std::runtime_error("cannot launch tool: " + std::string(std::strerror(errno)));
+    if (child == 0) {
+        dup2(ends[1], 1);
+        close(ends[0]);
+        close(ends[1]);
+        execv(argv[0], argv.data());
+        _exit(127);
+    }
+    close(ends[1]);
+    for (ssize_t count; (count = read(ends[0], buffer, sizeof(buffer))) != 0;) {
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        output.append(buffer, static_cast<size_t>(count));
+    }
+    close(ends[0]);
+    int waitStatus = 0;
+    while (waitpid(child, &waitStatus, 0) < 0) {
+        if (errno != EINTR) throw std::runtime_error("cannot wait for tool");
+    }
+    return WIFEXITED(waitStatus) ? WEXITSTATUS(waitStatus) : 128 + WTERMSIG(waitStatus);
+#endif
+}
+
+void setEnvironment(const std::string& name, const std::string& value) {
+#ifdef _WIN32
+    const auto wide = fs::u8path(name).wstring();
+    if (value.empty()) SetEnvironmentVariableW(wide.c_str(), nullptr);
+    else SetEnvironmentVariableW(wide.c_str(), fs::u8path(value).c_str());
+#else
+    if (value.empty()) unsetenv(name.c_str());
+    else setenv(name.c_str(), value.c_str(), 1);
+#endif
+}
+
 void run(const std::vector<std::string>& arguments, bool echo) {
     if (echo) {
         for (const auto& argument : arguments) std::cout << '"' << argument << "\" ";

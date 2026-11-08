@@ -187,6 +187,8 @@ struct StaticInfo {
   size_t order = 0;                  // Declaration order within its module.
   bool runtime = false;              // Initialized by a generated $eval before Main.
   Usings usings;                     // Visible where the field was declared.
+  std::string scope;                 // A `[@Name]` field's scope, with its declared type.
+  Type scopedType = Type::Void;
 };
 struct Symbols : std::map<std::string, Signature> {
   std::map<std::string, Record> records;
@@ -289,6 +291,7 @@ struct Symbols : std::map<std::string, Signature> {
       // Elements are plain values or reference-counted text and big
       // integers; keys must also compare by value.
       auto element = [&](const Type &t) {
+        if (elementValue(t)) return markupValue(type);
         if (trackedAlias(t)) return !gridValue(type);
         return !t.depth && (numeric(t) || t == Type::Bool || t == Type::Char || enumValue(t) ||
                             managedValue(t) || decimalValue(t) || calendarValue(t));
@@ -447,6 +450,27 @@ struct FunctionAnalysis {
     std::string signature;
   };
   std::map<const Expr *, DuckCall> duckCalls;
+  // `x.Label`: the child type's qualified name and where x stores children.
+  struct MarkupLookup {
+    std::string child;
+    std::vector<size_t> holder;
+  };
+  std::map<const Expr *, MarkupLookup> markupLookups;
+  std::set<const Expr *> markupIndexed;                      // `x.Label[i]` or `x.GetChildren()[i]`.
+  std::map<const Expr *, std::vector<size_t>> markupChildren; // `x.GetChildren()`: where x stores them.
+  std::set<const Expr *> elementNames;                       // `element.GetName()`.
+  std::set<const Stmt *> markupSplices;                      // Content that is markup rather than a value.
+  // Reads and writes of variables in a named scope, and their declared types.
+  struct ScopedPlace {
+    std::string scope;
+    Type type;
+  };
+  std::map<const Expr *, ScopedPlace> scopedPlaces;
+  bool scopeEffects = false; // Starts, ends, queries, or loops inside a scope.
+  bool endsScope = false;    // Contains @end.
+  // Functions a call to which can leave through an @end, set per module.
+  std::shared_ptr<const std::set<std::string>> unwinders;
+  bool unwindIndirect = false; // Calls through values may also leave that way.
   // Calls through a func value. A field callee names its owner and field
   // indices, so a member lambda receives the object it was called on.
   struct IndirectCall {
@@ -513,6 +537,8 @@ struct FunctionIR {
   bool usesCollectionRuntime = false;
   bool usesFuncRuntime = false;
   bool usesMetaRuntime = false;
+  bool usesMarkupRuntime = false;
+  bool usesScopeRuntime = false;
   // Containers whose heap cleanup functions this function's owners use.
   std::set<std::string> cleanups;
   // Containers whose @duck$destroy.<container> routines this function calls.
@@ -524,6 +550,7 @@ struct FunctionIR {
   std::map<std::string, std::string> helpers;
   // Containers whose type descriptors this function reads.
   std::set<std::string> types;
+  std::set<std::string> scopeNames; // Named scopes this function refers to.
 };
 FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
                          const FunctionAnalysis &analysis);
@@ -547,6 +574,8 @@ std::string decimalRuntimeIR();
 // Closures, shared boxes, and the descriptor lookup behind duck calls.
 std::string funcRuntimeIR();
 std::string metaRuntimeIR();
+std::string markupRuntimeIR();
+std::string scopeRuntimeIR(const std::set<std::string> &nativeSymbols);
 std::string taskRuntimeIR(const std::set<std::string> &nativeSymbols);
 // The native entry of a test build: runs the tests given as (name, symbol),
 // honoring --list and name filters from the command line.

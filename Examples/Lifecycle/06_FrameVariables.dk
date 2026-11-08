@@ -1,0 +1,29 @@
+// EXPECT: 1, 1, 1, then inactive.
+// PITFALL: a marked loop starts its scope for each iteration, so frame
+// variables are new every time and the loop condition runs outside the scope.
+Frame
+{
+    [@Tick]
+    int Calls
+
+    Update()
+    {
+        Calls += 1
+        Print(Calls)
+    }
+}
+
+Main()
+{
+    Frame frame
+    [@Tick]
+    for i : 0...2
+    {
+        frame.Update()
+    }
+
+    if @Tick
+        Print("active")
+    else
+        Print("inactive")
+}

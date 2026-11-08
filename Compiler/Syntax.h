@@ -1,4 +1,5 @@
 #pragma once
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -150,6 +151,25 @@ inline bool pairValue(const Type &t) { return !t.depth && t.base == Type::Pair &
 // An enum value is stored as its member's declaration index. Printing uses the
 // member name; operators, conversions, and concatenation use its underlying value.
 inline bool enumValue(const Type &t) { return !t.depth && t.base == Type::Enum; }
+// A markup value holds a tree's top-level elements: a queue of element nodes.
+// Being a collection, it is a move-only handle that is null while empty.
+inline Type elementType() {
+  Type t = Type::Pointer;
+  t.record = "$node";
+  return t;
+}
+inline Type markupType() {
+  Type t = Type::collection(Type::Queue, elementType());
+  t.extent = 1;
+  return t;
+}
+inline bool markupValue(const Type &t) { return !t.depth && t.base == Type::Queue && t.extent == 1; }
+// A borrowed view of one element of a markup tree, from GetChildren().
+inline bool elementValue(const Type &t) { return t.depth == 1 && t.base == Type::Void && t.record == "$node"; }
+// A variable in a named lifetime scope is stored as a slot of two words, its
+// arena address and generation. The slot has no cleanup of its own: the scope
+// owns the value, so copying or destroying a container never touches it.
+inline Type scopeSlotType() { return Type::array(Type::Long, 2); }
 inline bool nativeScalar(const Type &t) {
   return t.depth || t == Type::Int || t == Type::UInt32 || t == Type::Long ||
          t == Type::UInt64 || t == Type::Float || t == Type::Double;
@@ -303,6 +323,10 @@ struct Parameter {
   // A func field whose default is a lambda: its body runs against the object
   // it is called on, so it is called through a receiver and never read.
   bool memberLambda = false;
+  // `[@Play]`: the scope holding this field, and its declared type. `type`
+  // is then the slot stored in the container.
+  std::string scope;
+  Type scopedType = Type::Void;
 };
 // Instance methods live in their own namespace, so a chained static block
 // can declare a function with the same name: Meter.Read is static and
@@ -345,6 +369,10 @@ struct Record {
   std::vector<Parameter> fields;
   std::vector<Token> parents; // In priority order, leftmost first.
   bool imported = false;      // Defined by an imported module.
+  // Direct children of this container's `this{ }` block, by type. When
+  // closed, nothing else can add children, so lookups are checked statically.
+  std::map<std::string, int> markupChildren;
+  bool markupClosed = false;
 };
 struct EnumMember {
   Token name;
@@ -367,6 +395,8 @@ struct StaticField {
   bool protectedAccess = false;
   std::unique_ptr<Expr> initializer; // Null for zero initialization.
   Usings usings;
+  std::string scope; // As for a Parameter's scope: `type` is then its slot.
+  Type scopedType = Type::Void;
 };
 struct Program : std::vector<Function> {
   std::vector<Record> records;
@@ -376,5 +406,13 @@ struct Program : std::vector<Function> {
   // T{ } tests. They stay out of the program unless enableTests moves them in,
   // so an ordinary build compiles exactly what it would without them.
   std::vector<Function> tests;
+  // Containers used as markup tags that hold children, which need child
+  // storage, and those holding a literal value, which need a `value` field.
+  std::vector<Token> markupHosts;
+  struct MarkupValue {
+    Token tag;
+    Type type;
+  };
+  std::vector<MarkupValue> markupValues;
 };
 } // namespace duck

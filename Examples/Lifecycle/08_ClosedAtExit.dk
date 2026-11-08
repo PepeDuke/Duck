@@ -1,0 +1,21 @@
+// EXPECT: end of Main, then released.
+// PITFALL: a scope still active when the program ends closes then, so its
+// cleanup runs after the last line of Main.
+Resource
+{
+    int Id
+    ~Resource() { Print("released") }
+}
+
+Holder
+#{
+    [@Play]
+    Resource Held
+}
+
+Main()
+{
+    @start Play
+    Holder.Held.Id = 1
+    Print("end of Main")
+}

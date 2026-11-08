@@ -1,6 +1,7 @@
 #include "Pipeline.h"
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -25,6 +26,11 @@ class Parser {
   bool returnsOwner = false;
   // The stable name of the test whose body is being parsed, or empty.
   std::string currentTest;
+  Program *output = nullptr; // The unit being parsed, for what markup records on it.
+  unsigned markupLocals = 0; // Numbers the hidden locals of generated markup code.
+  int lambdaDepth = 0;
+  bool returnsMarkup = false; // The function being parsed returns markup.
+  bool expectMarkup = false;  // The next expression has a declared markup type.
   const Token &peek() const { return tokens[pos]; }
   bool at(const std::string &s) const {
     return !peek().string && peek().text == s;
@@ -469,7 +475,14 @@ class Parser {
            at("float") || at("double") || at("bool") || at("void") || at("cstring") ||
            at("string") || at("name") || at("char") || at("date") ||
            at("time") || at("datetime") || at("big") || at("ubig") || at("tiny") ||
-           at("utiny") || at("func");
+           at("utiny") || at("func") || markupKeyword();
+  }
+  // `markup` is a type only where one can be: it is still a usable name.
+  bool markupKeyword() const {
+    if (!at("markup") || containerNames.count("markup")) return false;
+    const auto &next = tokens.at(pos + 1);
+    return !next.string && !next.text.empty() &&
+           (std::isalpha(static_cast<unsigned char>(next.text[0])) || next.text[0] == '_');
   }
   // char(...), date(...), time(...), and datetime(...) construct validated values.
   bool constructorType() const {
@@ -607,6 +620,10 @@ class Parser {
       return Type::Int;
     if (accept("bool"))
       return Type::Bool;
+    if (markupKeyword()) {
+      pop();
+      return markupType();
+    }
     if (accept("string")) return Type::String;
     if (accept("name")) return Type::Name;
     if (accept("char")) return Type::Char;
@@ -719,7 +736,11 @@ class Parser {
     returnsOwner = false;
     // An assertion leaves its test, and a lambda body cannot do that.
     const auto outerTest = std::exchange(currentTest, "");
+    ++lambdaDepth;
+    const bool outerMarkup = std::exchange(returnsMarkup, markupValue(result));
     f.body = block();
+    returnsMarkup = outerMarkup;
+    --lambdaDepth;
     currentTest = outerTest;
     hygiene.pop_back();
     if (returnsOwner) fail(name, "a lambda cannot return ownership with return ::");
@@ -758,6 +779,7 @@ class Parser {
     return 0;
   }
   std::unique_ptr<Expr> expression(int minimum = 1, bool stopAtPipe = false) {
+    const bool markupExpected = std::exchange(expectMarkup, false);
     if (auto use = macroUse(tokens, pos)) expandValueMacro(*use);
     auto e = std::make_unique<Expr>();
     e->token = peek();
@@ -789,10 +811,20 @@ class Parser {
       // as the element type's default. `?e..Foo()` skips a missing method.
       e->kind = "guard";
       e->args.push_back(expression(11, stopAtPipe));
-      if (e->args[0]->kind != "index" && e->args[0]->kind != "duckCall" &&
-          !(e->args[0]->kind == "call" && e->args[0]->receiver))
+      if (e->args[0]->kind != "index" && e->args[0]->kind != "duckCall" && e->args[0]->kind != "name" &&
+          e->args[0]->kind != "." && !(e->args[0]->kind == "call" && e->args[0]->receiver))
         fail(e->token, "'?' guards an index such as ?a[i], a method call such as ?p.Foo(), "
-                       "or a duck call such as ?e..Foo()");
+                       "a duck call such as ?e..Foo(), or a scoped variable");
+    } else if (at("@") && word(tokens.at(pos + 1)) && !punctuation(tokens.at(pos + 2), "(") &&
+               !punctuation(tokens.at(pos + 2), "*") && !punctuation(tokens.at(pos + 2), "[") &&
+               !punctuation(tokens.at(pos + 2), ".")) {
+      // `@Name` asks whether that scope is active. A lambda's result type is
+      // always followed by its parameter list.
+      pop();
+      e->kind = "scopeActive";
+      e->token = identifier();
+    } else if (at("{") && (markupExpected || markupAhead())) {
+      markupLiteral(*e, nullptr);
     } else if (accept("@")) {
       lambdaExpression(*e);
     } else if (accept("(")) {
@@ -1028,6 +1060,237 @@ class Parser {
     expect("}");
     return result;
   }
+  using Statements = std::vector<std::unique_ptr<Stmt>>;
+  // Builds the expression a piece of generated markup code reads or stores to.
+  using Place = std::function<std::unique_ptr<Expr>(const Token &)>;
+  static std::unique_ptr<Expr> localName(const Token &at, const std::string &local) {
+    auto e = std::make_unique<Expr>();
+    e->token = at;
+    e->token.text = local;
+    e->token.string = e->token.character = false;
+    e->kind = "name";
+    return e;
+  }
+  static std::unique_ptr<Expr> memberOf(std::unique_ptr<Expr> base, const Token &member) {
+    auto e = std::make_unique<Expr>();
+    e->token = member;
+    e->kind = ".";
+    e->args.push_back(std::move(base));
+    return e;
+  }
+  static std::unique_ptr<Stmt> assignment(std::unique_ptr<Expr> target, std::unique_ptr<Expr> value, const Token &at) {
+    auto s = std::make_unique<Stmt>();
+    s->token = at;
+    s->kind = "assign";
+    s->target = std::move(target);
+    s->expr = std::move(value);
+    return s;
+  }
+  // `{` that opens a markup literal: a block's first content is a tag.
+  bool markupAhead() const {
+    if (!at("{")) return false;
+    size_t k = pos + 1;
+    while (k < tokens.size() && punctuation(tokens[k], "\n")) ++k;
+    return k + 1 < tokens.size() && punctuation(tokens[k], "<") && word(tokens[k + 1]);
+  }
+  bool closingTagAhead() const { return at("<") && punctuation(tokens.at(pos + 1), "/"); }
+  // A value written directly inside an element, and the `value` field it needs.
+  bool literalContent(Type &type) {
+    const auto &t = peek();
+    if (t.string) {
+      type = t.character ? Type(Type::Char) : Type(Type::String);
+      return true;
+    }
+    if (at("true") || at("false")) {
+      type = Type::Bool;
+      return true;
+    }
+    const auto &digit = at("-") ? tokens.at(pos + 1) : t;
+    if (digit.string || digit.text.empty() || !std::isdigit(static_cast<unsigned char>(digit.text[0]))) return false;
+    type = integerLiteralBase(digit.text) != 10 || digit.text.find_first_of(".eE") == std::string::npos
+               ? Type(Type::Int) : Type(Type::Double);
+    return true;
+  }
+  // The content of `{ ... }` or `<Tag> ... </Tag>`, up to its closing token.
+  // Returns whether any child elements or spliced markup were written.
+  bool markupItems(Statements &out, const Place &holder, const std::string &owner, const Token &ownerToken,
+                   const Place &self, Record *root) {
+    bool children = false;
+    for (lines(); !at("}") && !closingTagAhead(); lines()) {
+      if (at("<eof>")) fail(peek(), "unterminated markup: expected '}' or a closing tag");
+      if (at("<")) {
+        markupElement(out, holder, root);
+        children = true;
+        continue;
+      }
+      Type literal;
+      if (literalContent(literal)) {
+        if (owner.empty()) fail(peek(), "a literal value belongs inside an element");
+        const auto at = peek();
+        auto value = expression(11);
+        Token field = at;
+        field.text = "value";
+        field.string = field.character = false;
+        out.push_back(assignment(memberOf(self(at), field), std::move(value), at));
+        Token tag = ownerToken;
+        tag.text = owner;
+        output->markupValues.push_back({tag, literal});
+        continue;
+      }
+      // Markup splices in; any other value is this element's `value`. Which
+      // one it is depends on the expression's type, known to semantic analysis.
+      const auto at = peek();
+      auto value = expression(11);
+      auto splice = std::make_unique<Stmt>();
+      splice->token = at;
+      splice->kind = "markupSplice";
+      splice->target = holder(at);
+      Token field = at;
+      field.text = "value";
+      field.string = field.character = false;
+      splice->alternate.push_back(assignment(owner.empty() ? nullptr : memberOf(self(at), field), std::move(value), at));
+      out.push_back(std::move(splice));
+      children = true;
+      if (root) root->markupClosed = false;
+    }
+    return children;
+  }
+  void closingTag(const std::string &tag, const std::string &written) {
+    expect("<");
+    expect("/");
+    std::string closing;
+    const auto closingAt = peek();
+    const auto length = typePath(pos, &closing);
+    if (!length || closing != tag)
+      fail(closingAt, "expected closing tag </" + written + ">");
+    pos += length;
+    expect(">");
+  }
+  // `Name=value` pairs through the end of a tag. Values stop at any operator,
+  // so `/>` is never read as a division: parenthesize an expression.
+  void markupAttributes(Statements &out, const Place &self) {
+    for (lines(); !at("/") && !at(">"); lines()) {
+      const auto name = identifier();
+      expect("=");
+      auto value = expression(11);
+      out.push_back(assignment(memberOf(self(name), name), std::move(value), name));
+    }
+  }
+  void markupElement(Statements &out, const Place &holder, Record *root) {
+    const auto open = pop();
+    std::string tag;
+    const auto length = typePath(pos, &tag);
+    if (!length) fail(peek(), "unknown component '" + peek().text + "'; a tag names a container type");
+    const auto written = peek().text;
+    auto tagToken = peek();
+    pos += length;
+    const auto local = "$element" + std::to_string(markupLocals++);
+    auto group = std::make_unique<Stmt>();
+    group->token = open;
+    group->kind = "block";
+    auto own = std::make_unique<Stmt>();
+    own->token = tagToken;
+    own->token.text = local;
+    own->kind = "own";
+    own->name = local;
+    Type record = Type::Record;
+    record.record = tag;
+    own->type = record.pointerTo();
+    group->body.push_back(std::move(own));
+    const Place self = [local](const Token &at) { return localName(at, local); };
+    markupAttributes(group->body, self);
+    if (accept("/")) expect(">");
+    else {
+      expect(">");
+      Token field = tagToken;
+      field.text = "$children";
+      const Place children = [local, field](const Token &at) { return memberOf(localName(at, local), field); };
+      tagToken.text = tag;
+      if (markupItems(group->body, children, tag, tagToken, self, nullptr)) output->markupHosts.push_back(tagToken);
+      closingTag(tag, written);
+    }
+    auto add = std::make_unique<Stmt>();
+    add->token = open;
+    add->kind = "markupAdd";
+    add->target = holder(open);
+    add->expr = localName(open, local);
+    group->body.push_back(std::move(add));
+    out.push_back(std::move(group));
+    if (root) ++root->markupChildren[tag];
+  }
+  // A `{ ... }` markup literal: evaluates to a new markup value. For a
+  // container's `this{ }` block, root collects what the block declares.
+  void markupLiteral(Expr &e, Record *root, const std::string &bare = "", const std::string &tag = "") {
+    const auto start = peek();
+    e.kind = "macroValue";
+    e.token = start;
+    const auto local = "$markup" + std::to_string(markupLocals++);
+    auto let = std::make_unique<Stmt>();
+    let->token = start;
+    let->token.text = local;
+    let->kind = "let";
+    let->name = local;
+    let->type = markupType();
+    e.bindings.push_back(std::move(let));
+    const Place holder = [local](const Token &at) { return localName(at, local); };
+    expect("{");
+    lines();
+    Token receiver = start;
+    receiver.text = "this";
+    const Place self = [](const Token &at) { return localName(at, "this"); };
+    // A block's root may be written out; it is always the container itself.
+    if (root && at("<") && tokens.at(pos + 1).text == bare && !punctuation(tokens.at(pos + 2), ".")) {
+      pop();
+      const auto rootName = pop();
+      markupAttributes(e.bindings, self);
+      if (accept("/")) expect(">");
+      else {
+        expect(">");
+        markupItems(e.bindings, holder, tag, rootName, self, root);
+        closingTag(tag, bare);
+      }
+      lines();
+    } else
+      markupItems(e.bindings, holder, tag, receiver, self, root);
+    expect("}");
+    auto take = std::make_unique<Expr>();
+    take->token = start;
+    take->token.text = local;
+    take->kind = "markupTake";
+    e.args.push_back(std::move(take));
+  }
+  // `this{ ... }` in an instance body: children built with each instance, by
+  // a generated method called from the construction of a hidden field.
+  void markupBlock(Program &program, Record &record, std::set<std::string> &members, const std::string &bare) {
+    auto name = pop();
+    if (!members.insert("$markup").second) fail(name, "container '" + record.name.text + "' already has a this{ } block");
+    Function f{name, markupType(), {}, {}, true, {}};
+    f.name.text = methodKey(record.name.text, "$markup");
+    f.usings = usings;
+    f.protectedAccess = true;
+    Token self = name;
+    self.text = "this";
+    Type type = Type::Record;
+    type.record = record.name.text;
+    f.params.push_back({self, type, true});
+    record.markupClosed = true;
+    auto result = std::make_unique<Stmt>();
+    result->kind = "return";
+    result->token = peek();
+    result->expr = std::make_unique<Expr>();
+    markupLiteral(*result->expr, &record, bare, record.name.text);
+    f.body.push_back(std::move(result));
+    program.push_back(std::move(f));
+    auto call = std::make_unique<Expr>();
+    call->kind = "call";
+    call->token = name;
+    call->token.text = "$self.$markup";
+    call->receiver = localName(name, "$self");
+    Token field = name;
+    field.text = "$children";
+    record.fields.push_back({field, markupType(), false, false, false, std::shared_ptr<Expr>(std::move(call))});
+    record.fields.back().usings = usings;
+  }
   // Whether `T.Name(` here is an assertion. A program's own container named
   // T keeps its members, so only the assertion names are claimed.
   bool assertionAhead() const {
@@ -1156,8 +1419,62 @@ class Parser {
     group->body = std::move(statements);
     return group;
   }
+  bool scopeMarkAhead() const { return at("[") && punctuation(tokens.at(pos + 1), "@"); }
+  // `[@Name]` before a field or loop: the scope's name.
+  Token scopeMark() {
+    expect("[");
+    expect("@");
+    auto scope = identifier();
+    expect("]");
+    lines();
+    return scope;
+  }
+  // A marked field stores a slot; its value lives in the scope's arena.
+  template <class Field>
+  void markScoped(Field &field, const Token &mark, Type &stored, bool initialized) {
+    if (initialized)
+      fail(mark, "a field in scope '" + mark.text + "' starts at its type's default each time the scope starts; "
+                 "assign it after @start instead of giving it an initializer");
+    if (stored.depth) fail(mark, "a scoped field holds a value, not a pointer");
+    field.scope = mark.text;
+    field.scopedType = stored;
+    stored = scopeSlotType();
+  }
+  bool scopeStatementAhead() const {
+    return at("@") && tokens.at(pos + 2).line == peek().line &&
+           (tokens.at(pos + 1).text == "start" || tokens.at(pos + 1).text == "end") && !tokens.at(pos + 1).string &&
+           word(tokens.at(pos + 2));
+  }
+  std::unique_ptr<Stmt> scopeStatement() {
+    auto s = std::make_unique<Stmt>();
+    s->token = pop();
+    const bool starting = pop().text == "start";
+    s->kind = starting ? "scopeStart" : "scopeEnd";
+    if (!starting && lambdaDepth)
+      fail(s->token, "@end leaves the functions up to its [@Name] loop, which a lambda body cannot do");
+    s->name = identifier().text;
+    if (!at("\n") && !at("}")) fail(peek(), "expected newline or '}' after statement");
+    return s;
+  }
+  // `[@Name]` before a loop: each iteration's body runs inside the scope.
+  std::unique_ptr<Stmt> scopedLoop() {
+    const auto mark = scopeMark();
+    if (!at("while") && !at("for") && !at("do"))
+      fail(mark, "a scope mark in a function body applies to a loop");
+    auto loop = statement();
+    auto body = std::make_unique<Stmt>();
+    body->token = mark;
+    body->kind = "scopedBody";
+    body->name = mark.text;
+    body->body = std::move(loop->body);
+    loop->body.clear();
+    loop->body.push_back(std::move(body));
+    return loop;
+  }
   std::unique_ptr<Stmt> statement() {
     expandStatementMacro();
+    if (scopeMarkAhead()) return scopedLoop();
+    if (scopeStatementAhead()) return scopeStatement();
     if (at("Switch")) return switchStatement();
     if (at("macro") && word(tokens.at(pos + 1)) && punctuation(tokens.at(pos + 2), "("))
       fail(peek(), "a macro cannot be declared inside a function; declare it at file scope or in a container");
@@ -1235,8 +1552,10 @@ class Parser {
         returnsOwner = true;
         s->kind = "returnOwner";
       }
-      if (!at("\n") && !at("}"))
+      if (!at("\n") && !at("}")) {
+        expectMarkup = returnsMarkup;
         s->expr = expression();
+      }
     } else
       s = simpleStatement();
     if (!at("\n") && !at("}"))
@@ -1427,8 +1746,10 @@ class Parser {
         if (!accept("="))
           fail(peek(), "constant '" + s->name + "' requires an initializer, as in #int age = 5");
         s->expr = expression();
-      } else if (accept("="))
+      } else if (accept("=")) {
+        expectMarkup = markupValue(s->type);
         s->expr = expression();
+      }
       // Declared after the initializer, which still sees the outer names.
       s->name = declareLocal(declaredName);
     } else {
@@ -1484,7 +1805,9 @@ class Parser {
         fail(peek(), "native declaration cannot have a body");
     } else {
       returnsOwner = false;
+      const bool outerMarkup = std::exchange(returnsMarkup, markupValue(f.result));
       f.body = block();
+      returnsMarkup = outerMarkup;
       if (returnsOwner) {
         if (f.result.depth != 1 || f.result == Type::Pointer)
           fail(f.name, "return :: requires a typed heap pointer result");
@@ -1533,6 +1856,14 @@ class Parser {
         skipMacroDeclaration();
         continue;
       }
+      if (at("this") && punctuation(tokens.at(pos + 1), "{")) {
+        markupBlock(program, record, members, bare);
+        if (!at("}") && !at("\n")) fail(peek(), "expected member terminator");
+        lines();
+        continue;
+      }
+      std::optional<Token> scoped;
+      if (scopeMarkAhead()) scoped = scopeMark();
       const auto tagged = peek();
       auto tags = attributes();
       const auto modifier = peek();
@@ -1575,6 +1906,7 @@ class Parser {
       if (!members.insert(name.text).second) fail(name, "duplicate container member");
       if (name.text == "this") fail(name, "this is reserved for the receiver");
       if (at("(") && !(typed && owningFieldAhead(t))) {
+        if (scoped) fail(*scoped, "a scope mark applies to a field or a loop, not a method");
         name.text = methodKey(tag.text, name.text);
         program.push_back(function(std::move(name), t, false, "", tag.text));
         program.back().protectedAccess = isProtected;
@@ -1625,6 +1957,8 @@ class Parser {
         record.fields.back().usings = usings;
         record.fields.back().tags = std::move(tags);
         record.fields.back().memberLambda = funcValue(t) && lambdaDefault;
+        if (scoped)
+          markScoped(record.fields.back(), *scoped, record.fields.back().type, record.fields.back().initializer != nullptr);
       }
       if (!at("}") && !at("\n")) fail(peek(), "expected member terminator");
       lines();
@@ -1946,6 +2280,15 @@ class Parser {
       }
       if (nested && macroUse(tokens, pos) && !functionAhead())
         fail(peek(), "a macro expands in statement, Switch, or value position, not among declarations");
+      // A marked loop at file scope is a statement like any other loop.
+      if (!nested && scopeMarkAhead()) {
+        statements.push_back(statement());
+        if (!at("\n")) fail(peek(), "expected newline between statements");
+        lines();
+        continue;
+      }
+      std::optional<Token> scoped;
+      if (scopeMarkAhead()) scoped = scopeMark();
       // `[args]` marks the enum that follows as attribute data.
       bool attributeEnum = false;
       if (at("[")) {
@@ -2018,11 +2361,16 @@ class Parser {
           field.initializer = expression();
         else if (constant)
           fail(peek(), "constant '" + name.text + "' requires an initializer, as in #int Max = 10");
+        if (scoped) {
+          if (constant) fail(*scoped, "a constant cannot live in a scope");
+          markScoped(field, *scoped, field.type, field.initializer != nullptr);
+        }
         functions.statics.push_back(std::move(field));
         if (!at("\n") && !at("}")) fail(peek(), "expected newline after static field");
         lines();
         continue;
       }
+      if (scoped) fail(*scoped, "a scope mark applies to a field or a loop");
       if (constant) fail(constantToken, "'#' before a member declares a constant static field");
       if (!external && !typed && (at(":") || enumBlock()))
         fail(name, "enum declarations must be at file scope");
@@ -2100,6 +2448,7 @@ public:
       : tokens(std::move(t)), containerNames(names), macros(macroTable) {}
   Program parse() {
     Program functions;
+    output = &functions;
     functions.sources.push_back(tokens.front().source);
     // The last statement of a file need not end in a newline.
     tokens.insert(tokens.end() - 1, Token{"\n", tokens.back().line, tokens.back().column, false, tokens.back().source});

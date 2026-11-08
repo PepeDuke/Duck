@@ -1,0 +1,37 @@
+// EXPECT: 2, 3, then 1.
+// PITFALL: an element's children belong to that element, not to the root.
+// Reach them through their parent: this.Row[0].Cell[1].
+Cell
+{
+    int Id
+}
+
+Row
+{
+}
+
+Grid
+{
+    this{
+        <Row>
+            <Cell Id=1/>
+            <Cell Id=2/>
+        </Row>
+        <Row>
+            <Cell Id=3/>
+        </Row>
+    }
+
+    Show()
+    {
+        Print(this.Row[0].Cell[1].Id)
+        Print(this.Row[1].Cell.Id)
+        Print(this.Row[1].GetChildren().Len)
+    }
+}
+
+Main()
+{
+    Grid grid()
+    grid.Show()
+}

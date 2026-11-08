@@ -1769,6 +1769,8 @@ duck test Game.dkp
 duck test Game.dkp --module core --filter Example.Test1
 ```
 
+`--timing` adds each test's elapsed nanoseconds, and `duck test Game.dkp --compare-schedules` uses that to compare the sequential schedule with the parallel ones the compiler's dependency analysis accepted. A schedule that fails a test is discarded. Tests can only reject or prefer such a schedule: passing them cannot show that it is free of races.
+
 The runner exits with `0` when every selected test passed, `1` when any failed, and `2` for bad usage or filters that match nothing.
 
 | Assertion | Fails when |
@@ -1814,7 +1816,8 @@ Example
 
     Foo()
     {
-        Print(this.Example2.Name + " " + this.Example2.Age) // we get access to the component using this and it has the same name as the container
+        Print(this.Example2.Name) // we get access to the component using this and it has the same name as the container
+        Print(this.Example2.Age)
     }
 }
 
@@ -1857,12 +1860,12 @@ Guy
 }
 #
 {
-    markup GetGuyComponent(string name, int age)
+    markup GetGuyComponent(string who, int age)
     {
         return {
-            <Guy Name=name Age=age>
+            <Guy Name=who Age=age>
             "name age" // we do things differently here from XML values have to be declared as literals or any supported type like string, int and so on, the resoulting value variable will have that type. escaping is done using the \ character
-            <Guy/>
+            </Guy>
         }
     }
 }
@@ -1885,6 +1888,14 @@ Example
 }
 
 ``` 
+Tags name container types, and each attribute is an ordinary assignment to a field of that container, so its value is checked against the field. Attribute values stop at any operator, which keeps `/>` from being read as a division: write `Height=(Base + 1)` for an expression. Elements nest, close with `</Tag>` or `/>`, and are built when their container is constructed. A `this{ }` block may read the container's own fields.
+
+- **Finding children.** `x.Tag` is the only child of that type. Repeated children need an index, `x.Tag[0]`. Where the compiler can see every child, a repeated or missing `x.Tag` is a compile error; once a function adds children it traps at run time instead. A field of the same name takes priority. `?x.Tag[5].Foo()` skips a missing child.
+- **Listing children.** `x.GetChildren()` is a view in declaration order. It has `Len`, can be indexed, and can be looped over. Each element has `GetName()` and `GetChildren()`, and `..` calls its container's methods.
+- **Values.** A literal inside an element gives it a `value` field of the literal's type. To store anything else, declare `value` and write the expression, as in `<Guy>text</Guy>`.
+- **Markup values.** `markup` holds elements with no parent yet. A `{ ... }` is markup where a markup type is expected or where its first content is a tag. Like a collection, it moves rather than copies. Writing one inside other markup moves its elements to the end of that spot, in order, and leaves the original empty.
+- **Lifetime.** A container owns its children and releases them when it is destroyed, which makes it move-only. A container defined in another module can hold children or a literal value only if its own module gave it the storage.
+
 ## Compile time execution in Duck
 Prefix a direct call with `#` to evaluate it during compilation (also called
 baking). The bootstrap supports bounded evaluation of scalar Duck functions
@@ -2115,3 +2126,11 @@ Main()
 ```
 
 if we call @start again after @start has already been called for custom scope it will re-initialize the scoped variables, if we call @end again after it has been called it will be runtime error.
+
+Scope names are global to the program and need no declaration. A marked variable starts at its type's default the first time it is used in each run of its scope, so instances created after `@start` work the same as earlier ones, and a marked field cannot have its own initializer. Using one outside its scope is a runtime error, while `?PlayTime += d` and `?PlayTime` skip the write or read the default. Copying a container shares its scoped values.
+
+`@end` runs the cleanup of that scope's values, newest first, while they can still be read, then frees its arena. Collections keep their elements on the general heap and release them at `@end`.
+
+A marked loop starts its scope at the top of each iteration and ends it on every way out: reaching the end of the body, `continue`, `break`, `return`, or `@end`. The loop's condition and step run outside the scope. `@end` anywhere under a marked loop of that name, including in a function it calls, stops the code after it, cleans up each function's locals on the way out, and continues after that loop. Called functions return their type's default on the way, which nobody sees. `@end` in a lambda body is not allowed. Ending an outer scope also closes every marked loop inside it. With no marked loop running, `@end` just ends the scope and the code after it continues.
+
+Scopes are shared by the whole process, and scheduled tasks never touch them. Only the thread running a marked loop may `@end` its scope, and other native threads must coordinate their own uses with any `@end`.

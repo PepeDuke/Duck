@@ -1,0 +1,34 @@
+// EXPECT: 300, 11, then Save.
+// PITFALL: attribute values stop at any operator, so that /> is never read as
+// a division. Parenthesize an expression: Height=(Base + 1).
+Button
+{
+    string Label
+    int Height
+}
+
+Window
+{
+    int Width
+    int Base = 10
+
+    this{
+    // The root is optional and always names this container.
+    <Window Width=300>
+        <Button Label="Save" Height=(Base + 1)/>
+    </Window>
+    }
+
+    Show()
+    {
+        Print(Width)
+        Print(this.Button.Height)
+        Print(this.Button.Label)
+    }
+}
+
+Main()
+{
+    Window window()
+    window.Show()
+}

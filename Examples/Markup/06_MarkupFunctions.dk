@@ -1,0 +1,40 @@
+// EXPECT: 2, name age, rob, then 21.
+// PITFALL: splicing markup moves its elements into the receiving tree. The
+// value is left empty, so splicing it a second time adds nothing.
+Guy
+{
+    string Name
+    int Age
+}
+#{
+    markup GetGuyComponent(string who, int age)
+    {
+        return {
+            <Guy Name=who Age=age>
+                "name age"
+            </Guy>
+        }
+    }
+}
+
+Example
+{
+    this{
+        Guy.GetGuyComponent("bob", 18)
+        Guy.GetGuyComponent("rob", 21)
+    }
+
+    Foo()
+    {
+        Print(this.GetChildren().Len)
+        Print(this.Guy[0].value)
+        Print(this.Guy[1].Name)
+        Print(this.Guy[1].Age)
+    }
+}
+
+Main()
+{
+    Example example()
+    example.Foo()
+}

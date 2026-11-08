@@ -1,0 +1,31 @@
+// EXPECT: Outer inactive, then after.
+// PITFALL: ending an outer scope also closes every marked loop inside it.
+// Ending the inner one leaves the outer loop running.
+Stop
+#{
+    Everything()
+    {
+        @end Outer
+    }
+}
+
+Main()
+{
+    [@Outer]
+    while true
+    {
+        [@Tick]
+        while true
+        {
+            Stop.Everything()
+            Print("Not reached")
+        }
+        Print("Not reached either")
+    }
+
+    if @Outer
+        Print("Outer active")
+    else
+        Print("Outer inactive")
+    Print("after")
+}

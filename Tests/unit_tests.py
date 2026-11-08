@@ -123,6 +123,17 @@ Main() { Print(1) }
         self.assertEqual(self.execute(exe, '--list', 'Missing')[0], 2)
         self.assertEqual(self.execute(exe, '--nope')[0], 2)
 
+    def test_timing_reports_each_test(self):
+        exe = self.runner(self.SAMPLE)
+        status, output = self.execute(exe, '--timing', 'Positive')
+        self.assertEqual(status, 0)
+        lines = output.splitlines()
+        self.assertEqual(lines[1], 'PASS Arithmetic.DoublesPositive')
+        kind, nanos, name = lines[2].split(' ')
+        self.assertEqual((kind, name), ('TIME', 'Arithmetic.DoublesPositive'))
+        self.assertGreaterEqual(int(nanos), 0)
+        self.assertEqual(self.execute(exe, '--timing', 'Missing')[0], 2)
+
     def test_no_tests_is_an_empty_success(self):
         self.assertEqual(self.run_tests('Main() { Print(1) }'), (0, '0 passed, 0 failed, 0 total\n'))
         self.assertEqual(self.run_tests('int Add(int a, int b) { return a + b }'), (0, '0 passed, 0 failed, 0 total\n'))

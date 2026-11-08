@@ -154,6 +154,20 @@ same way, and the entry module's `Main` is not called. `--filter` selects tests
 whose stable name contains the text. `--module`, `--enable`, `--disable`,
 `--profile`, `--compiler`, and `--clang` behave as they do for `duck build`.
 
+`--compare-schedules` evaluates scheduling with those same tests. Each module is
+built with its tasks and with `--sequential`, and the tests run `--samples` times
+(default 5) under the sequential baseline and at `DUCK_WORKERS` 2, 4, and the
+default. Samples are interleaved with a rotating start, so slow drift during the
+run does not favor one schedule. A schedule with any failing sample is discarded.
+The others report the median, minimum, and maximum of the summed test time, and a
+schedule counts as faster or slower only when its middle half does not overlap
+the baseline's. A module whose code has no tasks is reported and skipped. The
+command fails only when the sequential baseline itself fails.
+
+Candidates only use less or more of the parallelism that dependency analysis
+already accepted, so the result can reject or prefer a schedule but cannot make
+a new one legal: a passing test says nothing about races it did not happen to hit.
+
 The command exits with `0` when every module passed and `1` when any test failed
 or crashed, or when filters matched no test in any module.
 

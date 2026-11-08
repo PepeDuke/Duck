@@ -447,6 +447,47 @@ class Projects(unittest.TestCase):
         self.write('version = 1\n[project]\nname = "Lib"\nkind = "library"\n[modules.core]\nsources = ["core.dk"]\n')
         self.assertIn("PASS Core.Adds\n", self.duck_test())
 
+    SCHEDULED = (
+        'extern "C" void* getenv(cstring key)\n'
+        'App #{ int Slow(int n) { int t = 0\nfor i : 0...n { t += i }\nreturn t } }\n'
+        'T{\n Sums() {\n  a : Slow(100)\n  b : Slow(10)\n  T.AreEqual(a + b, 5105)\n CHECK }\n}\n'
+        'Main() { }\n')
+
+    def scheduled_project(self, check=""):
+        (self.root / "app.dk").write_text(self.SCHEDULED.replace("CHECK", check), encoding="utf-8")
+
+    def test_compare_schedules_reports_every_candidate(self):
+        self.scheduled_project()
+        output = self.duck_test("--compare-schedules", "--samples", "3")
+        self.assertIn("dependency analysis accepted", output)
+        self.assertIn("== module app: 3 sample(s) per schedule", output)
+        for name in ("sequential: median", "workers=2: median", "workers=4: median", "workers=auto: median"):
+            self.assertIn(name, output)
+        self.assertIn("preferred: ", output)
+        self.assertNotIn("DISCARDED", output)
+
+    def test_compare_schedules_discards_failing_candidates(self):
+        self.scheduled_project('T.IsTrue(getenv("DUCK_WORKERS") == null)\n')
+        output = self.duck_test("--compare-schedules", "--samples", "2")
+        self.assertIn("workers=2: DISCARDED (test failed: App.Sums)", output)
+        self.assertIn("workers=4: DISCARDED", output)
+        self.assertIn("sequential: median", output)
+        self.assertIn("workers=auto: median", output)
+
+    def test_compare_schedules_requires_a_passing_baseline(self):
+        self.scheduled_project("T.Fail()\n")
+        self.assertIn("sequential baseline did not pass", self.run_failing("--compare-schedules", "--samples", "1"))
+
+    def test_compare_schedules_without_tasks_has_nothing_to_compare(self):
+        self.add_tests()
+        self.assertIn("scheduled no tasks", self.duck_test("--compare-schedules", "--samples", "1"))
+
+    def test_compare_schedules_filter_and_validation(self):
+        self.scheduled_project()
+        self.assertIn("no test matches", self.run_failing("--compare-schedules", "--samples", "1", "--filter", "Missing"))
+        self.assertIn("positive whole number", self.run_failing("--compare-schedules", "--samples", "0"))
+        self.assertIn("cannot be combined", self.run_failing("--compare-schedules", "--list"))
+
     def test_filter_is_only_for_duck_test(self):
         result = self.invoke("--filter", "x", success=False)
         self.assertIn("unknown option: --filter", result.stderr)

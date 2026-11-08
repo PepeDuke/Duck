@@ -13,8 +13,8 @@ Read in this order:
   Concurrency/01..04    Resource synchronization and explicit $ protection.
   Containers/01..05     Inheritance, duck calls, properties, initialization.
   Features/01..05       Enums, reflection, lambdas, baking, T{ } tests (duckc --test).
-  Lifecycle/01..03      Custom scopes and frame lifetimes.
-  Markup/01..02         Components and repeated children.
+  Lifecycle/01..08      Custom scopes, frame lifetimes, and leaving a scope.
+  Markup/01..08         Components, nesting, values, and markup returned by functions.
   CompileTime/01..07    Definitions, conditional blocks, and macros.
   Games/01             Combining ownership, collections, and safe calls.
 

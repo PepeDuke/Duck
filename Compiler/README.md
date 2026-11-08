@@ -1823,6 +1823,44 @@ to hidden locals, an `if`, and a body of report calls and `return`. Using
 `$T.show` prints a labeled operand through the `Print` lowering when its type
 is printable. The runner clears the flag before each test and reads it after.
 
+## Markup
+
+Markup is parsed only inside a `this{ }` block or a markup literal, and lowers to
+ordinary statements: `Tag* $element()`, a field assignment per attribute, then a
+`markupAdd` that moves the element into its parent. A literal is a `macroValue`
+whose statements build a hidden markup local and whose result takes it. A
+`this{ }` block is a generated method, `$markup`, that returns such a literal, and
+the hidden `$children` field is initialized by calling it during construction.
+
+A `markup` value is a queue of element nodes (`MarkupRuntime.cpp`), so moves and
+cleanup follow the collection rules. A node holds its element's owner word, the
+container's name, cleanup, and type descriptor, and the offset of the element's
+own `$children`. The first node of a queue also holds the per-type index.
+`x.Label` is a location of owner role, over the word in the node, so reads,
+aliases, and method calls use the ordinary tracked-reference paths. The parser
+records which tags hold children or literal values, and `collectSymbols` adds
+their storage before layouts are computed.
+
+## Named scopes
+
+`ScopeRuntime.cpp` holds the runtime: its comment specifies generations, the
+arena, repeated starts, and threads. A marked field or static stores a two-word
+slot, typed as `long [2]` so that layout, copying, and cleanup need no special
+case; `scopedPlaces` records the uses, and each lowers through `scope$data`.
+
+A marked loop's body is wrapped in a `scopedBody` statement. It binds a marker
+in the scope stack whose cleanup is `scope$leaveLoop`, so every exit that
+already runs `cleanupScopes` also leaves the iteration exactly once.
+
+Leaving through a callee uses a shared pending-end word rather than unwinding
+tables. `@end` sets it when a marked loop of that scope is running, and each call
+that may have ended a scope tests it. On a hit the caller exits through that
+loop if it is in this function, and otherwise cleans up and returns its result
+type's default. `compileModule` computes those calls: functions reaching an
+`@end`, calls into other modules, and calls through values. A module with no
+`@end` and no imports has no such checks. Constructors and property accessors
+are not checked, so an `@end` in one takes effect at the next checked call.
+
 ## Switch
 
 `Switch` parses to a `switch` statement holding one `case` statement per

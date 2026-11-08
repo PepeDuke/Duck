@@ -1,0 +1,30 @@
+// EXPECT with duck test --compare-schedules: a timing line for each schedule,
+// none of them discarded, and the schedule it prefers.
+// PITFALL: passing tests cannot prove a schedule is free of races. Only the
+// compiler's dependency analysis can make a schedule legal.
+Work
+#{
+    int Sum(int limit)
+    {
+        int total = 0
+        for i : 0...limit
+        {
+            total += i % 7
+        }
+        return total
+    }
+}
+T{
+    IndependentCalls()
+    {
+        a : Sum(200000)
+        b : Sum(200000)
+        c : Sum(200000)
+        T.AreEqual(a + b + c, 1799991)
+    }
+}
+
+Main()
+{
+    Print(Work.Sum(10))
+}

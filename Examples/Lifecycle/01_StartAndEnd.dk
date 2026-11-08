@@ -25,12 +25,10 @@ Session
 Main()
 {
     Session session()
-    ${
-        session.Start()
-        session.Describe()
-        session.Advance(0.1)
-        session.Stop()
-        session.Describe()
-        session.Advance(0.1) // Guarded write is skipped.
-    }
+    session.Start()
+    session.Describe()
+    session.Advance(0.1)
+    session.Stop()
+    session.Describe()
+    session.Advance(0.1) // Guarded write is skipped.
 }

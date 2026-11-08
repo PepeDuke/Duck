@@ -1,0 +1,38 @@
+// EXPECT: Tick active, released, then Tick inactive.
+// PITFALL: @end inside a [@Name] loop leaves every function up to that loop.
+// Their locals are cleaned up, and nothing after the @end runs in any of them.
+Resource
+{
+    ~Resource() { Print("released") }
+}
+
+Example
+#{
+    Foo()
+    {
+        Resource held
+        @end Tick
+        Print("Hello") // Does not run.
+    }
+
+    Report()
+    {
+        if @Tick
+            Print("Tick active")
+        else
+            Print("Tick inactive")
+    }
+}
+
+Main()
+{
+    [@Tick]
+    while true
+    {
+        Example.Report()
+        Example.Foo()
+        Print("Not reached")
+    }
+
+    Example.Report()
+}

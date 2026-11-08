@@ -2,6 +2,8 @@
 #include "vendor/tomlplusplus/toml.hpp"
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -135,7 +137,8 @@ struct Options {
     fs::path project;
     std::string module, profile = "debug", compiler, clang;
     Strings enable, disable, filters;
-    bool list = false;
+    bool list = false, compareSchedules = false;
+    int samples = 5;
 };
 struct Link {
     Strings libraries, directories;
@@ -350,9 +353,11 @@ struct WorkDirectory {
 using Plan = std::vector<std::pair<std::string, Paths>>;
 // mode is "--library", "--test", or empty for an entry module.
 static Strings compileCommand(const Project& project, const Plan& sources, const std::string& compiler,
-                              const std::string& id, const std::string& mode, const fs::path& ir) {
+                              const std::string& id, const std::string& mode, const fs::path& ir,
+                              bool sequential = false) {
     Strings command{compiler};
     if (!mode.empty()) command.push_back(mode);
+    if (sequential) command.push_back("--sequential");
     for (const auto& dependency : project.modules.at(id).depends) {
         auto found = std::find_if(sources.begin(), sources.end(), [&](const auto& item) { return item.first == dependency; });
         for (const auto& source : found->second) command.insert(command.end(), {"--dependency", source.u8string()});
@@ -363,60 +368,209 @@ static Strings compileCommand(const Project& project, const Plan& sources, const
     return command;
 }
 
-static bool definesTests(const fs::path& ir) {
-    std::ifstream input(ir, std::ios::binary);
+static std::string readFile(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
     std::stringstream text;
     text << input.rdbuf();
-    return text.str().find("; duck-tests: 0\n") == std::string::npos;
+    return text.str();
 }
 
-// Each module's tests become their own executable under <build>/<profile>/tests:
+// Builds each module's tests into its own executable under <build>/<profile>/tests:
 // the module's test build linked with the ordinary objects of its dependencies.
 // Nothing in the program's own build output is read or replaced.
-static int test(const Options& options, const fs::path& bin) {
-    Project project(options);
-    const auto selected = project.plan(options.module);
-    auto compiler = project.tool("compiler", options.compiler, bin);
-    auto clang = project.tool("clang", options.clang, bin);
-    const auto destination = project.buildDir / options.profile / "tests";
-    WorkDirectory work(destination);
-    const std::string optimize = options.profile == "debug" ? "-O0" : "-O2";
-    std::map<std::string, fs::path> dependencies;
-    int passed = 0, failed = 0, unmatched = 0;
-    for (const auto& [id, files] : selected) {
-        (void)files;
-        if (!options.module.empty() && id != options.module) continue;
+class TestBuilder {
+    const Project& project;
+    std::string compiler, clang, optimize;
+    fs::path destination;
+    WorkDirectory work;
+    std::map<std::pair<std::string, bool>, fs::path> dependencies;
+
+public:
+    TestBuilder(const Project& p, std::string compilerPath, std::string clangPath, const Options& options)
+        : project(p), compiler(std::move(compilerPath)), clang(std::move(clangPath)),
+          optimize(options.profile == "debug" ? "-O0" : "-O2"), destination(p.buildDir / options.profile / "tests"),
+          work(destination) {}
+
+    struct Result {
+        fs::path executable;
+        bool tests = false;
+        bool scheduledWork = false; // Dependency analysis accepted at least one task.
+    };
+    Result build(const std::string& id, bool sequential) {
         const auto sources = project.plan(id);
-        const auto ir = work.path / (id + ".test.ll"), object = work.path / (id + ".test.o");
-        run(compileCommand(project, sources, compiler, id, "--test", ir), false);
-        if (!definesTests(ir)) continue;
+        const std::string tag = sequential ? ".sequential" : "";
+        Result result;
+        const auto ir = work.path / (id + tag + ".test.ll"), object = work.path / (id + tag + ".test.o");
+        run(compileCommand(project, sources, compiler, id, "--test", ir, sequential), false);
+        const auto text = readFile(ir);
+        if (text.find("; duck-tests: 0\n") != std::string::npos) return result;
+        result.tests = true;
+        result.scheduledWork = text.find("@duck.task.limit") != std::string::npos;
         run({clang, "-c", optimize, ir.u8string(), "-o", object.u8string()}, false);
         Strings link{clang, object.u8string()}, flags;
         for (const auto& [dependency, unused] : sources) {
             (void)unused;
             if (dependency == id) continue;
-            auto known = dependencies.find(dependency);
+            const auto key = std::make_pair(dependency, sequential);
+            auto known = dependencies.find(key);
             if (known == dependencies.end()) {
-                const auto library = work.path / (dependency + ".ll"), output = work.path / (dependency + ".o");
-                run(compileCommand(project, sources, compiler, dependency, "--library", library), false);
+                const auto library = work.path / (dependency + tag + ".ll"), output = work.path / (dependency + tag + ".o");
+                run(compileCommand(project, sources, compiler, dependency, "--library", library, sequential), false);
                 run({clang, "-c", optimize, library.u8string(), "-o", output.u8string()}, false);
-                known = dependencies.emplace(dependency, output).first;
+                known = dependencies.emplace(key, output).first;
             }
+            result.scheduledWork = result.scheduledWork ||
+                readFile(known->second.parent_path() / (dependency + tag + ".ll")).find("@duck.task.limit") != std::string::npos;
             link.push_back(known->second.u8string());
         }
         for (auto it = sources.rbegin(); it != sources.rend(); ++it) project.linkFlags(project.modules.at(it->first), flags);
         project.linkFlags(project.link, flags);
-        auto output = work.path / (project.projectName + "." + id + ".test");
+        auto output = work.path / (project.projectName + "." + id + tag + ".test");
 #ifdef _WIN32
         output += ".exe";
 #endif
         link.insert(link.end(), flags.begin(), flags.end());
         link.insert(link.end(), {"-o", output.u8string()});
         run(link, false);
-        const auto executablePath = destination / output.filename();
-        duckbuild::publish(output, executablePath);
+        result.executable = destination / output.filename();
+        duckbuild::publish(output, result.executable);
+        return result;
+    }
+};
+
+// The nearest-rank percentile of samples, which must be sorted.
+static long long percentile(const std::vector<long long>& sorted, size_t percent) {
+    const auto rank = (percent * sorted.size() + 99) / 100;
+    return sorted[rank ? rank - 1 : 0];
+}
+
+static std::string milliseconds(long long nanos) {
+    char text[32];
+    std::snprintf(text, sizeof(text), "%.3f", static_cast<double>(nanos) / 1e6);
+    return text;
+}
+
+// One schedule under evaluation. Every candidate only varies how much of the
+// parallelism that dependency analysis already accepted is used, so a result
+// here can reject a schedule or prefer one, but never licenses a new one.
+struct Candidate {
+    std::string name, workers;
+    const fs::path* executable;
+    std::vector<long long> totals;
+    std::string discarded;
+};
+
+// Runs one sample: true with the summed test time, or false with the reason
+// the run does not count as a pass.
+static bool sample(const Candidate& candidate, const Options& options, long long& total, std::string& reason) {
+    Strings command{candidate.executable->u8string(), "--timing"};
+    command.insert(command.end(), options.filters.begin(), options.filters.end());
+    duckbuild::setEnvironment("DUCK_WORKERS", candidate.workers);
+    std::string output;
+    const int status = duckbuild::capture(command, output);
+    duckbuild::setEnvironment("DUCK_WORKERS", "");
+    total = 0;
+    std::istringstream lines(output);
+    std::string failed;
+    for (std::string line; std::getline(lines, line);) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.rfind("FAIL ", 0) == 0 && failed.empty()) failed = line.substr(5);
+        if (line.rfind("TIME ", 0) == 0) total += std::atoll(line.c_str() + 5);
+    }
+    if (status == 0) return true;
+    if (status == 2) reason = "no test matches the filter";
+    else if (status == 1) reason = "test failed: " + failed;
+    else reason = "stopped with exit code " + std::to_string(status);
+    return false;
+}
+
+// Compares one module's schedules. Returns false when the sequential baseline
+// itself does not pass, which leaves nothing to compare against.
+static bool compareModule(const std::string& id, const TestBuilder::Result& sequential, const fs::path& parallel,
+                          const Options& options, bool& matched) {
+    std::vector<Candidate> candidates{{"sequential", "", &sequential.executable, {}, {}},
+                                      {"workers=2", "2", &parallel, {}, {}},
+                                      {"workers=4", "4", &parallel, {}, {}},
+                                      {"workers=auto", "", &parallel, {}, {}}};
+    // Interleaved, with a rotating start, so drift during the run is spread
+    // over the candidates instead of favoring whichever always ran first.
+    for (int round = 0; round < options.samples; ++round)
+        for (size_t step = 0; step < candidates.size(); ++step) {
+            auto& candidate = candidates[(step + static_cast<size_t>(round)) % candidates.size()];
+            if (!candidate.discarded.empty()) continue;
+            long long total = 0;
+            std::string reason;
+            if (sample(candidate, options, total, reason)) candidate.totals.push_back(total);
+            else candidate.discarded = reason;
+        }
+    const auto& baseline = candidates.front();
+    if (!baseline.discarded.empty()) {
+        if (baseline.discarded == "no test matches the filter") return true;
+        matched = true;
+        std::cout << "module " << id << ": the sequential baseline did not pass (" << baseline.discarded
+                  << "); fix the tests before comparing schedules" << std::endl;
+        return false;
+    }
+    matched = true;
+    auto base = baseline.totals;
+    std::sort(base.begin(), base.end());
+    const auto baseMedian = percentile(base, 50), baseLow = percentile(base, 25), baseHigh = percentile(base, 75);
+    std::cout << "== module " << id << ": " << options.samples << " sample(s) per schedule, total test time in ms" << std::endl;
+    std::string best = baseline.name;
+    long long bestMedian = baseMedian;
+    for (auto& candidate : candidates) {
+        if (!candidate.discarded.empty()) {
+            std::cout << "  " << candidate.name << ": DISCARDED (" << candidate.discarded << ")" << std::endl;
+            continue;
+        }
+        std::sort(candidate.totals.begin(), candidate.totals.end());
+        const auto median = percentile(candidate.totals, 50), low = percentile(candidate.totals, 25), high = percentile(candidate.totals, 75);
+        std::string verdict = "baseline";
+        if (&candidate != &baseline) {
+            // A difference counts only when the middle halves do not overlap.
+            verdict = high < baseLow ? "faster" : low > baseHigh ? "slower" : "no clear difference";
+            if (verdict == "faster" && median < bestMedian) {
+                best = candidate.name;
+                bestMedian = median;
+            }
+        }
+        std::cout << "  " << candidate.name << ": median " << milliseconds(median) << " (min " << milliseconds(candidate.totals.front())
+                  << ", max " << milliseconds(candidate.totals.back()) << ") " << verdict << std::endl;
+    }
+    std::cout << "  preferred: " << best << std::endl;
+    return true;
+}
+
+static int test(const Options& options, const fs::path& bin) {
+    Project project(options);
+    const auto selected = project.plan(options.module);
+    auto compiler = project.tool("compiler", options.compiler, bin);
+    auto clang = project.tool("clang", options.clang, bin);
+    TestBuilder builder(project, compiler, clang, options);
+    int passed = 0, failed = 0, unmatched = 0;
+    bool compared = false;
+    if (options.compareSchedules)
+        std::cout << "Candidates vary only schedules that dependency analysis accepted; "
+                     "passing tests do not show that a schedule is free of races." << std::endl;
+    for (const auto& [id, files] : selected) {
+        (void)files;
+        if (!options.module.empty() && id != options.module) continue;
+        if (options.compareSchedules) {
+            const auto parallel = builder.build(id, false);
+            if (!parallel.tests) continue;
+            if (!parallel.scheduledWork) {
+                compared = true;
+                std::cout << "== module " << id << ": dependency analysis scheduled no tasks; nothing to compare" << std::endl;
+                continue;
+            }
+            const auto sequential = builder.build(id, true);
+            if (!compareModule(id, sequential, parallel.executable, options, compared)) ++failed;
+            continue;
+        }
+        const auto built = builder.build(id, false);
+        if (!built.tests) continue;
         std::cout << "== module " << id << std::endl;
-        Strings command{executablePath.u8string()};
+        Strings command{built.executable.u8string()};
         if (options.list) command.push_back("--list");
         command.insert(command.end(), options.filters.begin(), options.filters.end());
         const int status = duckbuild::execute(command);
@@ -431,6 +585,15 @@ static int test(const Options& options, const fs::path& bin) {
     if (failed) {
         std::cout << "duck test: " << failed << " module(s) failed, " << passed << " passed" << std::endl;
         return 1;
+    }
+    if (options.compareSchedules) {
+        if (compared) return 0;
+        if (!options.filters.empty()) {
+            std::cerr << "duck test: error: no test matches the filter\n";
+            return 1;
+        }
+        std::cout << "duck test: no tests found" << std::endl;
+        return 0;
     }
     if (!passed && unmatched) {
         std::cerr << "duck test: error: no test matches the filter\n";
@@ -489,7 +652,10 @@ static void help() {
         "Usage: duck test PROJECT [--module MODULE] [--filter TEXT] [--list] [build options above]\n"
         "Builds each module's T{ } tests into its own executable, separate from the program, and runs them.\n"
         "--module tests one module. --filter runs tests whose name contains TEXT and may be repeated.\n"
-        "--list prints test names without running them.\n";
+        "--list prints test names without running them.\n"
+        "--compare-schedules runs the tests repeatedly under the sequential schedule and each\n"
+        "accepted parallel schedule, discards any that fail, and compares timings. --samples N\n"
+        "sets the samples per schedule (default 5).\n";
 }
 static int mainImpl(const Strings& arguments) {
     try {
@@ -510,10 +676,14 @@ static int mainImpl(const Strings& arguments) {
                 options.list = true;
                 continue;
             }
+            if (testing && argument == "--compare-schedules") {
+                options.compareSchedules = true;
+                continue;
+            }
             auto equals = argument.find('=');
             auto key = argument.substr(0, equals);
             if (key != "--module" && key != "--enable" && key != "--disable" && key != "--profile" && key != "--compiler" && key != "--clang" &&
-                !(testing && key == "--filter"))
+                !(testing && (key == "--filter" || key == "--samples")))
                 fail("unknown option: " + key);
             std::string value;
             if (equals != std::string::npos) value = argument.substr(equals + 1);
@@ -524,6 +694,11 @@ static int mainImpl(const Strings& arguments) {
             if (value.empty()) fail("missing value for " + key);
             if (key == "--enable") options.enable.push_back(value);
             else if (key == "--disable") options.disable.push_back(value);
+            else if (key == "--samples") {
+                if (!std::regex_match(value, std::regex("[0-9]{1,5}")) || std::stoi(value) < 1)
+                    fail("--samples requires a positive whole number");
+                options.samples = std::stoi(value);
+            }
             else if (key == "--filter") {
                 if (value.front() == '-') fail("a test filter cannot start with '-': " + value);
                 options.filters.push_back(value);
@@ -534,6 +709,7 @@ static int mainImpl(const Strings& arguments) {
             else options.clang = value;
         }
         if (options.project.empty()) fail("a .dkp project is required");
+        if (options.list && options.compareSchedules) fail("--list and --compare-schedules cannot be combined");
         if (options.profile != "debug" && options.profile != "release") fail("profile must be debug or release");
 #ifdef _WIN32
         std::wstring executablePath(32768, L'\0');

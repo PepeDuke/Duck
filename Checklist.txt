@@ -128,15 +128,15 @@ Compile-time execution and macros
 Language tests, markup, and lifecycle
 [x] Discover and run T blocks as Duck tests and provide T assertions.
    Proposal: Recognize T blocks attached to containers and collect test functions in a test build. Generate a runner with stable test names and implement assertions that report the test and source location on failure.
-[] Use Duck test results and timings when evaluating scheduling optimizations.
+[x] Use Duck test results and timings when evaluating scheduling optimizations.
    Proposal: Run the same tests with sequential and candidate schedules, discard candidates that fail, and compare repeated timing samples on the same inputs. Keep dependency analysis authoritative because passing tests cannot establish race freedom.
-[] Parse this { ... } markup, construct element trees, and support element and markup values.
+[x] Parse this { ... } markup, construct element trees, and support element and markup values.
    Proposal: Enter markup parsing only inside a markup context. Resolve tags to container types, type-check attribute expressions against members, and lower each component tree to explicit construction and attachment operations.
-[] Support component lookup, child enumeration, and markup returned by functions.
+[x] Support component lookup, child enumeration, and markup returned by functions.
    Proposal: Keep children in declaration order with a per-type lookup index. Diagnose ambiguous singular access, support indexed duplicates, and define how a returned markup tree transfers its children to the receiving tree.
-[] Implement named arena lifetimes with [@Play], @start, @end, and if @Play.
+[x] Implement named arena lifetimes with [@Play], @start, @end, and if @Play.
    Proposal: Assign each named scope a runtime descriptor containing its arena and active generation. Start initializes its marked variables, end runs cleanup and invalidates that generation, and the active query reads the descriptor. Specify repeated starts and cross-thread use.
-[] Implement loop-scoped lifetimes and cleanup on break, explicit end, and program exit.
+[x] Implement loop-scoped lifetimes and cleanup on break, explicit end, and program exit.
    Proposal: Lower an annotated loop with scope entry per iteration and cleanup on each outgoing edge. Propagate an explicit end from callees to the loop boundary, avoid double cleanup on break, and close remaining program scopes at shutdown.
 
 README corrections for features already implemented

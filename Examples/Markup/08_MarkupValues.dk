@@ -1,0 +1,39 @@
+// EXPECT: 2, 3, then 30.
+// PITFALL: markup is move-only like a collection. A `{ ... }` is markup only
+// where a markup type is expected or where its first content is a tag.
+Item
+{
+    int Id
+}
+
+Build
+#{
+    markup Parts()
+    {
+        markup first = { <Item Id=10/> <Item Id=20/> }
+        Print(first.Len)
+        return {
+            first
+            <Item Id=30/>
+        }
+    }
+}
+
+List
+{
+    this{
+        Build.Parts()
+    }
+
+    Show()
+    {
+        Print(this.GetChildren().Len)
+        Print(this.Item[2].Id)
+    }
+}
+
+Main()
+{
+    List list()
+    list.Show()
+}

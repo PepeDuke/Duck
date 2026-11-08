@@ -1,0 +1,39 @@
+// EXPECT: Button, clicked, Spacer, Button, clicked, then Spacer.
+// PITFALL: an element from GetChildren() is a borrowed view of the tree.
+// It has GetName and GetChildren; use .. to call the methods of its container.
+Button
+{
+    Click()
+    {
+        Print("clicked")
+    }
+}
+
+Spacer
+{
+}
+
+Toolbar
+{
+    this{
+        <Button/>
+        <Spacer/>
+        <Button/>
+    }
+
+    ClickAll()
+    {
+        for child : this.GetChildren()
+        {
+            Print(child.GetName())
+            ?child..Click() // A Spacer has no Click, so the call is skipped.
+        }
+        Print(this.GetChildren()[1].GetName())
+    }
+}
+
+Main()
+{
+    Toolbar toolbar()
+    toolbar.ClickAll()
+}

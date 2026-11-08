@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdint>
 #include <sstream>
+#include <utility>
 namespace duck {
 namespace {
 // The layouts of a type descriptor, its member table, and its attribute
@@ -179,6 +180,8 @@ struct Binding {
   bool iterationKey = false; // The key variable of `for k, v : pair`.
   // A local shared with lambdas: the address of the word holding its box.
   std::string box;
+  const Parameter *scoped = nullptr; // A field bound by name that lives in a named scope.
+  bool scopeLoop = false; // Not a variable: an iteration of a [@Name] loop, ended when its scope exits.
   bool pin = false; // Not a variable: an active use, ended when its scope exits.
   bool lent = false; // Received from a function that may lend; it may not own its object.
 };
@@ -192,6 +195,7 @@ class Generator {
     std::string exit, next;
     size_t scopeDepth;
     bool isSwitch = false; // A break target only; continue passes through it.
+    std::string scope;     // The descriptor of a [@Name] loop's scope.
   };
   std::vector<Loop> loops;
   // A task record is {handle, arguments..., result} in the caller's frame.
@@ -209,7 +213,11 @@ class Generator {
   bool usesTextRuntime = false, usesHeapRuntime = false, usesTaskRuntime = false;
   bool usesCalendarRuntime = false, usesWideRuntime = false;
   bool usesBigRuntime = false, usesDecimalRuntime = false, usesCollectionRuntime = false;
-  bool usesFuncRuntime = false, usesMetaRuntime = false;
+  bool usesFuncRuntime = false, usesMetaRuntime = false, usesMarkupRuntime = false, usesScopeRuntime = false;
+  std::set<std::string> scopeNames;
+  Type functionResult = Type::Void; // What a return from the function being lowered gives.
+  bool guardScopedPlace = false;    // The scoped place lowered next may be absent.
+  std::map<std::string, std::string> scopeInitials;
   int lambdaCount = 0;
   // The uses begun by the statement being lowered, and whether its tracked
   // dereferences need them: only code that can run during the statement can
@@ -248,7 +256,7 @@ class Generator {
       return true;
     if (e.receiver && runsCode(*e.receiver)) return true;
     for (const auto &binding : e.bindings)
-      if (runsCode(*binding->expr)) return true;
+      if (!binding->expr || runsCode(*binding->expr)) return true;
     for (const auto &argument : e.args)
       if (runsCode(*argument)) return true;
     return false;
@@ -538,6 +546,10 @@ class Generator {
   }
   // The release function for collection slots of a type, or null.
   std::string slotRelease(const Type &type) {
+    if (elementValue(type)) {
+      usesMarkupRuntime = true;
+      return "@duck.markup$node";
+    }
     if (trackedAlias(type)) {
       usesHeapRuntime = true;
       return "@duck.heap$slot";
@@ -1232,6 +1244,7 @@ class Generator {
   // destroy is false for a value moved out by `return local`: its storage
   // still drops its references, but the object lives on in the caller.
   void releaseBinding(const Binding &binding, bool destroy = true) {
+    if (binding.scopeLoop) return emit("call void @duck.scope$leaveLoop(ptr " + binding.value + ")");
     if (binding.pin) return emit("call void @duck.heap$unpin(ptr " + binding.value + ")");
     if (!binding.box.empty()) {
       // The payload dies with the box's last reference, which may be a lambda's.
@@ -1604,8 +1617,62 @@ class Generator {
   Binding variable(const Token &t) {
     auto binding = findBinding(t);
     if (binding.iteration) binding.value = iterationSlot(*binding.iteration, binding.iterationKey);
+    if (binding.scoped) binding.value = scopedData(binding.value, binding.scoped->scope, binding.type);
     return binding;
   }
+  std::string scopeDescriptor(const std::string &name) {
+    usesScopeRuntime = true;
+    scopeNames.insert(name);
+    return "@duck$scope." + name;
+  }
+  // Where a new scoped value of this type gets its default, or null for zero.
+  std::string scopeInitial(const Type &type) {
+    if (recordValue(type) && hasDefaults(functions, type.record)) return "@duck$default." + type.record;
+    if (!managedValue(type)) return "null";
+    const auto key = typeName(type);
+    if (const auto known = scopeInitials.find(key); known != scopeInitials.end()) return known->second;
+    const auto symbol = "@duck$initial." + symbolPrefix + "." + std::to_string(strings++);
+    globals << symbol << " = private unnamed_addr constant ptr " << managedZero(type) << "\n";
+    return scopeInitials[key] = symbol;
+  }
+  // The arena storage behind a scoped variable's slot.
+  std::string scopedData(const std::string &slot, const std::string &scope, const Type &type) {
+    const bool guarded = std::exchange(guardScopedPlace, false);
+    auto data = fresh();
+    emit(data + " = call ptr @duck.scope$data(ptr " + scopeDescriptor(scope) + ", ptr " + slot + ", i64 " + sizeOf(type) +
+         ", ptr " + scopeInitial(type) + ", ptr " + elementCleanup(type) + ", i1 " + (guarded ? "true" : "false") + ")");
+    return data;
+  }
+  // After a call that may have run @end: when an end is in progress, leave
+  // through the innermost enclosing loop of that scope, or return to the caller
+  // with a default result so the caller can do the same.
+  void unwindCheck() {
+    usesScopeRuntime = true;
+    auto target = fresh(), pending = fresh();
+    const auto landing = label(), proceed = label();
+    emit(target + " = load ptr, ptr @duck$scope.unwind");
+    emit(pending + " = icmp ne ptr " + target + ", null");
+    emit("br i1 " + pending + ", label %" + landing + ", label %" + proceed);
+    startBlock(landing);
+    for (const auto &use : activeUses) emit("call void @duck.heap$unpin(ptr " + use + ")");
+    for (size_t i = loops.size(); i-- > 0;) {
+      if (loops[i].scope.empty()) continue;
+      auto same = fresh();
+      const auto hit = label(), miss = label();
+      emit(same + " = icmp eq ptr " + target + ", " + loops[i].scope);
+      emit("br i1 " + same + ", label %" + hit + ", label %" + miss);
+      startBlock(hit);
+      emit("store ptr null, ptr @duck$scope.unwind");
+      cleanupScopes(loops[i].scopeDepth);
+      emit("br label %" + loops[i].exit);
+      startBlock(miss);
+    }
+    cleanupScopes(0);
+    if (functionResult == Type::Void) emit("ret void");
+    else emit("ret " + irType(functionResult) + " " + defaultValue(functionResult));
+    startBlock(proceed);
+  }
+  bool mayUnwind(const std::string &target) const { return analysis.unwinders && analysis.unwinders->count(target); }
   // The live number of elements of the collection a for-each iterates.
   std::string iterationLength(const Iteration &iteration) {
     if (fixedArray(iteration.type)) return std::to_string(iteration.type.extent);
@@ -1861,10 +1928,67 @@ class Generator {
     for (auto index : indices) list += ", i32 " + std::to_string(index);
     return list;
   }
+  // The element a GetChildren() call is on, or the address of its child storage.
+  std::string childrenSlot(const Expr &call) {
+    usesMarkupRuntime = true;
+    const auto &base = *call.receiver;
+    const auto type = analysis.expressionTypes.at(&base);
+    if (elementValue(type)) {
+      auto id = fresh();
+      emit(id + " = call ptr @duck.markup$children(ptr " + load(location(base).value) + ")");
+      return id;
+    }
+    return memberAddress(base, analysis.markupChildren.at(&call));
+  }
+  std::string load(const std::string &slot) {
+    auto id = fresh();
+    emit(id + " = load ptr, ptr " + slot);
+    return id;
+  }
+  // The address of the field at indices inside the container base names.
+  std::string memberAddress(const Expr &base, const std::vector<size_t> &indices) {
+    auto record = analysis.expressionTypes.at(&base);
+    std::string address;
+    if (!record.depth) address = location(base).value;
+    else {
+      address = dereference(base).value;
+      record = record.pointee();
+    }
+    auto id = fresh();
+    emit(id + " = getelementptr " + irType(record) + ", ptr " + address + ", i32 0" + indexList(indices));
+    return id;
+  }
+  // The word holding the child `x.Label` names, or `x.Label[i]` with index.
+  std::string componentSlot(const Expr &lookup, const Expr *index, bool guarded) {
+    usesMarkupRuntime = true;
+    const auto &info = analysis.markupLookups.at(&lookup);
+    const auto holder = load(memberAddress(*lookup.args[0], info.holder));
+    const auto name = textConstant(info.child);
+    auto slot = fresh();
+    if (!index) {
+      emit(slot + " = call ptr @duck.markup$find(ptr " + holder + ", ptr " + name + ")");
+      return slot;
+    }
+    const auto position = expression(*index);
+    emit(slot + " = call ptr @duck.markup$nth(ptr " + holder + ", ptr " + name + ", i64 " + position.value + ", i1 " +
+         (guarded ? "true" : "false") + ")");
+    return slot;
+  }
   Binding location(const Expr &e) {
+    if (auto found = guardedSlots.find(&e); found != guardedSlots.end()) return {analysis.expressionTypes.at(&e), found->second};
+    if (analysis.markupChildren.count(&e)) return {analysis.expressionTypes.at(&e), childrenSlot(e)};
+    if (analysis.markupIndexed.count(&e)) {
+      if (auto found = guardedSlots.find(&e); found != guardedSlots.end()) return {analysis.expressionTypes.at(&e), found->second};
+      return {analysis.expressionTypes.at(&e), elementSlot(e, false)};
+    }
+    if (analysis.markupLookups.count(&e)) return {analysis.expressionTypes.at(&e), componentSlot(e, nullptr, false)};
     auto field = analysis.staticFields.find(&e);
-    if (field != analysis.staticFields.end())
-      return {analysis.expressionTypes.at(&e), "@duck$static." + field->second};
+    if (field != analysis.staticFields.end()) {
+      const std::string address = "@duck$static." + field->second;
+      if (auto place = analysis.scopedPlaces.find(&e); place != analysis.scopedPlaces.end())
+        return {analysis.expressionTypes.at(&e), scopedData(address, place->second.scope, place->second.type)};
+      return {analysis.expressionTypes.at(&e), address};
+    }
     if (e.kind == "name") return variable(e.token);
     auto type = analysis.expressionTypes.at(&e);
     if (e.kind == "unary") return {type, dereference(*e.args[0]).value};
@@ -1883,11 +2007,27 @@ class Generator {
     auto id = fresh();
     emit(id + " = getelementptr " + irType(record) + ", ptr " + address +
          ", i32 0" + indexList(analysis.fieldIndices.at(&e)));
+    if (auto place = analysis.scopedPlaces.find(&e); place != analysis.scopedPlaces.end())
+      return {type, scopedData(id, place->second.scope, place->second.type)};
     return {type, id};
   }
   // The slot of a[i] or p[key]. The collection and the index or key are
   // evaluated once. A missing element traps, or with guarded gives null.
   std::string elementSlot(const Expr &e, bool guarded) {
+    if (analysis.scopedPlaces.count(&e)) {
+      guardScopedPlace = guarded;
+      return location(e).value;
+    }
+    if (analysis.markupIndexed.count(&e)) {
+      const auto &base = *e.args[0];
+      if (analysis.markupLookups.count(&base)) return componentSlot(base, e.args[1].get(), guarded);
+      usesCollectionRuntime = true;
+      const auto children = load(location(base).value);
+      const auto position = expression(*e.args[1]);
+      auto slot = fresh();
+      emit(slot + " = call ptr @duck.seq$nth(ptr " + children + ", i64 " + position.value + ")");
+      return slot;
+    }
     if (std::vector<const Expr *> coordinates; const auto *grid = gridRoot(e, coordinates))
       return gridSlot(*grid, coordinates, !guarded);
     const auto holderType = analysis.expressionTypes.at(e.args[0].get());
@@ -2042,8 +2182,16 @@ class Generator {
     if (e.kind == "mutation") return mutate(*e.args[0], op, e.args.size() > 1 ? e.args[1].get() : nullptr, true);
     if (e.kind == "moveCheck") return moveIntoField(*e.args[0], *e.args[1], true);
     if (e.kind == "lambda") return closure(e);
-    if (e.kind == "invoke" || analysis.indirectCalls.count(&e)) return indirectCall(e);
-    if (e.kind == "duckCall" || e.kind == "duckCheck" || e.kind == "duckExists") return duckCall(e, false);
+    if (e.kind == "invoke" || analysis.indirectCalls.count(&e)) {
+      const auto value = indirectCall(e);
+      if (analysis.unwindIndirect) unwindCheck();
+      return value;
+    }
+    if (e.kind == "duckCall" || e.kind == "duckCheck" || e.kind == "duckExists") {
+      const auto value = duckCall(e, false);
+      if (e.kind == "duckCall" && analysis.unwindIndirect) unwindCheck();
+      return value;
+    }
     if (e.kind == "guard" && e.args[0]->kind == "duckCall") return duckCall(*e.args[0], true);
     if (analysis.reflections.count(&e)) return reflect(e);
     if (auto function = analysis.functionValues.find(&e); function != analysis.functionValues.end())
@@ -2088,6 +2236,17 @@ class Generator {
     }
     if (e.kind == "cast")
       return convert(expression(*e.args[0]), e.castType);
+    if (e.kind == "scopeActive") {
+      auto id = fresh();
+      emit(id + " = call i1 @duck.scope$active(ptr " + scopeDescriptor(e.token.text) + ")");
+      return {Type::Bool, id};
+    }
+    if (e.kind == "markupTake") {
+      const auto binding = variable(e.token);
+      const auto value = load(binding.value);
+      emit("store ptr null, ptr " + binding.value);
+      return {binding.type, value};
+    }
     if (e.kind == "macroValue") {
       // The result holds its own reference, so the bindings can end first.
       scopes.emplace_back();
@@ -2261,6 +2420,10 @@ class Generator {
           emit("call void @duck." + script->second + "()");
         return {Type::Void, ""};
       }
+      if (analysis.elementNames.count(&e)) {
+        usesMarkupRuntime = true;
+        return {Type::Text, load(load(location(*e.receiver).value))};
+      }
       if (op == "$T.fail") {
         emit("call i32 (ptr, ...) @printf(ptr " + textConstant("%s\n") + ", ptr " +
              textConstant(e.args[0]->token.text) + ")");
@@ -2385,6 +2548,7 @@ class Generator {
       for (auto argument : arguments) release(argument);
       // A temporary receiver dies after the call, holding whatever the method left in it.
       if (!temporaryReceiver.value.empty()) releaseBinding({temporaryReceiver.type, temporaryReceiver.value});
+      if (mayUnwind(target)) unwindCheck();
       return {f.result, id};
     }
     auto a = expression(*e.args[0]);
@@ -2522,6 +2686,9 @@ class Generator {
     usesDecimalRuntime = usesDecimalRuntime || inner.usesDecimalRuntime;
     usesCollectionRuntime = usesCollectionRuntime || inner.usesCollectionRuntime;
     usesMetaRuntime = usesMetaRuntime || inner.usesMetaRuntime;
+    usesMarkupRuntime = usesMarkupRuntime || inner.usesMarkupRuntime;
+    usesScopeRuntime = usesScopeRuntime || inner.usesScopeRuntime;
+    scopeNames.insert(inner.scopeNames.begin(), inner.scopeNames.end());
     cleanups.insert(inner.cleanups.begin(), inner.cleanups.end());
     destroys.insert(inner.destroys.begin(), inner.destroys.end());
     tables.insert(inner.tables.begin(), inner.tables.end());
@@ -2571,7 +2738,9 @@ class Generator {
       for (const auto &path : functions.visibleFields(info.record)) {
         auto address = fresh();
         emit(address + " = getelementptr " + irType(record) + ", ptr " + self + ", i32 0" + indexList(path.indices));
-        bind(path.field->name, {path.field->type, address});
+        Binding field{path.field->scope.empty() ? path.field->type : path.field->scopedType, address};
+        if (!path.field->scope.empty()) field.scoped = path.field;
+        bind(path.field->name, field);
       }
       Token token = f.name;
       token.text = "this";
@@ -2598,6 +2767,7 @@ class Generator {
         declare(parameter.name, {parameter.type, arg});
       }
     }
+    functionResult = f.result;
     if (!sequence(f.body)) {
       cleanupScopes(0);
       emit("ret void");
@@ -2750,11 +2920,13 @@ class Generator {
     usesMetaRuntime = true;
     const auto &info = analysis.duckCalls.at(&e);
     const auto *base = e.receiver.get();
-    const bool pointer = analysis.expressionTypes.at(base).depth != 0;
+    const bool isElement = elementValue(analysis.expressionTypes.at(base));
+    const bool pointer = !isElement && analysis.expressionTypes.at(base).depth != 0;
     const bool check = e.kind != "duckCall";
     const bool tolerant = guarded || check;
     Receiver r;
-    if (pointer) r.address = (tolerant ? expression(*base) : dereference(*base)).value;
+    if (isElement) r.address = load(location(*base).value);
+    else if (pointer) r.address = (tolerant ? expression(*base) : dereference(*base)).value;
     else r = receiver(base, e.token);
     const Type resultType = check ? Type(Type::Bool) : info.result;
     const bool hasResult = resultType != Type::Void;
@@ -2772,7 +2944,13 @@ class Generator {
       startBlock(present);
     }
     std::string descriptor, object;
-    if (r.rooted && r.view.empty()) {
+    if (isElement) {
+      usesMarkupRuntime = true;
+      descriptor = fresh();
+      object = fresh();
+      emit(descriptor + " = call ptr @duck.markup$descriptor(ptr " + r.address + ")");
+      emit(object + " = call ptr @duck.markup$payload(ptr " + r.address + ")");
+    } else if (r.rooted && r.view.empty()) {
       const auto layout = tableType(functions, r.root.type.record);
       auto ownSlot = fresh(), own = fresh(), typeSlot = fresh(), back = fresh();
       descriptor = fresh();
@@ -3095,7 +3273,68 @@ class Generator {
     scopes.pop_back();
     return false;
   }
+  // Moves the element owned by a generated local into the markup at target.
+  void markupAdd(const Stmt &s) {
+    usesMarkupRuntime = usesMetaRuntime = true;
+    const auto holder = location(*s.target).value;
+    const auto record = analysis.expressionTypes.at(s.expr.get()).pointee();
+    const auto word = moveOwner(*s.expr);
+    types.insert(record.record);
+    MemberPath children;
+    std::string offset = "-1";
+    if (functions.findField(record.record, "$children", children))
+      offset = "ptrtoint (ptr getelementptr (" + irType(record) + ", ptr null, i32 0" + indexList(children.indices) + ") to i64)";
+    emit("call void @duck.markup$attach(ptr " + holder + ", ptr " + textConstant(record.record) + ", ptr " + word + ", ptr " +
+         elementCleanup(record) + ", ptr @duck$type." + record.record + ", i64 " + offset + ")");
+  }
+  void markupSplice(const Stmt &s) {
+    usesMarkupRuntime = true;
+    const auto holder = location(*s.target).value;
+    const auto &content = *s.alternate.front()->expr;
+    std::string source;
+    if (content.addressable()) {
+      const auto slot = location(content).value;
+      source = load(slot);
+      emit("store ptr null, ptr " + slot);
+    } else source = expression(content).value;
+    emit("call void @duck.markup$splice(ptr " + holder + ", ptr " + source + ")");
+  }
   bool statement(const Stmt &s) {
+    if (s.kind == "scopeStart") {
+      emit("call void @duck.scope$start(ptr " + scopeDescriptor(s.name) + ")");
+      return false;
+    }
+    if (s.kind == "scopeEnd") {
+      const auto scope = scopeDescriptor(s.name);
+      emit("call void @duck.scope$end(ptr " + scope + ")");
+      emit("call void @duck.scope$requestUnwind(ptr " + scope + ")");
+      unwindCheck();
+      return false;
+    }
+    if (s.kind == "scopedBody") {
+      const auto scope = scopeDescriptor(s.name);
+      emit("call void @duck.scope$enterLoop(ptr " + scope + ")");
+      scopes.emplace_back();
+      Binding iteration{Type::Pointer, scope};
+      iteration.owned = iteration.scopeLoop = true;
+      Token held = s.token;
+      held.text = "$scope";
+      bind(held, iteration);
+      loops.back().scope = scope;
+      const bool terminated = block(s.body);
+      if (!terminated) cleanupScopes(scopes.size() - 1);
+      scopes.pop_back();
+      return terminated;
+    }
+    if (s.kind == "markupAdd") {
+      markupAdd(s);
+      return false;
+    }
+    if (s.kind == "markupSplice") {
+      if (!analysis.markupSplices.count(&s)) return statement(*s.alternate.front());
+      markupSplice(s);
+      return false;
+    }
     if (s.kind == "block")
       return block(s.body);
     if (s.kind == "switch") return switchStatement(s);
@@ -3468,7 +3707,9 @@ public:
       for (const auto &path : functions.visibleFields(self.record)) {
         auto address = fresh();
         emit(address + " = getelementptr " + irType(self) + ", ptr %arg0, i32 0" + indexList(path.indices));
-        bind(path.field->name, {path.field->type, address});
+        Binding field{path.field->scope.empty() ? path.field->type : path.field->scopedType, address};
+        if (!path.field->scope.empty()) field.scoped = path.field;
+        bind(path.field->name, field);
       }
       scopes.emplace_back();
     }
@@ -3500,6 +3741,7 @@ public:
         declare(parameter.name, {parameter.type, arg});
       }
     }
+    functionResult = f.result;
     bool terminated = sequence(f.body);
     if (!terminated) {
       cleanupScopes(0);
@@ -3508,7 +3750,7 @@ public:
     output << ") {\nentry:\n" << allocations.str() << code.str() << "}\n\n" << thunks.str();
     return {globals.str(), output.str(), usesTextRuntime, usesHeapRuntime, usesTaskRuntime,
             usesCalendarRuntime, usesWideRuntime, usesBigRuntime, usesDecimalRuntime, usesCollectionRuntime,
-            usesFuncRuntime, usesMetaRuntime, cleanups, destroys, tables, helpers, types};
+            usesFuncRuntime, usesMetaRuntime, usesMarkupRuntime, usesScopeRuntime, cleanups, destroys, tables, helpers, types, scopeNames};
   }
 };
 } // namespace
@@ -3531,12 +3773,16 @@ std::string emitRecords(const Symbols &symbols) {
   // Each module keeps private copies of the defaults it may construct.
   std::set<std::string> zeros;
   for (const auto &[name, record] : symbols.records)
-    for (const auto &field : record.fields)
+    for (const auto &field : record.fields) {
       if (managedValue(field.type) && (!field.initializer || field.runtimeDefault))
         zeros.insert(managedZero(field.type));
-  for (const auto &[name, info] : symbols.statics)
+      if (!field.scope.empty() && managedValue(field.scopedType)) zeros.insert(managedZero(field.scopedType));
+    }
+  for (const auto &[name, info] : symbols.statics) {
     if (managedValue(info.type) && (!info.initializer || info.runtime) && !info.imported)
       zeros.insert(managedZero(info.type));
+    if (!info.scope.empty() && managedValue(info.scopedType)) zeros.insert(managedZero(info.scopedType));
+  }
   for (const auto &zero : zeros) {
     if (zero == "@duck$big.zero")
       ir += zero + " = private unnamed_addr constant { i64, i64, i64, [0 x i32] } "
@@ -3666,7 +3912,8 @@ std::string emitDestroys(const Symbols &symbols, std::set<std::string> container
       if (collectionValue(field.type)) {
         const auto part = "%field" + std::to_string(i), held = "%held" + std::to_string(i);
         auto release = [](const Type &t) {
-          return managedValue(t) ? "@duck$slot.release" : trackedAlias(t) ? "@duck.heap$slot" : "null";
+          return elementValue(t) ? "@duck.markup$node" : managedValue(t) ? "@duck$slot.release"
+                 : trackedAlias(t) ? "@duck.heap$slot" : "null";
         };
         ir += "  " + part + " = getelementptr %struct." + record + ", ptr %self, i32 0, i32 " +
               std::to_string(i) + "\n  " + held + " = load ptr, ptr " + part + "\n";

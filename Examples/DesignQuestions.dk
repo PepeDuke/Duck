@@ -65,8 +65,9 @@ elsewhere use the clarified rules; this file records remaining boundaries.
     Tutorials avoid assigning an outcome to that insertion expression.
 
 12. Custom scope boundaries
-    Specify behavior across threads, nested scopes with the same name,
-    and a repeated @start while old scoped resources are still in use.
+    Settled in the README: a repeated @start cleans up and restarts, and a
+    scope is process-wide. Still open: whether Duck should reject a marked
+    loop nested in one of the same name, which today ends the outer iteration.
 
 13. Errors and test discovery
     Specify which invalid patterns are compile-time errors versus runtime

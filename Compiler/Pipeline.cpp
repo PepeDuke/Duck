@@ -14,6 +14,8 @@ Program combineUnits(std::vector<Program> units) {
     for (auto &field : unit.statics) program.statics.push_back(std::move(field));
     for (auto &source : unit.sources) program.sources.push_back(std::move(source));
     for (auto &test : unit.tests) program.tests.push_back(std::move(test));
+    for (auto &host : unit.markupHosts) program.markupHosts.push_back(std::move(host));
+    for (auto &value : unit.markupValues) program.markupValues.push_back(std::move(value));
     for (auto &function : unit) {
       if (function.script) function.name.text = "$exec." + std::to_string(scripts++);
       program.push_back(std::move(function));
@@ -37,11 +39,14 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
       "; Duck bootstrap LLVM IR\ndeclare i32 @printf(ptr, ...)\n"
       "declare double @llvm.floor.f64(double)\ndeclare void @llvm.trap()\n";
   bool needsText = false, needsBig = false, needsDecimal = false, needsCollections = mainArguments;
-  bool needsFunc = false, needsMeta = false;
+  bool needsFunc = false, needsMeta = false, needsMarkup = false, needsScope = false;
+  for (const auto &f : functions) needsScope = needsScope || f.usesScopeRuntime;
   for (const auto &f : functions) {
+    needsMarkup = needsMarkup || f.usesMarkupRuntime;
     needsFunc = needsFunc || f.usesFuncRuntime;
     needsMeta = needsMeta || f.usesMetaRuntime;
   }
+  needsCollections = needsCollections || needsMarkup;
   for (const auto &f : functions) {
     needsBig = needsBig || f.usesBigRuntime;
     needsDecimal = needsDecimal || f.usesDecimalRuntime;
@@ -50,9 +55,16 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
   // big storage shares the text reference count and the wide digit printer;
   // collections release text and big elements through it.
   for (const auto &f : functions) needsText = needsText || f.usesTextRuntime || needsBig || needsCollections;
-  bool needsHeap = false;
+  bool needsHeap = needsMarkup;
   for (const auto &f : functions) needsHeap = needsHeap || f.usesHeapRuntime;
-  if (needsText || needsHeap || needsFunc) module += "declare ptr @malloc(i64)\ndeclare void @free(ptr)\n";
+  if (needsText || needsHeap || needsFunc || needsScope) module += "declare ptr @malloc(i64)\ndeclare void @free(ptr)\n";
+  if (needsScope) {
+    module += scopeRuntimeIR(nativeSymbols);
+    std::set<std::string> names;
+    for (const auto &f : functions) names.insert(f.scopeNames.begin(), f.scopeNames.end());
+    for (const auto &name : names) module += "$duck$scope." + name + " = comdat any\n@duck$scope." + name +
+                                          " = linkonce_odr global %duck.scope zeroinitializer, comdat\n";
+  }
   if (needsFunc) module += funcRuntimeIR();
   if (needsMeta) module += metaRuntimeIR();
   if (needsHeap) module += heapRuntimeIR();
@@ -61,6 +73,7 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
   if (needsTasks) module += taskRuntimeIR(nativeSymbols);
   if (needsText) module += textRuntimeIR();
   if (needsCollections) module += collectionRuntimeIR();
+  if (needsMarkup) module += markupRuntimeIR();
   if (needsCollections && needsBig) module += collectionBigKeyIR();
   bool needsCalendar = false;
   for (const auto &f : functions) needsCalendar = needsCalendar || f.usesCalendarRuntime;
@@ -126,6 +139,23 @@ std::string compileModule(const Program &program, const Program &imports,
     if (symbols.count(name) || !symbols.statics.emplace(name, info).second)
       fail(info.declaration, "duplicate static field '" + name + "'");
   }
+  // Only the defining module may change a container's layout.
+  for (const auto &host : program.markupHosts) {
+    const auto found = symbols.records.find(host.text);
+    if (found == symbols.records.end() || !found->second.imported) continue;
+    bool present = false;
+    for (const auto &field : found->second.fields) present = present || field.name.text == "$children";
+    if (!present)
+      fail(host, "'" + host.text + "' is defined in another module and cannot hold children; give it a this{ } block there");
+  }
+  for (const auto &value : program.markupValues) {
+    const auto found = symbols.records.find(value.tag.text);
+    if (found == symbols.records.end() || !found->second.imported) continue;
+    bool present = false;
+    for (const auto &field : found->second.fields) present = present || field.name.text == "value";
+    if (!present)
+      fail(value.tag, "'" + value.tag.text + "' is defined in another module; declare its value field there");
+  }
   resolveInheritance(symbols);
   resolveProperties(symbols, {&program, &imports}, {&symbols, &imported});
   validateOverrides(symbols);
@@ -143,6 +173,22 @@ std::string compileModule(const Program &program, const Program &imports,
       symbols.validateType(parameter.type, parameter.name);
   }
   validateNativeSymbols(symbols);
+  // A scope builds a value from its type's default when it is first used.
+  auto validateScoped = [&](const Type &type, const Token &at) {
+    symbols.validateType(type, at);
+    if (type == Type::Void || funcValue(type) || (recordValue(type) && symbols.runtimeDefaults(type.record)) ||
+        (fixedArray(type) && symbols.needsCleanup(type)))
+      fail(at, typeName(type) + " cannot live in a named scope; its default must be a constant value");
+  };
+  for (const auto &[name, record] : symbols.records) {
+    (void)name;
+    for (const auto &field : record.fields)
+      if (!field.scope.empty()) validateScoped(field.scopedType, field.name);
+  }
+  for (const auto &[name, info] : symbols.statics) {
+    (void)name;
+    if (!info.scope.empty()) validateScoped(info.scopedType, info.declaration);
+  }
   auto declarations = imported;
   for (const auto &[name, signature] : symbols)
     if (!signature.nativeSymbol.empty()) declarations.emplace(name, signature);
@@ -157,6 +203,40 @@ std::string compileModule(const Program &program, const Program &imports,
     analyses.push_back(analyzeFunction(function, symbols));
   }
   evaluateCompileTimeCalls(evaluatedFunctions, analyses);
+  {
+    // Which calls can come back because a callee ran @end: those reaching an
+    // @end here, any call into another module, and calls through values, whose
+    // targets are unknown. A module with neither @end nor imports has none.
+    bool ends = !imports.empty();
+    for (const auto &analysis : analyses) ends = ends || analysis.endsScope;
+    if (ends) {
+      std::set<std::string> importedFunctions;
+      for (const auto &f : imports)
+        if (f.nativeSymbol.empty()) importedFunctions.insert(f.name.text);
+      auto unwinders = std::make_shared<std::set<std::string>>(importedFunctions);
+      for (size_t i = 0; i < analyses.size(); ++i)
+        if (analyses[i].endsScope || !analyses[i].indirectCalls.empty() || !analyses[i].duckCalls.empty())
+          unwinders->insert(evaluatedFunctions[i]->name.text);
+      for (bool changed = true; changed;) {
+        changed = false;
+        for (size_t i = 0; i < analyses.size(); ++i) {
+          if (unwinders->count(evaluatedFunctions[i]->name.text)) continue;
+          for (const auto &[call, target] : analyses[i].callTargets) {
+            (void)call;
+            if (unwinders->count(target)) {
+              unwinders->insert(evaluatedFunctions[i]->name.text);
+              changed = true;
+              break;
+            }
+          }
+        }
+      }
+      for (auto &analysis : analyses) {
+        analysis.unwinders = unwinders;
+        analysis.unwindIndirect = true;
+      }
+    }
+  }
   // Exec paths are literals, so a file nothing runs is known here. Its
   // statements would otherwise be dead code that looks like it executes.
   std::set<std::string> executed;
@@ -192,6 +272,7 @@ std::string compileModule(const Program &program, const Program &imports,
       Type leaf = field.type;
       while (arrayValue(leaf)) leaf = *leaf.element;
       if (funcValue(leaf) && !fragments.empty()) fragments.front().usesFuncRuntime = true;
+      if (markupValue(field.type) && !fragments.empty()) fragments.front().usesMarkupRuntime = true;
       if ((leaf.role != Type::Raw || field.type.role != Type::Raw) && !fragments.empty())
         fragments.front().usesHeapRuntime = true;
       if (collectionValue(leaf) && trackedAlias(*leaf.element) && !fragments.empty())

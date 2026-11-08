@@ -1,0 +1,11 @@
+version = 1
+
+[project]
+name = "Schedules"
+entry = "app"
+
+# duck test Schedules.dkp --compare-schedules
+# runs these tests under the sequential schedule and each accepted parallel one.
+
+[modules.app]
+sources = ["app/*.dk"]

@@ -1,0 +1,27 @@
+// INTENTIONALLY BROKEN: this.Label names one child, and there are two.
+// EXPECT: compile error that component Label has duplicates.
+// PITFALL: when spliced markup makes the count unknown, this traps at run time.
+// FIX: choose one with this.Label[0].
+Label
+{
+    string Name
+}
+
+Panel
+{
+    this{
+        <Label Name="Bob"/>
+        <Label Name="Rob"/>
+    }
+
+    Show()
+    {
+        Print(this.Label.Name)
+    }
+}
+
+Main()
+{
+    Panel panel()
+    panel.Show()
+}

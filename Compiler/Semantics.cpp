@@ -13,6 +13,8 @@
 
 namespace duck {
 std::string typeName(Type type) {
+  if (markupValue(type)) return "markup";
+  if (elementValue(type)) return "element";
   if (arrayValue(type)) {
     std::string dimensions;
     for (; arrayValue(type); type = *type.element)
@@ -176,6 +178,7 @@ struct Local {
   bool memberLambda = false; // A func field that can only be called through its object.
   bool callOnly = false;     // Holds a lambda over this frame: it can be called, not copied.
   bool lent = false;         // Received from a function that may lend: it may not own its object.
+  std::string scope;         // A field in a named scope, bound by its bare name.
   const Expr *constantValue = nullptr; // A # local's initializer, for Switch label checks.
 };
 class Analyzer {
@@ -911,8 +914,11 @@ class Analyzer {
   // q.Front, s.Top, p.Last, p.LastKey, and .Len on stored collections; Void
   // when e is not such a read.
   Type collectionMember(const Expr &e) {
-    if (e.kind != "." || enumOf(e) || !staticPath(e).empty() || staticStorage(*e.args[0])) return Type::Void;
+    if (e.kind != "." || enumOf(e) || !staticPath(e).empty()) return Type::Void;
     const auto &base = *e.args[0];
+    // Static storage holds no collections, except through a named scope.
+    if (const auto path = staticPath(base); staticStorage(base) && (path.empty() || symbols.statics.at(path).scope.empty()))
+      return Type::Void;
     if (!storage(base)) return Type::Void;
     const auto type = location(base).type;
     if (arrayValue(type)) {
@@ -1100,6 +1106,10 @@ class Analyzer {
   // A name for the storage a chain of names and fields reaches, the same
   // for every spelling of it; empty for any other expression.
   std::string placeKey(const Expr &e) const {
+    if (e.kind == "call" && e.receiver) {
+      const auto prefix = placeKey(*e.receiver);
+      return prefix.empty() ? "" : prefix + ".GetChildren()";
+    }
     if (e.kind == ".") {
       const auto &base = *e.args[0];
       if (base.kind == "name" && base.token.text == "this") return "0:" + e.token.text; // Fields bind in scope 0.
@@ -1208,13 +1218,35 @@ class Analyzer {
   }
   // Existing storage: an addressable expression that is not a property.
   bool storage(const Expr &e) {
+    if (childrenCall(e)) return true;
     std::string owner;
     // q.Front gives a copy of an element, so q.Front.X reads through that.
     return e.addressable() && !propertyOf(e, owner) && !(e.kind == "index" && pairIndex(e)) &&
            !(e.kind == "." && collectionMember(e) != Type::Void);
   }
+  // Whether a local-rooted receiver can be read as storage.
+  bool localReceiver(const Expr &e) {
+    const Expr *root = &e;
+    while (root->kind == "." || root->kind == "index" || (root->kind == "call" && root->receiver))
+      root = root->kind == "call" ? root->receiver.get() : root->args[0].get();
+    return root->kind == "name" && findLocal(root->token);
+  }
+  // x.GetChildren() names x's child storage, so reading it copies nothing.
+  // A method the container declares with that name keeps priority.
+  bool childrenCall(const Expr &e) {
+    if (e.kind != "call" || !e.receiver || !e.args.empty() || memberName(e.token.text) != "GetChildren" ||
+        !localReceiver(*e.receiver) || !storage(*e.receiver))
+      return false;
+    auto type = location(*e.receiver).type;
+    if (elementValue(type)) return true;
+    if (type.depth) type = type.pointee();
+    if (!recordValue(type)) return false;
+    MemberPath path;
+    return symbols.findMethod(type.record, "GetChildren", path) == symbols.end();
+  }
   // p[key] on a stored pair, which reads a copy rather than naming storage.
   bool pairIndex(const Expr &e) {
+    indexedBases.insert(e.args[0].get());
     const auto &base = *e.args[0];
     if (!storage(base)) return false;
     if (std::vector<const Expr *> coordinates; gridAccess(e, coordinates)) return false;
@@ -1310,6 +1342,18 @@ class Analyzer {
   // mutability of its base; dereferencing borrows the pointed-to storage.
   Local location(const Expr &e, bool read = true) {
     Local local{Type::Void, false};
+    if (childrenCall(e)) {
+      auto type = location(*e.receiver).type;
+      MemberPath path;
+      if (!elementValue(type)) {
+        if (type.depth) type = type.pointee();
+        if (!symbols.findField(type.record, "$children", path))
+          fail(e.token, "'" + type.record + "' has no markup children; give it a this{ } block or nest elements in its tag");
+      }
+      analysis.markupChildren[&e] = path.indices;
+      analysis.expressionTypes[&e] = markupType();
+      return {markupType(), true};
+    }
     if (const auto qualified = staticPath(e); !qualified.empty()) {
       const auto &info = symbols.statics.at(qualified);
       // Statics initialize in declaration order, after every imported static.
@@ -1322,16 +1366,19 @@ class Analyzer {
       const auto dot = qualified.rfind('.');
       requireAccess(info.protectedAccess, qualified.substr(0, dot), qualified.substr(dot + 1), e.token);
       analysis.staticFields[&e] = qualified;
-      local = {info.type, info.constant && &e != initializationTarget};
+      local = {info.scope.empty() ? info.type : info.scopedType, info.constant && &e != initializationTarget};
+      if (!info.scope.empty()) analysis.scopedPlaces[&e] = {info.scope, info.scopedType};
     } else if (e.kind == "name") {
       if (std::string owner; !findLocal(e.token) && propertyOf(e, owner)) notStorage(e);
       local = lookup(e.token);
+      if (!local.scope.empty()) analysis.scopedPlaces[&e] = {local.scope, local.type};
       if (read && local.memberLambda) notFuncValue(e.token);
       if (read && local.callOnly)
         fail(e.token, "'" + e.token.text + "' holds a lambda that uses this frame's storage; it can only be called here");
       if (local.receiver) analysis.receiverStorage.insert(&e);
       if (read) requireInitialized(e.token);
     } else if (e.kind == "index") {
+      indexedBases.insert(e.args[0].get());
       // grid[x][y] names a cell: reading an unwritten one gives the element
       // default, and writing one stores it.
       if (std::vector<const Expr *> coordinates; const auto *grid = gridAccess(e, coordinates)) {
@@ -1357,6 +1404,19 @@ class Analyzer {
       if (!storage(base)) fail(e.token, "index a stored array");
       local = location(base, read);
       requireComplete(base);
+      if (analysis.markupLookups.count(&base)) {
+        expression(*e.args[1], Type::Long);
+        analysis.markupIndexed.insert(&e);
+        analysis.expressionTypes[&e] = local.type;
+        return local;
+      }
+      if (markupValue(local.type)) {
+        expression(*e.args[1], Type::Long);
+        local.type = elementType();
+        analysis.markupIndexed.insert(&e);
+        analysis.expressionTypes[&e] = local.type;
+        return local;
+      }
       if (!local.type.depth && local.type.base == Type::Pair) {
         expression(*e.args[1], *local.type.key);
         local.type = *local.type.element;
@@ -1392,12 +1452,24 @@ class Analyzer {
         fail(e.token, "'" + e.token.text + "' is a read-only member of " + typeName(local.type));
       if (!recordValue(local.type)) fail(e.token, "field access requires a container or a pointer to a container");
       MemberPath path;
-      if (!symbols.findField(local.type.record, e.token.text, path))
+      if (!symbols.findField(local.type.record, e.token.text, path)) {
+        if (const auto child = componentLookup(e, local.type.record); !child.empty()) {
+          Type found = Type::Record;
+          found.record = child;
+          found = found.pointerTo();
+          found.role = Type::Owner;
+          local.type = found;
+          local.constant = true;
+          analysis.expressionTypes[&e] = found;
+          return local;
+        }
         fail(e.token, "unknown container field '" + e.token.text + "'");
+      }
       requireAccess(path.field->protectedAccess, path.declaring, e.token.text, e.token);
       if (read && path.field->memberLambda) notFuncValue(e.token);
       analysis.fieldIndices[&e] = path.indices;
-      local.type = path.field->type;
+      local.type = path.field->scope.empty() ? path.field->type : path.field->scopedType;
+      if (!path.field->scope.empty()) analysis.scopedPlaces[&e] = {path.field->scope, local.type};
     } else fail(e.token, "operand must be a mutable variable, field, or dereference");
     analysis.expressionTypes[&e] = local.type;
     if (local.type.role != Type::Raw)
@@ -1407,6 +1479,27 @@ class Analyzer {
           break;
         }
     return local;
+  }
+  // Bases of index expressions: an indexed `x.Label[i]` may name a repeated child.
+  std::set<const Expr *> indexedBases;
+  // x.Label names x's child of container type Label: the type's qualified
+  // name, or empty when e is not a component of a container with children.
+  std::string componentLookup(const Expr &e, const std::string &record) {
+    MemberPath holder;
+    if (!symbols.findField(record, "$children", holder)) return "";
+    const auto child = resolveRecord(e.token.text, e.token);
+    if (child.empty()) return "";
+    const auto &owner = symbols.records.at(record);
+    if (owner.markupClosed) {
+      const auto found = owner.markupChildren.find(child);
+      const int count = found == owner.markupChildren.end() ? 0 : found->second;
+      if (!count) fail(e.token, "'" + record + "' has no component '" + e.token.text + "'");
+      if (count > 1 && !indexedBases.count(&e))
+        fail(e.token, "component '" + e.token.text + "' has duplicates in '" + record + "'; choose one with " +
+                          e.token.text + "[index]");
+    }
+    analysis.markupLookups[&e] = {child, holder.indices};
+    return child;
   }
   bool heapStorage(const Expr &e) const {
     if (analysis.receiverStorage.count(&e)) return true;
@@ -1484,8 +1577,9 @@ class Analyzer {
       frames.back().info.usesThis = true;
       frames.back().info.record = container;
       for (const auto &path : symbols.visibleFields(container)) {
-        Local field{path.field->type, false, true, true};
+        Local field{path.field->scope.empty() ? path.field->type : path.field->scopedType, false, true, true};
         field.memberLambda = path.field->memberLambda;
+        field.scope = path.field->scope;
         bind(path.field->name, field);
       }
       scopes.emplace_back();
@@ -1632,8 +1726,9 @@ class Analyzer {
       constant = !type.depth && local.constant;
     } else
       type = expression(base);
-    if (type.depth) type = type.pointee();
-    if (!recordValue(type)) fail(base.token, "a duck call needs a container receiver, not " + typeName(type));
+    const bool element = elementValue(type);
+    if (type.depth && !element) type = type.pointee();
+    if (!element && !recordValue(type)) fail(base.token, "a duck call needs a container receiver, not " + typeName(type));
     FunctionAnalysis::DuckCall call;
     call.record = type;
     if (e.kind == "duckExists") {
@@ -1647,7 +1742,7 @@ class Analyzer {
           signature.parameters.size() != e.args.size() + 1)
         continue;
       const auto owner = key.substr(0, key.rfind('.'));
-      if (owner == type.record || symbols.derivesFrom(owner, type.record) || symbols.derivesFrom(type.record, owner))
+      if (element || owner == type.record || symbols.derivesFrom(owner, type.record) || symbols.derivesFrom(type.record, owner))
         candidates.push_back(&signature);
     }
     Signature shape;
@@ -1696,6 +1791,15 @@ class Analyzer {
   }
   Type checkExpression(const Expr &e, Type expected) {
     if (e.kind == "compileTime") return expression(*e.args[0], expected);
+    if (e.kind == "scopeActive") {
+      analysis.scopeEffects = true;
+      analysis.expressionTypes[&e] = Type::Bool;
+      return Type::Bool;
+    }
+    if (e.kind == "markupTake") {
+      analysis.expressionTypes[&e] = markupType();
+      return markupType();
+    }
     if (e.kind == "macroValue") {
       scopes.emplace_back();
       for (const auto &binding : e.bindings) statement(*binding);
@@ -1961,6 +2065,9 @@ class Analyzer {
       // ?a[i] and ?p[key] read the element, or the element type's default
       // when the index is outside the array or the key is missing.
       const auto type = expression(*e.args[0]);
+      if (e.args[0]->kind != "index" && !analysis.scopedPlaces.count(e.args[0].get()))
+        fail(e.token, "'?' guards an index such as ?a[i], a method call such as ?p.Foo(), a duck call such as ?e..Foo(), or a scoped variable");
+      if (e.args[0]->kind != "index") return type;
       if (recordValue(type) && symbols.runtimeDefaults(type.record))
         fail(e.token, "?" + e.args[0]->args[0]->token.text + "[...] cannot read '" + type.record +
                           "': its default is built at run time (constructors or computed defaults); "
@@ -2041,7 +2148,15 @@ class Analyzer {
     if (e.kind == "call") {
       // `Gun g(5)` and `Gun* p(5)` arrive with the constructed type resolved.
       if (recordValue(e.castType)) return construction(e, e.castType.record);
+      if (childrenCall(e))
+        fail(e.token, "GetChildren() is a view of stored children; use its Len, index it, or loop over it");
       if (Type reflected; reflectionCall(e, expected, reflected)) return reflected;
+      if (e.receiver && localReceiver(*e.receiver) && storage(*e.receiver) && elementValue(location(*e.receiver).type)) {
+        if (memberName(op) != "GetName" || !e.args.empty())
+          fail(e.token, "an element from GetChildren() has GetName() and GetChildren(); use .. to call its methods");
+        analysis.elementNames.insert(&e);
+        return Type::Text;
+      }
       // `g(w)` on a container local supplies its missing parts; on a
       // complete one, or on a pointer to one, it reinitializes the object.
       if (!e.receiver && op.find('.') == std::string::npos)
@@ -2551,6 +2666,51 @@ class Analyzer {
     if (s.kind == "block")
       return block(s.body);
     if (s.kind == "switch") return switchStatement(s);
+    if (s.kind == "scopeStart" || s.kind == "scopeEnd") {
+      analysis.scopeEffects = true;
+      analysis.endsScope = analysis.endsScope || s.kind == "scopeEnd";
+      return false;
+    }
+    if (s.kind == "scopedBody") {
+      analysis.scopeEffects = true;
+      return block(s.body);
+    }
+    if (s.kind == "markupAdd") {
+      location(*s.target, false);
+      expression(*s.expr);
+      return false;
+    }
+    if (s.kind == "markupSplice") {
+      const auto &content = *s.alternate.front();
+      // A stored markup value moves in: nothing is copied.
+      if (content.expr->addressable() && storage(*content.expr) && markupValue(location(*content.expr).type)) {
+        location(*s.target, false);
+        analysis.markupSplices.insert(&s);
+        return false;
+      }
+      const auto savedAnalysis = analysis;
+      const auto savedScopes = scopes;
+      const auto type = expression(*content.expr);
+      analysis = savedAnalysis;
+      scopes = savedScopes;
+      if (markupValue(type)) {
+        location(*s.target, false);
+        expression(*content.expr);
+        analysis.markupSplices.insert(&s);
+        return false;
+      }
+      bool holdsValue = false;
+      if (content.target) {
+        auto owner = location(*content.target->args[0]).type;
+        if (owner.depth) owner = owner.pointee();
+        MemberPath field;
+        holdsValue = recordValue(owner) && symbols.findField(owner.record, "value", field);
+      }
+      if (!holdsValue)
+        fail(content.token, "markup content must be an element or a markup value, or a value for a declared "
+                            "value field; got " + typeName(type));
+      return statement(content);
+    }
     if (s.kind == "break") {
       if (loops.empty())
         fail(s.token, "break requires an enclosing loop or Switch");
@@ -2674,7 +2834,8 @@ class Analyzer {
       if (s.expr && !incoming.empty())
         exits.push_back(scopes);
       scopes = exits.empty() ? entry : merge(entry, exits);
-      if (exits.empty()) {
+      // An @end anywhere below a marked loop leaves it, so it can always finish.
+      if (exits.empty() && !(s.body.size() == 1 && s.body.front()->kind == "scopedBody")) {
         analysis.terminatingLoops.insert(&s);
         return true;
       }
@@ -2816,6 +2977,8 @@ class Analyzer {
       std::string owner;
       auto local = propertyOf(target, owner) ? Local{propertyWrite(target, owner, s.kind != "assign"), false}
                                              : location(target, s.kind != "assign");
+      if (&target != s.target.get() && target.kind != "index" && !analysis.scopedPlaces.count(&target))
+        fail(s.token, "'?' guards an index such as ?a[i], a method call such as ?p.Foo(), a duck call such as ?e..Foo(), or a scoped variable");
       if (&target != s.target.get()) analysis.expressionTypes[s.target.get()] = local.type;
       if (local.constant) constantTarget(target, s.token);
       // Replacing a collection, or storing a new grid cell, changes its length.
@@ -2950,8 +3113,9 @@ public:
     }
     if (method && !function.generated) {
       for (const auto &path : symbols.visibleFields(container)) {
-        Local field{path.field->type, false, true, true};
+        Local field{path.field->scope.empty() ? path.field->type : path.field->scopedType, false, true, true};
         field.memberLambda = path.field->memberLambda;
+        field.scope = path.field->scope;
         bind(path.field->name, field);
       }
       scopes.emplace_back();
@@ -3084,7 +3248,7 @@ void resolveReturnRoles(Symbols &symbols, const std::vector<const Program *> &pr
 void resolveFieldDefaults(Symbols &symbols) {
   for (auto &[name, record] : symbols.records)
     for (auto &field : record.fields)
-      if (field.initializer && field.type.role == Type::Owner) {
+      if (field.initializer && (field.type.role == Type::Owner || markupValue(field.type))) {
         // Allocated at run time; analyzed with its generated method.
         field.runtimeDefault = true;
       } else if (field.initializer) {

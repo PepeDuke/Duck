@@ -1,0 +1,19 @@
+// INTENTIONALLY BROKEN: attributes are ordinary field assignments.
+// EXPECT: compile error that Title is an unknown container field.
+// FIX: use a field the tag's container declares.
+Label
+{
+    string Name
+}
+
+Panel
+{
+    this{
+        <Label Title="Bob"/>
+    }
+}
+
+Main()
+{
+    Panel panel()
+}

@@ -1,0 +1,9 @@
+// INTENTIONALLY BROKEN: @end needs an active scope.
+// EXPECT: run time trap on the second @end.
+// FIX: check if @Play before ending a scope that may have ended already.
+Main()
+{
+    @start Play
+    @end Play
+    @end Play
+}

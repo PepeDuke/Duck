@@ -224,6 +224,46 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
                                fragment.name.text + "' at " + where(existing.name));
       merged.fields.push_back(field);
     }
+    if (fragment.markupClosed) {
+      merged.markupClosed = true;
+      merged.markupChildren = fragment.markupChildren;
+    }
+  }
+  // Markup decides what its containers store: children under a tag, and a
+  // `value` field typed by the literal written there.
+  for (const auto &host : program.markupHosts) {
+    const auto found = symbols.records.find(host.text);
+    if (found == symbols.records.end()) continue;
+    auto &record = found->second;
+    record.markupClosed = false;
+    bool present = false;
+    for (const auto &field : record.fields) present = present || field.name.text == "$children";
+    if (present) continue;
+    Token name = host;
+    name.text = "$children";
+    record.fields.push_back({name, markupType()});
+  }
+  {
+    std::map<std::string, Program::MarkupValue> implied;
+    for (const auto &value : program.markupValues) {
+      const auto found = symbols.records.find(value.tag.text);
+      if (found == symbols.records.end()) continue;
+      auto &record = found->second;
+      if (const auto known = implied.find(value.tag.text); known != implied.end()) {
+        if (known->second.type != value.type)
+          fail(value.tag, "'" + value.tag.text + "' holds a " + typeName(known->second.type) + " value at " +
+                              where(known->second.tag) + " and a " + typeName(value.type) +
+                              " value here; declare its value field with one type");
+        continue;
+      }
+      bool declared = false;
+      for (const auto &field : record.fields) declared = declared || field.name.text == "value";
+      if (declared) continue;
+      Token name = value.tag;
+      name.text = "value";
+      record.fields.push_back({name, value.type});
+      implied.emplace(value.tag.text, value);
+    }
   }
   symbols.enums = resolveEnums(program.enums);
   for (const auto &[name, info] : symbols.enums)
@@ -296,10 +336,12 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
     StaticInfo info{field.name, field.type, field.constant, field.protectedAccess, field.initializer.get()};
     info.order = symbols.statics.size();
     info.usings = field.usings;
+    info.scope = field.scope;
+    info.scopedType = field.scopedType;
     if (clash || !symbols.statics.emplace(name, info).second)
       fail(field.name, "duplicate static field or member '" + name + "'");
     const auto &t = field.type;
-    if (!(numeric(t) || t == Type::Bool || enumValue(t) || t == Type::Pointer || recordValue(t) ||
+    if (field.scope.empty() && !(numeric(t) || t == Type::Bool || enumValue(t) || t == Type::Pointer || recordValue(t) ||
           managedValue(t)))
       fail(field.name, "static fields of type " + typeName(t) +
                            " are not supported yet; use a number, bool, enum, string, name, big, "
@@ -855,7 +897,7 @@ void validateLifetimes(const Symbols &symbols) {
                              " yet: a container field holds nested arrays only with fixed, plain "
                              "dimensions, as in int [3][4]");
   for (const auto &[name, info] : symbols.statics)
-    if (arrayValue(info.type))
+    if (arrayValue(info.type) && info.scope.empty())
       fail(info.declaration, "static field '" + name + "' cannot hold an array yet");
   for (const auto &[name, info] : symbols.statics)
     if (collectionValue(info.type))

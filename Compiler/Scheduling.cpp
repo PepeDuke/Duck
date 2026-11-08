@@ -11,7 +11,8 @@ bool plainValue(const Type &type) {
 template <class Visit> void visitExpression(const Expr &e, Visit &visit) {
   visit(e);
   if (e.receiver) visitExpression(*e.receiver, visit);
-  for (const auto &binding : e.bindings) visitExpression(*binding->expr, visit);
+  for (const auto &binding : e.bindings)
+    if (binding->expr) visitExpression(*binding->expr, visit);
   for (const auto &child : e.args) visitExpression(*child, visit);
 }
 template <class VisitExpr, class VisitStmt>
@@ -42,7 +43,8 @@ class Scheduler {
     bool found = false;
     auto expr = [&](const Expr &e) {
       // Runtime dispatch and lambdas have effects only known when they run.
-      if (e.kind == "duckCall" || e.kind == "invoke" || e.kind == "lambda" || analysis.indirectCalls.count(&e)) {
+      if (e.kind == "duckCall" || e.kind == "invoke" || e.kind == "lambda" || e.kind == "markupTake" || e.kind == "scopeActive" ||
+          analysis.indirectCalls.count(&e)) {
         found = true;
         return;
       }
@@ -53,7 +55,8 @@ class Scheduler {
     };
     auto stmt = [&](const Stmt &child) {
       if (child.kind == "break" || child.kind == "continue" || child.kind == "return" ||
-          child.kind == "returnOwner" || analysis.terminatingLoops.count(&child))
+          child.kind == "returnOwner" || child.kind == "scopeStart" || child.kind == "scopeEnd" ||
+          child.kind == "scopedBody" || analysis.terminatingLoops.count(&child))
         found = true;
     };
     visitStatement(s, expr, stmt);
@@ -113,7 +116,7 @@ std::set<std::string> isolatedFunctions(const Program &program,
     if (!candidate(f)) continue;
     const auto &a = analyses[i];
     // Static storage is shared by every thread.
-    bool known = a.staticFields.empty();
+    bool known = a.staticFields.empty() && !a.scopeEffects;
     for (const auto &[expr, type] : a.expressionTypes)
       // Builtins and construction have no call target; Print is an external effect.
       known = known && plainValue(type) && expr->kind != "duckCall" && expr->kind != "invoke" &&

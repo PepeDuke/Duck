@@ -1,0 +1,18 @@
+// INTENTIONALLY BROKEN: the scoped variable has no storage after @end.
+// EXPECT: run time trap on the last Print.
+// PITFALL: only a use written with ? is skipped when the scope is inactive.
+// FIX: check if @Play first, or read it as ?Score.
+Game
+#{
+    [@Play]
+    int Score
+}
+
+Main()
+{
+    @start Play
+    Game.Score = 4
+    Print(Game.Score)
+    @end Play
+    Print(Game.Score)
+}
