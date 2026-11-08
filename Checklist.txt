@@ -110,9 +110,9 @@ Reflection, duck typing, and lambdas
    Proposal: Compute each lambda's free variables and place captures in its environment. For escaping lambdas, promote referenced local storage as needed and retain tracked aliases without making them owners. Test invocation after the original scope exits.
 
 Entry points and scripts
-[] Accept Main(string [] args) and pass program arguments to it.
+[x] Accept Main(string [] args) and pass program arguments to it.
    Proposal: Once arrays are available, accept the documented second entry signature and build a Duck string array in the native entry wrapper. Specify whether it includes the executable name and use a Unicode-capable argument source on Windows.
-[] Support executable file-scope statements invoked through Exec("file.dk").
+[x] Support executable file-scope statements invoked through Exec("file.dk").
    Proposal: Collect executable file-scope statements into a hidden function per source file. Propose a table of project source paths for Exec dispatch; specify path resolution and missing-file behavior before supporting computed paths.
 
 Compile-time execution and macros

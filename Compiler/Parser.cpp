@@ -1086,6 +1086,64 @@ class Parser {
     program.enums.push_back(std::move(fragment));
   }
 
+  // A dynamic array is move-only, and the native entry owns the argument
+  // array, so `Main(string [] args)` borrows it instead of taking a copy.
+  static void entryParameter(Function &main) {
+    if (main.params.size() == 1 && dynamicArray(main.params[0].type))
+      main.params[0].reference = true;
+  }
+
+  // A function definition ahead: `[type] Name(...)` and then its block. The
+  // block is the only difference between a definition and a call.
+  bool functionAhead() const {
+    auto punct = [&](size_t k, const char *text) { return !tokens[k].string && tokens[k].text == text; };
+    size_t k = pos;
+    for (; !punct(k, "("); ++k)
+      if (tokens[k].string || punct(k, "<eof>") || punct(k, "\n") || punct(k, "=") || punct(k, ":") || punct(k, "::"))
+        return false;
+    for (int depth = 0;; ++k) {
+      if (punct(k, "<eof>")) return false;
+      if (punct(k, "(")) ++depth;
+      else if (punct(k, ")") && --depth == 0) break;
+    }
+    for (++k; punct(k, "\n"); ++k) {
+    }
+    return punct(k, "{");
+  }
+  bool containerAhead() {
+    // A static-only container is not a type name, but still has a body.
+    const bool named = namedType();
+    const auto saved = pos;
+    ++pos;
+    lines();
+    const bool found = at("{") || staticBody() || (named && (parentList() || at(":") || enumBlock()));
+    pos = saved;
+    return found;
+  }
+  // Anything at file scope that is not a declaration is a statement. Tokens
+  // that open no statement stay on the declaration path and its diagnostics.
+  bool fileStatement() {
+    if (at("extern") || at("{") || at("}") || at("+") || at("-")) return false;
+    if (at("#")) {
+      const auto &next = tokens.at(pos + 1);
+      return next.string || (next.text != "{" && next.text != "@");
+    }
+    if (at("if") || at("for") || at("while") || at("do") || at("return") || at("break") || at("continue"))
+      return true;
+    return !functionAhead() && !containerAhead();
+  }
+  // Collects a file's statements into its hidden function, named by
+  // combineUnits. Its locals live for one Exec; other files never see them.
+  void fileScript(Program &program, std::vector<std::unique_ptr<Stmt>> body) {
+    Token name = body.front()->token;
+    name.text = "$exec.0";
+    name.string = name.character = false;
+    Function script{std::move(name), Type::Void, {}, std::move(body), false, {}};
+    script.script = true;
+    script.usings = usings;
+    program.push_back(std::move(script));
+  }
+
   // With braced, reads one `{ ... }` static body; otherwise reads to <eof>.
   void declarations(Program &functions, const std::string &prefix,
                     bool nested, bool braced = false) {
@@ -1095,9 +1153,16 @@ class Parser {
     if (braced) expect("{");
     lines();
     usingDirectives();
+    std::vector<std::unique_ptr<Stmt>> statements;
     while (!at("<eof>") && !(nested && at("}"))) {
       if (at("using"))
         fail(peek(), "using directives must come before the other declarations in their scope");
+      if (!nested && fileStatement()) {
+        statements.push_back(statement());
+        if (!at("\n")) fail(peek(), "expected newline between statements");
+        lines();
+        continue;
+      }
       const auto modifier = peek();
       const bool modified = at("+") || at("-");
       if (modified && !nested) fail(modifier, "access modifiers apply only to container members");
@@ -1172,11 +1237,13 @@ class Parser {
       auto nativeName = name.text.substr(prefix.size());
       functions.push_back(function(std::move(name), result, external, nativeName));
       functions.back().protectedAccess = isProtected;
+      if (!nested && functions.back().name.text == "Main") entryParameter(functions.back());
       if (!at("<eof>") && !at("\n") && !(nested && at("}")))
         fail(peek(), "expected newline between functions");
       lines();
     }
     if (braced) expect("}");
+    if (!statements.empty()) fileScript(functions, std::move(statements));
     scope = enclosing;
     usings = outer;
   }
@@ -1231,6 +1298,8 @@ public:
   Program parse() {
     Program functions;
     functions.sources.push_back(tokens.front().source);
+    // The last statement of a file need not end in a newline.
+    tokens.insert(tokens.end() - 1, Token{"\n", tokens.back().line, tokens.back().column, false, tokens.back().source});
     declarations(functions, "", false);
     return functions;
   }
@@ -1255,6 +1324,27 @@ size_t closingBrace(const std::vector<Token> &tokens, size_t open) {
   }
   return tokens.size();
 }
+// Whether [k, end) starts with comma-separated dotted names leading to a
+// body: a parent list, or an enum's underlying type.
+bool namesBeforeBody(const std::vector<Token> &tokens, size_t k, size_t end) {
+  auto skipLines = [&] { while (k < end && punctuation(tokens, k, "\n")) ++k; };
+  auto word = [&] {
+    return k < end && !tokens[k].string && !tokens[k].text.empty() &&
+           (std::isalpha(static_cast<unsigned char>(tokens[k].text[0])) || tokens[k].text[0] == '_');
+  };
+  while (true) {
+    skipLines();
+    if (!word()) return false;
+    for (++k; punctuation(tokens, k, ".") ; ++k) {
+      ++k;
+      if (!word()) return false;
+    }
+    skipLines();
+    if (k < end && (punctuation(tokens, k, "{") || punctuation(tokens, k, "#"))) return true;
+    if (!punctuation(tokens, k, ",")) return false;
+    ++k;
+  }
+}
 // Collects the type names declared in [begin, end), one declaration level,
 // qualified by prefix. Static bodies are scanned with the container's name
 // appended to the prefix, so `Name #{ Space { } }` registers Name.Space.
@@ -1269,9 +1359,20 @@ void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
       continue;
     }
     if (!(std::isalpha(static_cast<unsigned char>(t.text[0])) || t.text[0] == '_')) continue;
+    // A file-scope statement declares no types, but its header can look as
+    // if it does: `if ready {` and `for x : items {`. Skip the whole line.
+    if (t.text == "if" || t.text == "else" || t.text == "for" || t.text == "while" || t.text == "do") {
+      while (i < end && !punctuation(tokens, i, "\n")) {
+        if (punctuation(tokens, i, "{")) i = closingBrace(tokens, i);
+        ++i;
+      }
+      continue;
+    }
     size_t next = i + 1;
     while (punctuation(tokens, next, "\n")) ++next;
     if (next >= end) continue;
+    // `x : 1` is a statement; a declaration's ':' starts a list of names.
+    if (punctuation(tokens, next, ":") && !namesBeforeBody(tokens, next + 1, end)) continue;
     size_t chain = next;
     // ':' after a name starts an enum's underlying type or a container's
     // parent list; an enum extension may omit it. A parent list reaches '{'

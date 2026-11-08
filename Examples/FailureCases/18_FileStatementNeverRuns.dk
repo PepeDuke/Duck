@@ -1,0 +1,10 @@
+// INTENTIONALLY INVALID: nothing calls Exec on this file.
+// PITFALL: Count looks like a global, but it is a local of a file that never runs.
+// EXPECT: file-scope statement never runs.
+// FIX: declare it in a static container, as in Game #{ int Count = 1 }.
+int Count = 1
+
+Main()
+{
+    Print("Count was never created")
+}

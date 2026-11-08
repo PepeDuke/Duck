@@ -1,0 +1,7 @@
+// A local belongs to one run of this file, so visits is always 1 here.
+int visits = 0
+visits++
+Print(visits)
+Game.Score += 5
+// An Exec path is relative to the file that contains it, not to Main.dk.
+Exec("../Banner.dk")

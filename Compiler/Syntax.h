@@ -263,6 +263,8 @@ struct Function {
   // A property accessor written without a type: a getter's result, or a
   // setter's value parameter, comes from the property's getter expression.
   mutable bool inferred = false;
+  // The hidden function holding a file's executable statements, run by Exec.
+  bool script = false;
 };
 struct Record {
   Token name;

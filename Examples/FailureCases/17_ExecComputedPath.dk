@@ -1,0 +1,8 @@
+// INTENTIONALLY INVALID: Exec paths are resolved while compiling.
+// EXPECT: Exec requires a string literal path.
+// FIX: branch on the value and give each Exec its own literal path.
+Main(string [] args)
+{
+    string level = "Levels/" + args[0]
+    Exec(level)
+}

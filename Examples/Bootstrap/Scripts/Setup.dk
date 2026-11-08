@@ -1,0 +1,4 @@
+// Run by Main.dk. These statements use the program's containers and
+// functions, but only run when Exec("Setup.dk") does.
+Print("setup")
+Game.Score = 10

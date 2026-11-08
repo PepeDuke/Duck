@@ -58,6 +58,7 @@ bodies, and standalone scopes.
 `Examples/Bootstrap/27_Ranges.dk` demonstrates inclusive ascending and descending ranges in loops and as values.
 `Examples/Bootstrap/28_LoopChaining.dk` demonstrates chained for clauses and the placement of outer bodies.
 `Examples/Bootstrap/29_DoLoops.dk` demonstrates `do` without a trailing `while`.
+`Examples/Bootstrap/30_ProgramArguments.dk` reads the command line, and `Examples/Bootstrap/Scripts` runs files with `Exec`.
 `Examples/Collections/01_ArrayMutation.dk`, `02_BoundsChecks.dk`, `03_Maps.dk`, and `04_InclusiveRanges.dk` now compile unchanged.
 Other tutorial files still demonstrate the larger language design.
 
@@ -81,7 +82,7 @@ declarations; tokens and comments never continue into another file. Diagnostics
 retain the originating filename, line, and column. Files are processed and
 functions emitted in command-line order, making repeated builds with the same
 input order deterministic. Quote paths containing spaces. This explicit input
-list does not implement imports, directory discovery, or Duck's runtime `Exec`.
+list does not implement imports or directory discovery.
 
 For separate object modules and project configuration, use the
 [build tool](../BuildTool/README.md). It reads `.dkp` files and invokes the
@@ -105,7 +106,28 @@ accept explicit files/options only and never reads project configuration.
   passed to a mutable reference. Constants can be passed by value. A constant
   requires its initializer: `#int age = 5` is valid, `#int age` is rejected,
   and a later `age = 6` is rejected.
-- A required `Main()` entry point with no parameters or return value.
+- A required entry point, `Main()` or `Main(string [] args)`, with no return value.
+  `args` holds the arguments after the executable's name and is empty when there
+  are none. It is a mutable array that `Main` borrows, and other functions take it
+  as `string []&`. On Windows the arguments come from `wmain` as UTF-16, or as
+  bytes through `main` when `duckc` itself was built with MinGW, so that build sees
+  arguments in the system code page. Elsewhere they are decoded as UTF-8. Each
+  unpaired surrogate or malformed byte becomes U+FFFD, because managed text must be
+  valid.
+- Executable statements at file scope, run by `Exec("file.dk")`. A file's statements
+  become one hidden function, so their locals last for one run and other files
+  cannot see them; `Exec` runs them again each time. Functions and containers in
+  the same file are ordinary declarations.
+  - The path must be a string literal. It resolves against the directory of the
+    file containing the call, and `..` is allowed. Computed paths are rejected.
+  - A path matching none of the module's input files is a compile error, so there
+    is no missing-file case at run time. A file from another module is rejected
+    too: its statements are private to its module.
+  - `Exec` on a file with only declarations does nothing. A file whose statements
+    no `Exec` targets is a compile error, since they could never run; this rule
+    can relax when computed paths exist.
+  - The compile-time table is `Symbols::scripts`, keyed by normalized path. It is
+    the natural basis for a run-time table if computed paths are added.
 - Static container function groups, such as `Math #{ int Twice(int n) { return
   n * 2 } }`, called as `Math.Twice(3)`. Groups may be nested, repeated across
   files, or extended by adjacent `#{ ... }` blocks. Chained blocks allow at most
@@ -1599,7 +1621,8 @@ are introduced. Tokenizing arbitrary chunks within a file needs extra handling
 because strings and comments can span chunk boundaries.
 
 Locals use entry-block allocations, allowing later LLVM optimization to
-promote them to registers. A native `main` wrapper calls Duck's `Main`.
+promote them to registers. A native `main` wrapper calls Duck's `Main`, building
+and then freeing the argument array for `Main(string [] args)`.
 
 `Tests/stages.cpp` tests the boundaries directly, including semantic rejection
 without lowering, forward/mutually recursive calls, concurrent analysis and

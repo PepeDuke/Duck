@@ -966,7 +966,7 @@ reject(managed_native_nested "A { string s }\nB { A a }\nextern \"C\" F(B& b)\nM
 reject(static_duplicate "Game #{ int A\nint A }\nMain() {}" "duplicate static field or member 'Game.A'")
 reject(static_function_clash "Game #{ int A\nA() {} }\nMain() {}" "duplicate static field or member 'Game.A'")
 reject(static_void "Game #{ void A }\nMain() {}" "static field cannot have void type")
-reject(static_file_scope "int Count = 1\nMain() {}" "expected '\\('")
+reject(static_file_scope "int Count = 1\nMain() {}" "file-scope statement never runs")
 reject(container_separated_chain "Math #{}\n\n#{}\nMain() {}" "chained container bodies must be adjacent")
 reject(container_separated_instance "Math #{}\n\n{ int x }\nMain() {}" "chained container bodies must be adjacent")
 file(READ "${SOURCE}/Examples/Tutorial/04_ContainersAndStaticBlocks.dk" containers_tutorial)
@@ -3825,6 +3825,149 @@ reject(do_forever_break_returns "int F() { do { break } }\nMain() {}" "not all p
 reject(do_forever_body_scope "Main() { do { int n = 1\nbreak }\nPrint(n) }" "unknown variable")
 reject(do_forever_same_line "Main() { do { break } Print(1) }" "newline")
 reject(do_same_line_block "Main() { do { break } while true { } }" "expected terminator")
+# Main(string [] args): arguments exclude the executable's name.
+function(run_arguments name expected)
+  foreach(optimization IN ITEMS -O0 -O2)
+    execute_process(COMMAND "${CLANG}" ${optimization} "${WORK}/${name}.ll" -o "${WORK}/${name}.exe" RESULT_VARIABLE status ERROR_VARIABLE errors)
+    if(NOT status EQUAL 0)
+      message(FATAL_ERROR "${name} ${optimization}: LLVM/link failure: ${errors}")
+    endif()
+    execute_process(COMMAND "${WORK}/${name}.exe" ${ARGN} RESULT_VARIABLE status OUTPUT_VARIABLE actual ERROR_VARIABLE errors TIMEOUT 10)
+    string(REPLACE "\r\n" "\n" actual "${actual}")
+    if(NOT status EQUAL 0 OR NOT actual STREQUAL expected)
+      message(FATAL_ERROR "${name} ${optimization}: exit=${status}, expected=[${expected}], actual=[${actual}], stderr=${errors}")
+    endif()
+  endforeach()
+endfunction()
+file(READ "${SOURCE}/Examples/Bootstrap/30_ProgramArguments.dk" arguments_example)
+run_program(arguments_example "${arguments_example}" "0\n0\n")
+run_arguments(arguments_example "2\nred\ngreen tea\n1\n" red "green tea")
+run_program(arguments_are_mutable [=[
+Main(string [] args) {
+    args += "added"
+    args += "more"
+    Print(args.Len)
+    Print(args[1])
+    args -= [0]
+    Print(args[0])
+}
+]=] "2\nmore\nmore\n")
+run_program(arguments_with_statics [=[
+Config #{ int Value = Read() }
+int Read() { Print("init")
+return 7 }
+Main(string [] args) { Print(Config.Value + args.Len) }
+]=] "init\n7\n")
+reject(entry_arguments_element "Main(int [] args) {}" "bootstrap entry point")
+reject(entry_arguments_scalar "Main(string args) {}" "bootstrap entry point")
+reject(entry_arguments_fixed "Main(string [2] args) {}" "bootstrap entry point")
+reject(entry_arguments_count "Main(string [] a, string [] b) {}" "bootstrap entry point")
+reject(entry_arguments_result "int Main(string [] args) { return 0 }" "bootstrap entry point")
+reject(entry_native_wide "extern \"C\" Start() = \"wmain\"\nMain() {}" "invalid or reserved native symbol")
+
+# Exec runs a file's statements; paths resolve against the calling file.
+set(scripts "${SOURCE}/Examples/Bootstrap/Scripts")
+run_files(exec_example "start\nsetup\n1\nbanner\n1\nbanner\n20\n4\n"
+  "${scripts}/Main.dk" "${scripts}/Setup.dk" "${scripts}/Banner.dk" "${scripts}/Shapes.dk" "${scripts}/Levels/Intro.dk")
+run_files(exec_example_reversed "start\nsetup\n1\nbanner\n1\nbanner\n20\n4\n"
+  "${scripts}/Levels/Intro.dk" "${scripts}/Shapes.dk" "${scripts}/Banner.dk" "${scripts}/Setup.dk" "${scripts}/Main.dk")
+# File-scope headers such as `if ready {` and `x : 1` must not read as types,
+# or `ready` and `count` could no longer be used as values.
+file(WRITE "${WORK}/exec_syntax_main.dk" "Main() { Exec(\"exec_syntax_body.dk\") }\nBox { int V = 3 }\n")
+file(WRITE "${WORK}/exec_syntax_body.dk" [=[
+ready : true
+count : 2
+#int limit = 4
+if ready
+{
+    count += limit
+}
+else
+{
+    count = 0
+}
+while ready
+{
+    ready = false
+}
+for int i = 0; i < 2; i++ {
+    count++
+}
+do count++
+while count < 10
+int [] items = {1, 2}
+for item : items {
+    count += item
+}
+Box box()
+Print(box.V)
+Print(count)
+if count > 0 return
+Print("not reached")]=])
+run_files(exec_statement_forms "3\n13\n" "${WORK}/exec_syntax_main.dk" "${WORK}/exec_syntax_body.dk")
+file(WRITE "${WORK}/exec_using_lib.dk" "Tools #{ int Six() { return 6 } }\n")
+file(WRITE "${WORK}/exec_using_main.dk" "Main() { Exec(\"exec_using_body.dk\") }\n")
+file(WRITE "${WORK}/exec_using_body.dk" "using Tools\nPrint(Six())\n")
+run_files(exec_using "6\n" "${WORK}/exec_using_lib.dk" "${WORK}/exec_using_main.dk" "${WORK}/exec_using_body.dk")
+# Worker tasks finish before Exec, so a script sees their results in order.
+file(WRITE "${WORK}/exec_order_main.dk" "int Value(int n) { return n * 2 }\nMain() {\n a : Value(1)\n b : Value(2)\n Exec(\"exec_order_body.dk\")\n Print(a + b)\n}\n")
+file(WRITE "${WORK}/exec_order_body.dk" "Print(\"script\")\n")
+run_files(exec_is_a_barrier "script\n6\n" "${WORK}/exec_order_main.dk" "${WORK}/exec_order_body.dk")
+
+function(reject_exec name main body diagnostic)
+  file(WRITE "${WORK}/${name}_main.dk" "${main}")
+  file(WRITE "${WORK}/${name}_body.dk" "${body}")
+  file(REMOVE "${WORK}/${name}.ll")
+  execute_process(COMMAND "${COMPILER}" "${WORK}/${name}_main.dk" "${WORK}/${name}_body.dk" -o "${WORK}/${name}.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+  if(NOT status EQUAL 1 OR NOT errors MATCHES "${diagnostic}" OR EXISTS "${WORK}/${name}.ll")
+    message(FATAL_ERROR "${name}: expected rejection matching ${diagnostic}, got ${status}: ${errors}")
+  endif()
+endfunction()
+reject_exec(exec_unused "Main() {}\n" "Print(1)\n" "_body.dk:1:1: error: file-scope statement never runs")
+reject_exec(exec_body_error "Main() { Exec(\"exec_body_error_body.dk\") }\n" "Print(missing)\n" "_body.dk:1:7: error: unknown variable")
+reject_exec(exec_body_scope "Main() { Exec(\"exec_body_scope_body.dk\")\nPrint(n) }\n" "n : 1\n" "unknown variable")
+reject_exec(exec_same_line "Main() { Exec(\"exec_same_line_body.dk\") }\n" "if true { } Print(1)\n" "expected newline")
+reject_exec(exec_after_using "Main() { Exec(\"exec_after_using_body.dk\") }\nN #{ int A = 1 }\n" "Print(1)\nusing N\n" "using directives must come before")
+file(READ "${SOURCE}/Examples/FailureCases/16_ExecMissingFile.dk" exec_missing)
+reject(exec_missing "${exec_missing}" "Exec cannot find 'Levels/Missing.dk'")
+file(READ "${SOURCE}/Examples/FailureCases/17_ExecComputedPath.dk" exec_computed)
+reject(exec_computed "${exec_computed}" "requires a string literal path")
+file(READ "${SOURCE}/Examples/FailureCases/18_FileStatementNeverRuns.dk" exec_never)
+reject(exec_never "${exec_never}" "file-scope statement never runs")
+reject(exec_char "Main() { Exec('a') }" "requires a string literal path")
+reject(exec_no_path "Main() { Exec() }" "Exec expects one source file path")
+reject(exec_two_paths "Main() { Exec(\"a\", \"b\") }" "Exec expects one source file path")
+reject(exec_is_void "Main() { Print(Exec(\"exec_is_void.dk\")) }" "cannot print void")
+reject(exec_reserved "Exec() {}\nMain() {}" "duplicate or reserved function")
+run_program(exec_itself_without_statements "Main() { Exec(\"exec_itself_without_statements.dk\")\nPrint(1) }" "1\n")
+# Scripts are private to their module, and Exec cannot cross into another.
+file(WRITE "${WORK}/exec_module_script.dk" "Print(\"library script\")\n")
+file(WRITE "${WORK}/exec_module_library.dk" "RunLibrary() { Exec(\"exec_module_script.dk\") }\n")
+file(WRITE "${WORK}/exec_module_own.dk" "Print(\"own script\")\n")
+file(WRITE "${WORK}/exec_module_main.dk" "Main() {\n RunLibrary()\n Exec(\"exec_module_own.dk\")\n}\n")
+execute_process(COMMAND "${COMPILER}" --library "${WORK}/exec_module_library.dk" "${WORK}/exec_module_script.dk" -o "${WORK}/exec_module_library.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "exec_module_library: compilation failed: ${errors}")
+endif()
+execute_process(COMMAND "${COMPILER}" --dependency "${WORK}/exec_module_library.dk" --dependency "${WORK}/exec_module_script.dk" "${WORK}/exec_module_main.dk" "${WORK}/exec_module_own.dk" -o "${WORK}/exec_module_main.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "exec_module_main: compilation failed: ${errors}")
+endif()
+execute_process(COMMAND "${CLANG}" "${WORK}/exec_module_library.ll" "${WORK}/exec_module_main.ll" -o "${WORK}/exec_module.exe" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "exec_module: link failed: ${errors}")
+endif()
+execute_process(COMMAND "${WORK}/exec_module.exe" RESULT_VARIABLE status OUTPUT_VARIABLE actual)
+string(REPLACE "\r\n" "\n" actual "${actual}")
+if(NOT status EQUAL 0 OR NOT actual STREQUAL "library script\nown script\n")
+  message(FATAL_ERROR "exec_module: exit=${status}, actual=[${actual}]")
+endif()
+file(WRITE "${WORK}/exec_cross_main.dk" "Main() { Exec(\"exec_module_script.dk\") }\n")
+execute_process(COMMAND "${COMPILER}" --dependency "${WORK}/exec_module_script.dk" "${WORK}/exec_cross_main.dk" -o "${WORK}/exec_cross.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)
+if(NOT status EQUAL 1 OR NOT errors MATCHES "belongs to another module")
+  message(FATAL_ERROR "exec_cross: expected module rejection, got ${status}: ${errors}")
+endif()
+
 message(STATUS "Duck integration tests passed")
 
 trap_program(expired_heap_alias "Main() { int* value = 5\nalias : value\nvalue = null\nPrint(*alias) }")

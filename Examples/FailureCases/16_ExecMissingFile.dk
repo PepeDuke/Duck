@@ -1,0 +1,7 @@
+// INTENTIONALLY INVALID: no source file in this compilation has that path.
+// EXPECT: Exec cannot find 'Levels/Missing.dk'; the build stops at compile time.
+// FIX: correct the path, relative to this file, and compile the file with it.
+Main()
+{
+    Exec("Levels/Missing.dk")
+}

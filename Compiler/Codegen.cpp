@@ -1873,6 +1873,12 @@ class Generator {
         emit(valid + " = icmp ne ptr " + elementSlot(*e.args[0], true) + ", null");
         return {Type::Bool, valid};
       }
+      if (op == "Exec" && !e.receiver) {
+        // A file with only declarations has nothing to run.
+        if (auto script = analysis.callTargets.find(&e); script != analysis.callTargets.end())
+          emit("call void @duck." + script->second + "()");
+        return {Type::Void, ""};
+      }
       if (op == "Print") {
 
         auto v = expression(*e.args[0]);
@@ -2469,7 +2475,8 @@ public:
       scopes.emplace_back();
     }
     std::ostringstream output;
-    output << "define " << irType(f.result) << " @duck." << f.name.text << "(";
+    // Script numbers restart in each module, so their symbols stay private.
+    output << "define " << (f.script ? "internal " : "") << irType(f.result) << " @duck." << f.name.text << "(";
     for (size_t i = 0; i < f.params.size(); ++i) {
       if (i)
         output << ", ";

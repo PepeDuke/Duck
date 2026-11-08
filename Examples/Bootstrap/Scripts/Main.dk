@@ -1,0 +1,20 @@
+// Compile this file together with Setup.dk, Banner.dk, Shapes.dk, and
+// Levels/Intro.dk. EXPECT: start, setup, 1, banner, 1, banner, 20, 4.
+Game
+#{
+    int Score
+}
+
+Main()
+{
+    Print("start")
+    // Statements outside any container run only when Exec calls their file.
+    Exec("Setup.dk")
+    // Every Exec runs the file again, with fresh locals.
+    Exec("Levels/Intro.dk")
+    Exec("Levels/Intro.dk")
+    // A file with only declarations has nothing to run.
+    Exec("Shapes.dk")
+    Print(Game.Score)
+    Print(Square(2))
+}

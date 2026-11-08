@@ -1536,6 +1536,11 @@ class Analyzer {
         expression(*e.args[0]);
         return Type::Bool;
       }
+      if (op == "Exec" && !e.receiver) {
+        // The call target also makes Exec a barrier for task scheduling.
+        if (const auto *script = symbols.execTarget(e)) analysis.callTargets[&e] = *script;
+        return Type::Void;
+      }
       if (op == "Print") {
         if (e.args.size() != 1)
           fail(e.token, "Print expects one argument");

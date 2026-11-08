@@ -1,4 +1,5 @@
 #include "Pipeline.h"
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -60,9 +61,13 @@ int main(int argc, char **argv) {
     }
     for (auto &[dependency, tokens] : sources) {
       auto unit = duck::parse(std::move(tokens), containerNames);
-      if (dependency)
+      if (dependency) {
+        // A dependency's statements are private to the module defining them.
+        unit.erase(std::remove_if(unit.begin(), unit.end(),
+                                  [](const duck::Function &f) { return f.script; }),
+                   unit.end());
         importedUnits.push_back(std::move(unit));
-      else
+      } else
         units.push_back(std::move(unit));
     }
     if (units.empty())

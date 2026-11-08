@@ -1,5 +1,164 @@
 #include "Pipeline.h"
 namespace duck {
+// The compiler emits for its own host, so the host picks the native entry.
+// wmain supplies UTF-16 directly, the same form a Duck string stores. MinGW
+// links wmain only with -municode, so it keeps main and its byte arguments.
+#if defined(_WIN32) && !defined(__MINGW32__)
+constexpr bool wideEntry = true;
+#else
+constexpr bool wideEntry = false;
+#endif
+// Managed text must always be valid, because @duck.text.decode does not check
+// it, while the operating system promises nothing about arguments. Both
+// decoders write U+FFFD for each unpaired surrogate or malformed byte. Input
+// ends in a zero unit, which is neither a low surrogate nor a continuation
+// byte, so looking one unit ahead cannot pass the end.
+std::string entryArgumentsIR() {
+  const std::string unit = wideEntry ? "i16" : "i8";
+  std::string ir = "define internal ptr @duck.args$text(ptr %native) {\nentry:\n  br label %scan\nscan:\n"
+                   "  %n = phi i64 [0, %entry], [%following, %scan]\n"
+                   "  %unitp = getelementptr " + unit + ", ptr %native, i64 %n\n"
+                   "  %unit = load " + unit + ", ptr %unitp\n"
+                   "  %following = add i64 %n, 1\n"
+                   "  %ended = icmp eq " + unit + " %unit, 0\n"
+                   "  br i1 %ended, label %ready, label %scan\n";
+  ir += R"IR(ready:
+  ; Every malformed unit or byte becomes one UTF-16 unit, so n units suffice.
+  %out = call ptr @duck.text.alloc(i64 %n, i64 2)
+  br label %loop
+loop:
+  %i = phi i64 [0, %ready], [%advance, %emit]
+  %written = phi i64 [0, %ready], [%after, %emit]
+  %more = icmp ult i64 %i, %n
+  br i1 %more, label %lead, label %end
+)IR";
+  ir += wideEntry ? R"IR(lead:
+  %leadp = getelementptr i16, ptr %native, i64 %i
+  %lead16 = load i16, ptr %leadp
+  %first = zext i16 %lead16 to i32
+  %kind = and i32 %first, 64512
+  %high = icmp eq i32 %kind, 55296
+  br i1 %high, label %pair, label %single
+pair:
+  %secondi = add i64 %i, 1
+  %secondp = getelementptr i16, ptr %native, i64 %secondi
+  %second16 = load i16, ptr %secondp
+  %second = zext i16 %second16 to i32
+  %secondKind = and i32 %second, 64512
+  %paired = icmp eq i32 %secondKind, 56320
+  br i1 %paired, label %joined, label %invalid
+joined:
+  %h = sub i32 %first, 55296
+  %shifted = shl i32 %h, 10
+  %l = sub i32 %second, 56320
+  %sum = add i32 %shifted, %l
+  %cp = add i32 %sum, 65536
+  br label %emit
+single:
+  %low = icmp eq i32 %kind, 56320
+  br i1 %low, label %invalid, label %plain
+plain:
+  br label %emit
+invalid:
+  br label %emit
+emit:
+  %scalar = phi i32 [%first, %plain], [%cp, %joined], [65533, %invalid]
+  %length = phi i64 [1, %plain], [2, %joined], [1, %invalid]
+)IR" : R"IR(lead:
+  %leadp = getelementptr i8, ptr %native, i64 %i
+  %lead8 = load i8, ptr %leadp
+  %first = zext i8 %lead8 to i32
+  %ascii = icmp ult i32 %first, 128
+  br i1 %ascii, label %plain, label %multi
+plain:
+  br label %emit
+multi:
+  %under = icmp ult i32 %first, 194
+  %over = icmp ugt i32 %first, 244
+  %badLead = or i1 %under, %over
+  br i1 %badLead, label %invalid, label %start
+start:
+  %two = icmp ult i32 %first, 224
+  %three = icmp ult i32 %first, 240
+  %largeNeed = select i1 %three, i64 2, i64 3
+  %need = select i1 %two, i64 1, i64 %largeNeed
+  %largeMask = select i1 %three, i32 15, i32 7
+  %mask = select i1 %two, i32 31, i32 %largeMask
+  %largeLeast = select i1 %three, i32 2048, i32 65536
+  %least = select i1 %two, i32 128, i32 %largeLeast
+  %initial = and i32 %first, %mask
+  br label %tail
+tail:
+  %k = phi i64 [1, %start], [%nextk, %accept]
+  %cp = phi i32 [%initial, %start], [%combined, %accept]
+  %complete = icmp ugt i64 %k, %need
+  br i1 %complete, label %check, label %continuation
+continuation:
+  %offset = add i64 %i, %k
+  %bytep = getelementptr i8, ptr %native, i64 %offset
+  %byte8 = load i8, ptr %bytep
+  %byte = zext i8 %byte8 to i32
+  %tag = and i32 %byte, 192
+  %follows = icmp eq i32 %tag, 128
+  br i1 %follows, label %accept, label %invalid
+accept:
+  %bits = and i32 %byte, 63
+  %raised = shl i32 %cp, 6
+  %combined = or i32 %raised, %bits
+  %nextk = add i64 %k, 1
+  br label %tail
+check:
+  %small = icmp ult i32 %cp, %least
+  %large = icmp ugt i32 %cp, 1114111
+  %range = and i32 %cp, -2048
+  %surrogate = icmp eq i32 %range, 55296
+  %wrong = or i1 %small, %large
+  %rejected = or i1 %wrong, %surrogate
+  br i1 %rejected, label %invalid, label %valid
+valid:
+  %width = add i64 %need, 1
+  br label %emit
+invalid:
+  br label %emit
+emit:
+  %scalar = phi i32 [%first, %plain], [%cp, %valid], [65533, %invalid]
+  %length = phi i64 [1, %plain], [%width, %valid], [1, %invalid]
+)IR";
+  ir += R"IR(  %after = call i64 @duck.text.encode(ptr %out, i64 %written, i32 %scalar, i64 2)
+  %advance = add i64 %i, %length
+  br label %loop
+end:
+  call void @duck.text.finish(ptr %out, i64 %written, i64 2)
+  ret ptr %out
+}
+)IR";
+  ir += std::string("define i32 @") + (wideEntry ? "wmain" : "main") + R"IR((i32 %argc, ptr %argv) {
+entry:
+  %args = alloca ptr
+  store ptr null, ptr %args
+  br label %loop
+loop:
+  ; args omits argv[0], the executable's own name.
+  %i = phi i32 [1, %entry], [%next, %body]
+  %more = icmp slt i32 %i, %argc
+  br i1 %more, label %body, label %run
+body:
+  %from = getelementptr ptr, ptr %argv, i32 %i
+  %native = load ptr, ptr %from
+  %text = call ptr @duck.args$text(ptr %native)
+  %slot = call ptr @duck.seq$push(ptr %args, i64 8)
+  store ptr %text, ptr %slot
+  %next = add i32 %i, 1
+  br label %loop
+run:
+  call void @duck.Main(ptr %args)
+  %owned = load ptr, ptr %args
+  call void @duck.seq$free(ptr %owned, ptr @duck$slot.release)
+  ret i32 0
+}
+)IR";
+  return ir;
+}
 // Immutable text storage: {i64 referenceCount, i64 codeUnits, trailing data}.
 // Literals have referenceCount = -1. Dynamic values are released deterministically.
 // Module-local helpers share the same storage ABI without duplicate linker symbols.

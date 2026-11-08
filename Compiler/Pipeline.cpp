@@ -3,7 +3,7 @@
 namespace duck {
 Program combineUnits(std::vector<Program> units) {
   Program program;
-  size_t size = 0;
+  size_t size = 0, scripts = 0;
   for (const auto &unit : units)
     size += unit.size();
   program.reserve(size);
@@ -12,17 +12,20 @@ Program combineUnits(std::vector<Program> units) {
     for (auto &fragment : unit.enums) program.enums.push_back(std::move(fragment));
     for (auto &field : unit.statics) program.statics.push_back(std::move(field));
     for (auto &source : unit.sources) program.sources.push_back(std::move(source));
-    for (auto &function : unit)
+    for (auto &function : unit) {
+      if (function.script) function.name.text = "$exec." + std::to_string(scripts++);
       program.push_back(std::move(function));
+    }
   }
   return program;
 }
 std::string assembleModule(const std::vector<FunctionIR> &functions,
-                           bool entry, const std::set<std::string> &nativeSymbols) {
+                           bool entry, const std::set<std::string> &nativeSymbols,
+                           bool mainArguments) {
   std::string module =
       "; Duck bootstrap LLVM IR\ndeclare i32 @printf(ptr, ...)\n"
       "declare double @llvm.floor.f64(double)\ndeclare void @llvm.trap()\n";
-  bool needsText = false, needsBig = false, needsDecimal = false, needsCollections = false;
+  bool needsText = false, needsBig = false, needsDecimal = false, needsCollections = mainArguments;
   for (const auto &f : functions) {
     needsBig = needsBig || f.usesBigRuntime;
     needsDecimal = needsDecimal || f.usesDecimalRuntime;
@@ -56,6 +59,8 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
     module += f.definition;
   if (!entry)
     return module;
+  if (mainArguments)
+    return module + entryArgumentsIR();
   return module + "define i32 @main() {\nentry:\n  call void @duck.Main()\n  "
                   "ret i32 0\n}\n";
 }
@@ -72,6 +77,10 @@ std::string compileModule(const Program &program, const Program &imports,
         fail(fragment.name, "cannot extend imported enum '" + fragment.name.text +
                                 "'; add members in its defining module");
   auto symbols = collectSymbols(program, entry);
+  for (const auto &source : program.sources) symbols.sources.insert(sourceKey(source));
+  for (const auto &source : imports.sources) symbols.importedSources.insert(sourceKey(source));
+  for (const auto &function : program)
+    if (function.script) symbols.scripts.emplace(sourceKey(function.name.source), function.name.text);
   if (!entry && symbols.count("Main"))
     for (const auto &f : program)
       if (f.name.text == "Main")
@@ -120,6 +129,18 @@ std::string compileModule(const Program &program, const Program &imports,
   std::vector<FunctionAnalysis> analyses;
   for (const auto &function : program)
     analyses.push_back(analyzeFunction(function, symbols));
+  // Exec paths are literals, so a file nothing runs is known here. Its
+  // statements would otherwise be dead code that looks like it executes.
+  std::set<std::string> executed;
+  for (const auto &analysis : analyses)
+    for (const auto &[call, target] : analysis.callTargets) {
+      (void)call;
+      executed.insert(target);
+    }
+  for (const auto &function : program)
+    if (function.script && !executed.count(function.name.text))
+      fail(function.name, "file-scope statement never runs: no Exec in this module targets this "
+                          "file; call Exec on the file, or move the statement into a function");
   if (parallel) {
     // Imported bodies are not visible, so their effects stay unknown.
     const auto isolated = isolatedFunctions(program, analyses);
@@ -175,6 +196,8 @@ std::string compileModule(const Program &program, const Program &imports,
   }
   return helperIR + emitRecords(symbols) + emitEnums(symbols) + emitStatics(symbols) + emitCleanups(symbols, cleanups) +
          emitDestroys(symbols, destroys) + emitTables(symbols, tables) +
-         emitDeclarations(declarations) + assembleModule(fragments, entry, nativeSymbols);
+         emitDeclarations(declarations) +
+         assembleModule(fragments, entry, nativeSymbols,
+                        entry && !symbols.at("Main").parameters.empty());
 }
 } // namespace duck

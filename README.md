@@ -206,6 +206,8 @@ Main()
 }
 ``` 
 
+`args` holds the program's arguments after its own name, in order, and is empty when there are none.
+
 we can execute instructions just placed outside of containers inside file but we need to call the Exec function on the file as they do not run by default.
 ``` c++
 // inside main.dk
@@ -215,6 +217,8 @@ Main(string [] args) {
 // inside hello.dk
     Print("Hello world")
 ``` 
+
+The path is a string literal, relative to the file that calls `Exec`, and that file must be compiled with the program. A path that matches no source file is a compile error. Each `Exec` runs the statements again, and variables declared by them last for that one run.
 
 ## Static calls in Duck
 We have chosen # to represent static meanings depending on context. we can define static Container by # before its body

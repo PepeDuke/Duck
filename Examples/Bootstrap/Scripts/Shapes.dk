@@ -1,0 +1,5 @@
+// Only declarations, so Exec("Shapes.dk") is allowed and does nothing.
+int Square(int side)
+{
+    return side * side
+}

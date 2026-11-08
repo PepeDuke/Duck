@@ -1,0 +1,27 @@
+// Main can take the command line. args holds the arguments after the
+// program's own name, in order, and is empty when there are none.
+// Run as: program red "green tea"   EXPECT: 2, red, green tea, 1.
+// Run with no arguments             EXPECT: 0, 0.
+int CountLong(string []& items)
+{
+    int count = 0
+    for item : items
+    {
+        if Length(item) > 4
+        {
+            count++
+        }
+    }
+    return count
+}
+
+Main(string [] args)
+{
+    Print(args.Len)
+    for arg : args
+    {
+        Print(arg)
+    }
+    // A dynamic array is move-only, so other functions borrow it with &.
+    Print(CountLong(args))
+}

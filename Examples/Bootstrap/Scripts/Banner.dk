@@ -1,0 +1,8 @@
+// A file can mix statements with declarations. Title is an ordinary function,
+// visible to the whole program, and can be declared after its first use.
+Print(Title())
+
+string Title()
+{
+    return "banner"
+}

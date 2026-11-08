@@ -148,6 +148,13 @@ struct Symbols : std::map<std::string, Signature> {
   std::map<std::string, Record> records;
   std::map<std::string, EnumInfo> enums;
   std::map<std::string, StaticInfo> statics;
+  // The Exec table, keyed by sourceKey: this module's source files, the
+  // hidden function of each one with statements, and its dependencies' files.
+  std::set<std::string> sources, importedSources;
+  std::map<std::string, std::string> scripts;
+  // The hidden function an Exec call runs, or null for a file with no
+  // statements. Rejects computed paths and files outside this module.
+  const std::string *execTarget(const Expr &call) const;
   // Member lookup searches the container itself, then each parent left to
   // right, depth first, so the leftmost parent wins an overlap.
   bool findField(const std::string &record, const std::string &name, MemberPath &path) const;
@@ -250,6 +257,8 @@ struct Symbols : std::map<std::string, Signature> {
       fail(token, "unknown enum '" + type.record + "'");
   }
 };
+// One spelling per file, for matching Exec paths against input paths.
+std::string sourceKey(const std::string &path);
 // Merges fragments by name in input order, then assigns implicit values.
 std::map<std::string, EnumInfo> resolveEnums(const std::vector<EnumFragment> &fragments);
 bool borrowsOnly(const Stmt &statement, const std::string &name);
@@ -387,10 +396,14 @@ FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
                          const FunctionAnalysis &analysis);
 // nativeSymbols lists symbols already declared by the program, so runtime
 // imports are not declared twice.
+// mainArguments selects the native entry for Main(string [] args).
 std::string assembleModule(const std::vector<FunctionIR> &functions,
                            bool entry = true,
-                           const std::set<std::string> &nativeSymbols = {});
+                           const std::set<std::string> &nativeSymbols = {},
+                           bool mainArguments = false);
 std::string textRuntimeIR();
+// The native entry that builds Main's argument array.
+std::string entryArgumentsIR();
 std::string collectionRuntimeIR();
 std::string collectionBigKeyIR();
 std::string heapRuntimeIR();

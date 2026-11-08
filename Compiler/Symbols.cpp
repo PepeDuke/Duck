@@ -3,6 +3,7 @@
 #include "WideInteger.h"
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <iomanip>
 #include <locale>
 #include <regex>
@@ -221,7 +222,7 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
       if (f.name.text == "Main")
         fail(f.name, "Main cannot be a native declaration");
       if (!std::regex_match(f.nativeSymbol, std::regex("[A-Za-z_][A-Za-z0-9_]*")) ||
-          f.nativeSymbol == "main" || f.nativeSymbol == "printf" ||
+          f.nativeSymbol == "main" || f.nativeSymbol == "wmain" || f.nativeSymbol == "printf" ||
           f.nativeSymbol == "malloc" || f.nativeSymbol == "free" || f.nativeSymbol == "putchar")
         fail(f.name, "invalid or reserved native symbol '" + f.nativeSymbol + "'");
       if (f.result != Type::Void && !nativeScalar(f.result))
@@ -258,7 +259,7 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
                          " is already declared in container '" + record + "' at " +
                          where(existing->second.declaration));
     }
-    if (f.name.text == "Print" || f.name.text == "Length" || f.name.text == "CodeUnitAt" ||
+    if (f.name.text == "Print" || f.name.text == "Length" || f.name.text == "CodeUnitAt" || f.name.text == "Exec" ||
         !symbols.emplace(f.name.text, Signature{f.result, f.params, f.nativeSymbol, f.name, {}, f.method, f.protectedAccess, f.inferred}).second)
       fail(f.name, "duplicate or reserved function '" + f.name.text + "'");
     if (f.nativeSymbol.empty()) {
@@ -304,15 +305,45 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
   auto main = symbols.find("Main");
   if (requireEntry && main == symbols.end())
     fail({"", 1, 1}, "program requires Main()");
-  if (main != symbols.end() &&
-      (main->second.result != Type::Void || !main->second.parameters.empty())) {
-    for (const auto &f : program)
-      if (f.name.text == "Main")
-        fail(f.name, "bootstrap entry point must be Main() with no return type "
-                     "or parameters");
+  if (main != symbols.end()) {
+    // The parser marks `string [] args` as a reference: see entryParameter.
+    const auto &parameters = main->second.parameters;
+    const bool arguments = parameters.size() == 1 && parameters[0].reference &&
+                           dynamicArray(parameters[0].type) &&
+                           *parameters[0].type.element == Type::String;
+    if (main->second.result != Type::Void || !(parameters.empty() || arguments))
+      fail(main->second.declaration, "bootstrap entry point must be Main() or "
+                                     "Main(string [] args) with no return type");
   }
   validateNativeSymbols(symbols);
   return symbols;
+}
+std::string sourceKey(const std::string &path) {
+  namespace fs = std::filesystem;
+  std::error_code error;
+  const auto absolute = fs::absolute(fs::path(path), error);
+  // Resolves ".." and, for files that exist, their on-disk spelling.
+  const auto resolved = fs::weakly_canonical(absolute, error);
+  return (error ? absolute.lexically_normal() : resolved).generic_u8string();
+}
+const std::string *Symbols::execTarget(const Expr &call) const {
+  namespace fs = std::filesystem;
+  if (call.args.size() != 1) fail(call.token, "Exec expects one source file path");
+  const auto &argument = *call.args[0];
+  if (argument.kind != "text" || argument.token.character)
+    fail(argument.token, "Exec requires a string literal path; computed paths are not supported yet");
+  const auto &written = argument.token.text;
+  // Relative to the file making the call, so moving the project keeps working.
+  const auto path = fs::path(call.token.source).parent_path() / fs::u8path(written);
+  const auto key = sourceKey(path.string());
+  if (importedSources.count(key))
+    fail(argument.token, "Exec cannot run '" + written + "': it belongs to another module, and "
+                         "Exec reaches only the calling module's source files");
+  if (!sources.count(key))
+    fail(argument.token, "Exec cannot find '" + written + "' (" + key + ") among this module's source "
+                         "files; paths are relative to the calling file, and the file must be compiled with it");
+  const auto script = scripts.find(key);
+  return script == scripts.end() ? nullptr : &script->second;
 }
 bool Symbols::findField(const std::string &record, const std::string &name,
                         MemberPath &path) const {

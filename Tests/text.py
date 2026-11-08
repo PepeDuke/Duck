@@ -1,5 +1,6 @@
 """Text encoding, native ABI, ownership and diagnostic integration tests."""
 import argparse
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -143,6 +144,41 @@ class TextTests(unittest.TestCase):
             self.command(options.clang, level, str(ir), *objects, '-o', str(exe))
             actual = self.command(str(exe)).stdout.replace(b'\r\n', b'\n')
             self.assertEqual(actual, expected.encode('utf-8'))
+
+    def test_program_arguments_are_valid_utf16(self):
+        _, ir = self.compile('''
+Main(string [] args) {
+    for arg : args {
+        Print(Length(arg))
+        for int i = 0; i < Length(arg); i++ { Print(CodeUnitAt(arg, i)) }
+    }
+}
+''')
+        exe = self.root / 'arguments.exe'
+        # Windows passes UTF-16, which can hold an unpaired surrogate. Other
+        # systems pass bytes, which can be malformed UTF-8.
+        if os.name == 'nt':
+            cases = [('', []),
+                     ('AŽ🦆', [65, 0x17D, 0xD83E, 0xDD86]),
+                     ('a\udc00b', [97, 0xFFFD, 98]),
+                     ('\ud83e', [0xFFFD]),
+                     ('\ud83ea', [0xFFFD, 97])]
+        else:
+            cases = [(b'', []),
+                     ('AŽ🦆'.encode('utf-8'), [65, 0x17D, 0xD83E, 0xDD86]),
+                     (b'\xff', [0xFFFD]),
+                     (b'\xc0\x80', [0xFFFD, 0xFFFD]),
+                     (b'\xe0\x80\x80', [0xFFFD, 0xFFFD, 0xFFFD]),
+                     (b'\xed\xa0\x80', [0xFFFD, 0xFFFD, 0xFFFD]),
+                     (b'\xf4\x90\x80\x80', [0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD]),
+                     (b'\xf0\x9f', [0xFFFD, 0xFFFD])]
+        for level in ('-O0', '-O2'):
+            self.command(options.clang, level, str(ir), '-o', str(exe))
+            for argument, units in cases:
+                result = subprocess.run([str(exe), argument], capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                actual = [int(line) for line in result.stdout.split()]
+                self.assertEqual(actual, [len(units), *units], ascii(argument))
 
     def test_encodings_and_native_borrows(self):
         self.run_source(r'''
