@@ -1,0 +1,31 @@
+// EXPECT: 100, then 4950, then 3, then 1.
+// PITFALL: a size hint is an estimate, not a capacity. [3*] still grows past
+// three elements; it is only a guess the scheduler may use. A hinted array
+// is an ordinary dynamic array and passes wherever T []& is expected.
+long Sum(int []& values)
+{
+    long total = 0
+    for v : values
+    {
+        total += v
+    }
+    return total
+}
+
+Main()
+{
+    int [3*] grows
+    for i : 0...99
+    {
+        grows += i
+    }
+    Print(grows.Len)
+    Print(Sum(grows))
+
+    int [*] large = {1, 1, 1}
+    Print(large.Len)
+
+    int [2*][4] rows      // Two rows of four, more or less.
+    rows++
+    Print(rows.Len)
+}

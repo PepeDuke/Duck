@@ -1,0 +1,37 @@
+// EXPECT: 1, then 10000, then 20000.
+// PITFALL: the compiler reasons about what a callee does to its parameters,
+// then applies that to the variable each call passed. A second call on the
+// same variable waits for the first, even though the callee looks harmless.
+// Countdown and Countup are mutually recursive, so they share one summary.
+int Countdown(int& steps, int n)
+{
+    if n < 1
+        return steps
+    return Countup(steps, n - 1)
+}
+
+int Countup(int& steps, int n)
+{
+    steps++
+    return Countdown(steps, n)
+}
+
+Add(int& total, int amount)
+{
+    for i : 1...amount
+    {
+        total++
+    }
+}
+
+Main()
+{
+    int first = 0
+    int second = 0
+    Add(first, 10000)            // first and second are different variables,
+    Add(second, 1)               // so these calls may overlap.
+    Add(first, 10000)            // Same variable: waits for the first call.
+    Print(Countdown(second, 0) - 0 == second ? second | -1)
+    Print(first / 2)
+    Print(first)
+}

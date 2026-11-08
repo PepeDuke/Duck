@@ -1504,6 +1504,7 @@ class Analyzer {
   bool heapStorage(const Expr &e) const {
     if (analysis.receiverStorage.count(&e)) return true;
     if (analysis.expressionTypes.at(&e).role != Type::Raw) return true;
+    if (analysis.staticFields.count(&e)) return false; // What is left of it is a container name, not storage.
     if (e.kind == "." || e.kind == "index" || (e.kind == "unary" && e.token.text == "*"))
       return heapStorage(*e.args[0]);
     return false;
@@ -2663,7 +2664,7 @@ class Analyzer {
     return terminated;
   }
   bool statement(const Stmt &s) {
-    if (s.kind == "block")
+    if (s.kind == "block" || s.kind == "ordered")
       return block(s.body);
     if (s.kind == "switch") return switchStatement(s);
     if (s.kind == "scopeStart" || s.kind == "scopeEnd") {

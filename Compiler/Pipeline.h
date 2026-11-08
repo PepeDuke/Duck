@@ -1,8 +1,10 @@
 #pragma once
 #include "Syntax.h"
+#include <algorithm>
 #include <cctype>
 #include <map>
 #include <set>
+#include <tuple>
 
 namespace duck {
 // Stage artifacts belong to the caller. No stage uses global mutable state.
@@ -427,12 +429,25 @@ struct FunctionAnalysis {
   std::set<const Stmt *> scopedBorrows;
   std::set<const Expr *> receiverStorage;
   std::set<const Stmt *> terminatingLoops;
-  // Filled by scheduleTasks. A spawned declaration runs its call as a worker
-  // task; pending tasks join before a statement that uses their name, before a
-  // barrier statement, and at the end of their statement list.
+  // Filled by scheduleTasks. A spawned statement runs its call as a worker
+  // task; pending tasks join before a statement that conflicts with them,
+  // before a barrier statement, and at the end of their statement list.
   std::set<const Stmt *> taskSpawns;
   std::set<const Stmt *> taskBarriers;
-  std::map<const Stmt *, std::set<std::string>> taskUses;
+  std::map<const Stmt *, std::set<const Stmt *>> taskConflicts; // The earlier spawns to join first.
+  // Filled by planOrderedBlocks. A `${ }` block with no entry here (one inside
+  // a lambda) takes the scheduler-wide exclusion.
+  struct OrderedPlace {
+    bool isStatic = false;
+    Token root;             // The parameter or local, or the static's declaration.
+    std::string staticName; // Qualified, for a static.
+    std::vector<size_t> path;
+  };
+  struct OrderedLocks {
+    bool exclusive = false;           // Effects unresolved before entry.
+    std::vector<OrderedPlace> places; // One per scalar leaf of each resource.
+  };
+  std::map<const Stmt *, OrderedLocks> orderedLocks;
   // GetName, GetDeclaringName, and GetTags: the container, the member's index
   // in its descriptor (-1 for the container), and the attributes returned.
   struct Reflection {
@@ -517,12 +532,67 @@ FunctionAnalysis analyzeFunction(const Function &function,
 void evaluateCompileTimeCalls(const std::vector<const Function *> &functions,
                               std::vector<FunctionAnalysis> &analyses);
 
-// Functions whose complete effects are known: plain value parameters and
-// results, no external effects, and calls only to other isolated functions.
-std::set<std::string> isolatedFunctions(const Program &program,
-                                        const std::vector<FunctionAnalysis> &analyses);
-void scheduleTasks(const Function &function, const std::set<std::string> &isolated,
-                   FunctionAnalysis &analysis);
+// A piece of storage a function touches: a static field, a reference
+// parameter (the receiver is parameter 0), or a local. `path` holds field
+// indices below the root, so two resources overlap when they share a root and
+// one path is a prefix of the other. Array elements collapse to their array.
+struct Resource {
+  enum Kind { Static, Parameter, Local };
+  Kind kind = Local;
+  std::string root;     // The static's qualified name, or the local's unique id.
+  size_t parameter = 0;
+  std::vector<size_t> path;
+  bool operator<(const Resource &o) const {
+    return std::tie(kind, root, parameter, path) < std::tie(o.kind, o.root, o.parameter, o.path);
+  }
+  bool overlaps(const Resource &o) const {
+    if (kind != o.kind || root != o.root || parameter != o.parameter) return false;
+    const auto common = std::min(path.size(), o.path.size());
+    return std::equal(path.begin(), path.begin() + common, o.path.begin());
+  }
+};
+struct EffectSet {
+  std::set<Resource> reads, writes;
+  bool unknown = false;   // Touches storage the compiler cannot name: a synchronization barrier.
+  bool external = false;  // Observable outside the program, as Print is: also a barrier.
+  bool locks = false;     // Enters a `${ }` block that acquires something.
+  bool exclusive = false; // Enters a `${ }` block needing the scheduler-wide exclusion.
+  void merge(const EffectSet &o) {
+    reads.insert(o.reads.begin(), o.reads.end());
+    writes.insert(o.writes.begin(), o.writes.end());
+    unknown |= o.unknown;
+    external |= o.external;
+    locks |= o.locks;
+    exclusive |= o.exclusive;
+  }
+  // Whether running this and `o` in either order could be told apart.
+  bool conflicts(const EffectSet &o) const {
+    auto meet = [](const std::set<Resource> &a, const std::set<Resource> &b) {
+      for (const auto &x : a)
+        for (const auto &y : b)
+          if (x.overlaps(y)) return true;
+      return false;
+    };
+    return meet(writes, o.writes) || meet(writes, o.reads) || meet(reads, o.writes);
+  }
+};
+// A function's read/write signature, in terms of its own parameters. Locals
+// never appear: they die with the call.
+struct EffectSummary : EffectSet {
+  bool threadSafe = false; // Its body exchanges only plain data, so it may run on a worker.
+};
+using EffectTable = std::map<std::string, EffectSummary>;
+// Least fixpoint over the call graph, so a recursive group shares its effects.
+// Imported and native functions are unknown. A library (entry = false) can
+// have its methods overridden by importers, so its virtual calls are too.
+EffectTable summarizeEffects(const Program &program, const std::vector<FunctionAnalysis> &analyses,
+                             const Symbols &symbols, bool entry = true);
+// Decides what each `${ }` block locks. This is part of the program's meaning,
+// so it runs for sequential builds as well.
+void planOrderedBlocks(const Function &function, const EffectTable &effects, const Symbols &symbols,
+                       FunctionAnalysis &analysis, bool entry = true);
+void scheduleTasks(const Program &program, size_t index, const EffectTable &effects, const Symbols &symbols,
+                   std::vector<FunctionAnalysis> &analyses, bool entry = true);
 
 struct FunctionIR {
   std::string globals;
@@ -530,6 +600,7 @@ struct FunctionIR {
   bool usesTextRuntime = false;
   bool usesHeapRuntime = false;
   bool usesTaskRuntime = false;
+  bool usesLockRuntime = false;
   bool usesCalendarRuntime = false;
   bool usesWideRuntime = false;
   bool usesBigRuntime = false;
@@ -577,6 +648,8 @@ std::string metaRuntimeIR();
 std::string markupRuntimeIR();
 std::string scopeRuntimeIR(const std::set<std::string> &nativeSymbols);
 std::string taskRuntimeIR(const std::set<std::string> &nativeSymbols);
+// The locks behind `${ }`. The task runtime reads their per-thread state too.
+std::string lockRuntimeIR(const std::set<std::string> &nativeSymbols);
 // The native entry of a test build: runs the tests given as (name, symbol),
 // honoring --list and name filters from the command line.
 std::string testRunnerIR(const std::vector<std::pair<std::string, std::string>> &tests,

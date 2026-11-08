@@ -443,16 +443,20 @@ class Parser {
     return !next.string && (next.text == "*" || next.text == "&" || arraySuffix(pos + length) ||
            std::isalpha(static_cast<unsigned char>(next.text[0])) || next.text[0] == '_');
   }
-  // `[]` or `[N]` after an element type, followed by a name or `&`.
+  // `[]`, `[N]`, `[-]`, or a size hint `[*]` or `[N*]` after an element type,
+  // followed by a name or `&`.
   bool arraySuffix(size_t at) const {
     auto punct = [&](size_t k, const char *text) {
       return k < tokens.size() && !tokens[k].string && tokens[k].text == text;
     };
     if (!punct(at, "[")) return false;
     size_t close = at + 1;
-    if (close < tokens.size() && !tokens[close].string &&
-        (std::isdigit(static_cast<unsigned char>(tokens[close].text[0])) || tokens[close].text == "-"))
-      ++close;
+    if (punct(close, "-")) ++close;
+    else {
+      if (close < tokens.size() && !tokens[close].string && std::isdigit(static_cast<unsigned char>(tokens[close].text[0])))
+        ++close;
+      if (punct(close, "*")) ++close;
+    }
     if (!punct(close, "]") || close + 1 >= tokens.size()) return false;
     const auto &next = tokens[close + 1];
     // A following `[` is a further dimension, reported once the type is read.
@@ -499,24 +503,31 @@ class Parser {
     if (arraySuffix(pos)) {
       struct Dimension {
         Token token;
-        unsigned long long extent = 0;
+        unsigned long long extent = 0, sizeHint = 0;
         bool signedIndex = false;
       };
       std::vector<Dimension> dimensions;
       while (arraySuffix(pos)) {
         Dimension d{pop()};
         if (accept("-")) d.signedIndex = true;
+        else if (accept("*")) d.sizeHint = Type::HugeHint;
         else if (!at("]")) {
           const auto count = pop();
+          const bool hint = accept("*");
           if (integerLiteralBase(count.text) != 10 ||
               count.text.find_first_not_of("0123456789") != std::string::npos)
-            fail(count, "a fixed array's length must be a decimal integer literal");
+            fail(count, hint ? "a size hint must be a decimal integer literal"
+                             : "a fixed array's length must be a decimal integer literal");
+          unsigned long long value = 0;
           try {
-            d.extent = std::stoull(count.text);
+            value = std::stoull(count.text);
           } catch (const std::exception &) {
-            fail(count, "fixed array length is too large");
+            fail(count, hint ? "size hint is too large" : "fixed array length is too large");
           }
-          if (d.extent == 0) fail(count, "a fixed array needs at least one element; use T [] for a dynamic array");
+          if (hint && (value == 0 || value == Type::HugeHint))
+            fail(count, value ? "size hint is too large" : "a size hint needs at least one element; use T [] when there is no estimate");
+          if (!hint && value == 0) fail(count, "a fixed array needs at least one element; use T [] for a dynamic array");
+          (hint ? d.sizeHint : d.extent) = value;
         }
         expect("]");
         dimensions.push_back(d);
@@ -533,7 +544,10 @@ class Parser {
         return Type::grid(t, unsigned(dimensions.size()));
       }
       t = trackedElement(t);
-      for (size_t i = dimensions.size(); i-- > 0;) t = Type::array(t, dimensions[i].extent);
+      for (size_t i = dimensions.size(); i-- > 0;) {
+        t = Type::array(t, dimensions[i].extent);
+        t.sizeHint = dimensions[i].sizeHint;
+      }
       return t;
     }
     // `K, V pair` names a pair keyed by K.
@@ -1492,6 +1506,12 @@ class Parser {
     s->token = peek();
     if (at("{")) {
       s->kind = "block";
+      s->body = block();
+      return s;
+    }
+    if (at("$") && punctuation(tokens.at(pos + 1), "{")) {
+      pop();
+      s->kind = "ordered";
       s->body = block();
       return s;
     }

@@ -69,7 +69,12 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
   if (needsMeta) module += metaRuntimeIR();
   if (needsHeap) module += heapRuntimeIR();
   bool needsTasks = false;
-  for (const auto &f : functions) needsTasks = needsTasks || f.usesTaskRuntime;
+  bool needsLocks = false;
+  for (const auto &f : functions) {
+    needsTasks = needsTasks || f.usesTaskRuntime;
+    needsLocks = needsLocks || f.usesLockRuntime;
+  }
+  if (needsTasks || needsLocks) module += lockRuntimeIR(nativeSymbols);
   if (needsTasks) module += taskRuntimeIR(nativeSymbols);
   if (needsText) module += textRuntimeIR();
   if (needsCollections) module += collectionRuntimeIR();
@@ -249,11 +254,13 @@ std::string compileModule(const Program &program, const Program &imports,
     if (function.script && !executed.count(function.name.text))
       fail(function.name, "file-scope statement never runs: no Exec in this module targets this "
                           "file; call Exec on the file, or move the statement into a function");
-  if (parallel) {
+  {
     // Imported bodies are not visible, so their effects stay unknown.
-    const auto isolated = isolatedFunctions(program, analyses);
-    for (size_t i = 0; i < program.size(); ++i)
-      scheduleTasks(program[i], isolated, analyses[i]);
+    const auto effects = summarizeEffects(program, analyses, symbols, entry);
+    for (size_t i = 0; i < program.size(); ++i) planOrderedBlocks(program[i], effects, symbols, analyses[i], entry);
+    if (parallel)
+      for (size_t i = 0; i < program.size(); ++i)
+        scheduleTasks(program, i, effects, symbols, analyses, entry);
   }
   std::set<std::string> nativeSymbols;
   for (const auto &[name, signature] : declarations) {

@@ -184,6 +184,7 @@ struct Binding {
   bool scopeLoop = false; // Not a variable: an iteration of a [@Name] loop, ended when its scope exits.
   bool pin = false; // Not a variable: an active use, ended when its scope exits.
   bool lent = false; // Received from a function that may lend; it may not own its object.
+  bool orderedLock = false; // Not a variable: a `${ }` block's locks, released when its scope exits.
 };
 class Generator {
   const Symbols &functions;
@@ -204,13 +205,14 @@ class Generator {
     size_t result;
     Type resultType;
     const Expr *call;
-    Binding destination;
+    Binding destination; // Empty name: a call statement, with nothing to store.
+    const Stmt *origin;
   };
   std::vector<std::vector<PendingTask>> pending;
   std::ostringstream thunks;
   std::string currentBlock = "entry";
   int next = 0, strings = 0, tasks = 0;
-  bool usesTextRuntime = false, usesHeapRuntime = false, usesTaskRuntime = false;
+  bool usesTextRuntime = false, usesHeapRuntime = false, usesTaskRuntime = false, usesLockRuntime = false;
   bool usesCalendarRuntime = false, usesWideRuntime = false;
   bool usesBigRuntime = false, usesDecimalRuntime = false, usesCollectionRuntime = false;
   bool usesFuncRuntime = false, usesMetaRuntime = false, usesMarkupRuntime = false, usesScopeRuntime = false;
@@ -439,6 +441,39 @@ class Generator {
     }
     const auto owner = inherited ? inherited->first : target.substr(0, target.rfind('.'));
     return args + ", ptr " + table({owner, path});
+  }
+  // Evaluates a call's receiver and arguments, in source order, into the
+  // argument list of its call instruction. `arguments` collects by-value
+  // arguments for the caller to release.
+  std::string callArguments(const Expr &e, const std::string &target, const Signature &f, std::string &callee,
+                            Value &temporaryReceiver, std::vector<Value> &arguments) {
+    std::string args;
+    if (f.method) {
+      const auto r = receiver(e.receiver.get(), e.token);
+      const auto inherited = analysis.receiverPaths.find(&e);
+      args = receiverArguments(r, target, inherited != analysis.receiverPaths.end() ? &inherited->second : nullptr,
+                               callee);
+      temporaryReceiver = r.temporary;
+    }
+    for (size_t i = 0; i < e.args.size(); ++i) {
+      const auto &parameter = f.parameters[i + (f.method ? 1 : 0)];
+      const auto &argument = *e.args[i];
+      if (!args.empty())
+        args += ", ";
+      if (parameter.reference) {
+        args += referenceArgument(argument, parameter, !f.nativeSymbol.empty());
+      } else {
+        auto v = expression(argument);
+        arguments.push_back(v);
+        if (!f.nativeSymbol.empty() && managedText(v.type)) {
+          auto data = fresh();
+          emit(data + " = getelementptr i8, ptr " + v.value + ", i64 16");
+          v.value = data; // Read-only native borrow; owner stays alive through the call.
+        }
+        args += irType(v.type) + " " + v.value;
+      }
+    }
+    return args;
   }
   // Calls a property accessor on r, passing `value` to a setter.
   Value accessorCall(const Receiver &r, const std::string &owner, const std::string &key,
@@ -1244,6 +1279,7 @@ class Generator {
   // destroy is false for a value moved out by `return local`: its storage
   // still drops its references, but the object lives on in the caller.
   void releaseBinding(const Binding &binding, bool destroy = true) {
+    if (binding.orderedLock) return emit("call void @duck.lock$exit(i32 " + binding.value + ")");
     if (binding.scopeLoop) return emit("call void @duck.scope$leaveLoop(ptr " + binding.value + ")");
     if (binding.pin) return emit("call void @duck.heap$unpin(ptr " + binding.value + ")");
     if (!binding.box.empty()) {
@@ -2515,34 +2551,10 @@ class Generator {
 
       const auto &f = found->second;
 
-      std::string args, callee = "@" + (f.nativeSymbol.empty() ? "duck." + target : f.nativeSymbol);
+      std::string callee = "@" + (f.nativeSymbol.empty() ? "duck." + target : f.nativeSymbol);
       Value temporaryReceiver{Type::Void, ""};
-      if (f.method) {
-        const auto r = receiver(e.receiver.get(), e.token);
-        const auto inherited = analysis.receiverPaths.find(&e);
-        args = receiverArguments(r, target, inherited != analysis.receiverPaths.end() ? &inherited->second : nullptr,
-                                 callee);
-        temporaryReceiver = r.temporary;
-      }
       std::vector<Value> arguments;
-      for (size_t i = 0; i < e.args.size(); ++i) {
-        const auto &parameter = f.parameters[i + (f.method ? 1 : 0)];
-        const auto &argument = *e.args[i];
-        if (!args.empty())
-          args += ", ";
-        if (parameter.reference) {
-          args += referenceArgument(argument, parameter, !f.nativeSymbol.empty());
-        } else {
-          auto v = expression(argument);
-          arguments.push_back(v);
-          if (!f.nativeSymbol.empty() && managedText(v.type)) {
-            auto data = fresh();
-            emit(data + " = getelementptr i8, ptr " + v.value + ", i64 16");
-            v.value = data; // Read-only native borrow; owner stays alive through the call.
-          }
-          args += irType(v.type) + " " + v.value;
-        }
-      }
+      const auto args = callArguments(e, target, f, callee, temporaryReceiver, arguments);
       auto id = f.result == Type::Void ? "" : fresh();
       emit((id.empty() ? "" : id + " = ") + "call " + irType(f.result) + " " + callee + "(" + args + ")");
       for (auto argument : arguments) release(argument);
@@ -2688,6 +2700,7 @@ class Generator {
     usesMetaRuntime = usesMetaRuntime || inner.usesMetaRuntime;
     usesMarkupRuntime = usesMarkupRuntime || inner.usesMarkupRuntime;
     usesScopeRuntime = usesScopeRuntime || inner.usesScopeRuntime;
+    usesLockRuntime = usesLockRuntime || inner.usesLockRuntime;
     scopeNames.insert(inner.scopeNames.begin(), inner.scopeNames.end());
     cleanups.insert(inner.cleanups.begin(), inner.cleanups.end());
     destroys.insert(inner.destroys.begin(), inner.destroys.end());
@@ -3140,10 +3153,12 @@ class Generator {
     return {Type::Long, id};
   }
   void join(const PendingTask &task) {
-    auto slot = fresh(), handle = fresh(), resultSlot = fresh(), result = fresh();
+    auto slot = fresh(), handle = fresh();
     emit(slot + " = getelementptr " + task.layout + ", ptr " + task.record + ", i32 0, i32 0");
     emit(handle + " = load ptr, ptr " + slot);
     emit("call void @duck.task$join(ptr " + handle + ")");
+    if (task.name.empty()) return;
+    auto resultSlot = fresh(), result = fresh();
     emit(resultSlot + " = getelementptr " + task.layout + ", ptr " + task.record + ", i32 0, i32 " +
          std::to_string(task.result));
     emit(result + " = load " + irType(task.resultType) + ", ptr " + resultSlot);
@@ -3159,54 +3174,124 @@ class Generator {
   void joinBefore(const Stmt &s) {
     if (pending.back().empty()) return;
     if (analysis.taskBarriers.count(&s)) return joinAll();
-    const auto &used = analysis.taskUses.at(&s);
+    const auto &conflicts = analysis.taskConflicts.at(&s);
     std::vector<PendingTask> remaining;
     for (const auto &task : pending.back()) {
-      if (used.count(task.name)) join(task);
+      if (conflicts.count(task.origin)) join(task);
       else remaining.push_back(task);
     }
     pending.back() = std::move(remaining);
   }
   // Arguments are evaluated here, in source order, before the task starts.
+  // The record holds {handle, callee, arguments..., result}; a reference
+  // argument stays valid because the task joins before its list ends.
   void spawn(const Stmt &s) {
     usesTaskRuntime = true;
     const auto &call = *s.expr;
     const auto &target = analysis.callTargets.at(&call);
     const auto &f = functions.at(target);
-    std::vector<Value> arguments;
-    for (const auto &argument : call.args) arguments.push_back(expression(*argument));
-    std::string layout = "{ ptr";
-    for (const auto &argument : arguments) layout += ", " + irType(argument.type);
-    layout += ", " + irType(f.result) + " }";
-    const auto result = arguments.size() + 1;
+    std::string callee = "@duck." + target;
+    Value temporaryReceiver{Type::Void, ""};
+    std::vector<Value> values;
+    const auto list = callArguments(call, target, f, callee, temporaryReceiver, values);
+    std::vector<std::pair<std::string, std::string>> arguments;
+    for (size_t begin = 0; begin < list.size();) {
+      auto end = list.find(", ", begin);
+      if (end == std::string::npos) end = list.size();
+      const auto piece = list.substr(begin, end - begin);
+      const auto space = piece.find(' ');
+      arguments.emplace_back(piece.substr(0, space), piece.substr(space + 1));
+      begin = end + 2;
+    }
+    const bool returns = f.result != Type::Void;
+    std::string layout = "{ ptr, ptr";
+    for (const auto &argument : arguments) layout += ", " + argument.first;
+    if (returns) layout += ", " + irType(f.result);
+    layout += " }";
+    const auto result = arguments.size() + 2;
     auto record = fresh();
     allocations << "  " << record << " = alloca " << layout << '\n';
-    for (size_t i = 0; i < arguments.size(); ++i) {
+    auto store = [&](size_t index, const std::string &type, const std::string &value) {
       auto field = fresh();
-      emit(field + " = getelementptr " + layout + ", ptr " + record + ", i32 0, i32 " +
-           std::to_string(i + 1));
-      emit("store " + irType(arguments[i].type) + " " + arguments[i].value + ", ptr " + field);
-    }
+      emit(field + " = getelementptr " + layout + ", ptr " + record + ", i32 0, i32 " + std::to_string(index));
+      emit("store " + type + " " + value + ", ptr " + field);
+    };
+    store(1, "ptr", callee);
+    for (size_t i = 0; i < arguments.size(); ++i) store(i + 2, arguments[i].first, arguments[i].second);
     auto entry = "@duck.task." + symbolPrefix + "." + std::to_string(tasks++);
-    thunks << "define internal i32 " << entry << "(ptr %task) {\nentry:\n";
+    thunks << "define internal i32 " << entry << "(ptr %task) {\nentry:\n"
+           << "  %c = getelementptr " << layout << ", ptr %task, i32 0, i32 1\n  %callee = load ptr, ptr %c\n";
     std::string args;
     for (size_t i = 0; i < arguments.size(); ++i) {
-      const auto type = irType(arguments[i].type), n = std::to_string(i + 1);
+      const auto &type = arguments[i].first;
+      const auto n = std::to_string(i + 2);
       thunks << "  %p" << n << " = getelementptr " << layout << ", ptr %task, i32 0, i32 " << n
              << "\n  %a" << n << " = load " << type << ", ptr %p" << n << '\n';
       args += (i ? ", " : "") + type + " %a" + n;
     }
-    thunks << "  %r = call " << irType(f.result) << " @duck." << target << "(" << args << ")\n"
-           << "  %p0 = getelementptr " << layout << ", ptr %task, i32 0, i32 " << result << '\n'
-           << "  store " << irType(f.result) << " %r, ptr %p0\n  ret i32 0\n}\n\n";
+    if (returns)
+      thunks << "  %r = call " << irType(f.result) << " %callee(" << args << ")\n"
+             << "  %p0 = getelementptr " << layout << ", ptr %task, i32 0, i32 " << result << '\n'
+             << "  store " << irType(f.result) << " %r, ptr %p0\n";
+    else
+      thunks << "  call void %callee(" << args << ")\n";
+    thunks << "  ret i32 0\n}\n\n";
     auto handle = fresh(), slot = fresh();
     emit(handle + " = call ptr @duck.task$spawn(ptr " + entry + ", ptr " + record + ")");
     emit(slot + " = getelementptr " + layout + ", ptr " + record + ", i32 0, i32 0");
     emit("store ptr " + handle + ", ptr " + slot);
+    if (s.kind != "let") {
+      pending.back().push_back({"", record, layout, result, f.result, &call, {}, &s});
+      return;
+    }
     auto name = s.token;
     name.text = s.name;
     declare(name, {analysis.localTypes.at(&s), ""}, s.constant);
-    pending.back().push_back({s.name, record, layout, result, f.result, &call, variable(name)});
+    pending.back().push_back({s.name, record, layout, result, f.result, &call, variable(name), &s});
+  }
+  // Takes the block's locks before its first statement. They are held like a
+  // local of the block, so every way out of it releases them.
+  bool orderedBlock(const Stmt &s) {
+    const auto found = analysis.orderedLocks.find(&s);
+    const FunctionAnalysis::OrderedLocks locks = found != analysis.orderedLocks.end()
+                                                     ? found->second
+                                                     : FunctionAnalysis::OrderedLocks{true, {}};
+    if (!locks.exclusive && locks.places.empty()) return block(s.body);
+    usesLockRuntime = true;
+    std::string mask = "0";
+    for (const auto &place : locks.places) {
+      std::string address;
+      Type root;
+      if (place.isStatic) {
+        address = "@duck$static." + place.staticName;
+        root = functions.statics.at(place.staticName).type;
+      } else {
+        const auto binding = variable(place.root);
+        address = binding.value;
+        root = binding.type;
+      }
+      if (!place.path.empty()) {
+        auto field = fresh();
+        emit(field + " = getelementptr " + irType(root) + ", ptr " + address + ", i32 0" + indexList(place.path));
+        address = field;
+      }
+      auto bit = fresh(), combined = fresh();
+      emit(bit + " = call i64 @duck.lock$bit(ptr " + address + ")");
+      emit(combined + " = or i64 " + mask + ", " + bit);
+      mask = combined;
+    }
+    auto token = fresh();
+    emit(token + " = call i32 @duck.lock$enter(i64 " + mask + ", i1 " + (locks.exclusive ? "true" : "false") + ")");
+    scopes.emplace_back();
+    Binding held{Type::Int, token};
+    held.owned = held.orderedLock = true;
+    Token name = s.token;
+    name.text = "$ordered";
+    bind(name, held);
+    const bool terminated = block(s.body);
+    if (!terminated) cleanupScopes(scopes.size() - 1);
+    scopes.pop_back();
+    return terminated;
   }
   bool sequence(const std::vector<std::unique_ptr<Stmt>> &body) {
     pending.emplace_back();
@@ -3337,6 +3422,7 @@ class Generator {
     }
     if (s.kind == "block")
       return block(s.body);
+    if (s.kind == "ordered") return orderedBlock(s);
     if (s.kind == "switch") return switchStatement(s);
     if (s.kind == "break") {
       cleanupScopes(loops.back().scopeDepth);
@@ -3748,7 +3834,7 @@ public:
       emit("ret void");
     }
     output << ") {\nentry:\n" << allocations.str() << code.str() << "}\n\n" << thunks.str();
-    return {globals.str(), output.str(), usesTextRuntime, usesHeapRuntime, usesTaskRuntime,
+    return {globals.str(), output.str(), usesTextRuntime, usesHeapRuntime, usesTaskRuntime, usesLockRuntime,
             usesCalendarRuntime, usesWideRuntime, usesBigRuntime, usesDecimalRuntime, usesCollectionRuntime,
             usesFuncRuntime, usesMetaRuntime, usesMarkupRuntime, usesScopeRuntime, cleanups, destroys, tables, helpers, types, scopeNames};
   }

@@ -1,0 +1,38 @@
+// EXPECT: 2500 and 2500, then 2501.
+// PITFALL: FillEvens and FillOdds touch different fields of one object, so
+// they may overlap. Nothing here says which one finishes first; only the
+// reads and the later write of Evens are ordered against them.
+Tally
+{
+    int Evens = 0
+    int Odds = 0
+
+    FillEvens(int limit)
+    {
+        for i : 1...limit
+        {
+            if i % 2 == 0
+                Evens++
+        }
+    }
+
+    FillOdds(int limit)
+    {
+        for i : 1...limit
+        {
+            if i % 2 != 0
+                Odds++
+        }
+    }
+}
+
+Main()
+{
+    Tally tally()
+    tally.FillEvens(5000)        // May run as a task.
+    tally.FillOdds(5000)         // May overlap it: the fields are disjoint.
+    Print(tally.Evens)           // Print waits for all earlier work.
+    Print(tally.Odds)
+    tally.Evens++
+    Print(tally.Evens)
+}

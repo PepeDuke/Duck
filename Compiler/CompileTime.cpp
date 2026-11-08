@@ -280,7 +280,7 @@ class Interpreter {
   void validateStatement(const Stmt &s, size_t owner) {
     tick();
     const std::set<std::string> allowed{"let", "expr", "assign", "++", "--", "+=", "-=", "*=", "/=", "%=",
-      "&=", "|=", "^=", "<<=", ">>=", "block", "if", "while", "for", "rangefor", "do", "break", "continue", "return",
+      "&=", "|=", "^=", "<<=", ">>=", "block", "ordered", "if", "while", "for", "rangefor", "do", "break", "continue", "return",
       "switch", "case"};
     if (!allowed.count(s.kind)) reject("statement '" + s.kind + "' is not allowed");
     if (s.kind == "let" && !scalar(analyses[owner].localTypes.at(&s))) reject("only scalar locals are allowed");
@@ -378,7 +378,7 @@ class Interpreter {
   }
   Flow statement(const Stmt &s, size_t owner, Environment &env) {
     tick();
-    if (s.kind == "block") return sequence(s.body, owner, env);
+    if (s.kind == "block" || s.kind == "ordered") return sequence(s.body, owner, env);
     if (s.kind == "return") return {Flow::Return, s.expr ? expression(*s.expr, owner, env) : Value{}};
     if (s.kind == "break") return {Flow::Break, {}};
     if (s.kind == "continue") return {Flow::Continue, {}};

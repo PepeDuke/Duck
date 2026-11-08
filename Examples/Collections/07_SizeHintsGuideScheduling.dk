@@ -1,0 +1,27 @@
+// EXPECT: 3, then 8, then 0.
+// PITFALL: hints change which calls are worth a thread, never the results.
+// A worker thread has a real cost, so a call over a small array stays on the
+// caller, and one over a huge array can run alongside other work. Build with
+// and without --sequential: the output is the same either way.
+int Sum(int []& values)
+{
+    int total = 0
+    for v : values
+    {
+        total += v
+    }
+    return total
+}
+
+Main()
+{
+    int [2*] few = {1, 2}        // About two elements: not worth a thread.
+    int [*] many = {3, 5}        // Expect many: a candidate for a worker.
+    int [*] others = {7}
+    a : Sum(few)
+    b : Sum(many)
+    c : Sum(others)
+    Print(a)
+    Print(b)
+    Print(c - 7)
+}

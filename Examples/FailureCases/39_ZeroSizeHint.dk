@@ -1,0 +1,8 @@
+// INTENTIONALLY REJECTED: a size hint estimates how many elements to expect.
+// EXPECT: compile error "a size hint needs at least one element".
+// FIX: remove the hint and write int [] values, or estimate at least 1.
+Main()
+{
+    int [0*] values
+    Print(values.Len)
+}

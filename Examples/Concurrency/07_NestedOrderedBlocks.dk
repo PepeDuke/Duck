@@ -1,0 +1,44 @@
+// EXPECT: 15, then 0 and 15.
+// PITFALL: both accounts are locked by the outer block before it starts, and
+// Withdraw and Deposit find their own $ blocks already covered. A block can
+// call into another block on the same thread without waiting for itself.
+Account
+{
+    int Cash = 0
+
+    int Withdraw(int amount)
+    {
+        ${
+            if Cash < amount
+                return 0
+            Cash -= amount
+            return amount
+        }
+    }
+
+    Deposit(int amount)
+    {
+        ${
+            Cash += amount
+        }
+    }
+}
+
+Move(Account& from, Account& to)
+{
+    ${
+        taken : from.Withdraw(from.Cash)
+        to.Deposit(taken)
+    }
+}
+
+Main()
+{
+    Account a()
+    Account b()
+    a.Deposit(15)
+    Print(a.Cash)
+    Move(a, b)
+    Print(a.Cash)
+    Print(b.Cash)
+}

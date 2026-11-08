@@ -1,0 +1,33 @@
+// EXPECT: 42, then 6.
+// PITFALL: native code and array elements cannot be named before a $ block
+// starts. Such a block is still atomic, but it excludes every other $ block
+// in the program rather than only the ones touching the same resources.
+extern "C" int Absolute(int value) = "abs"
+
+Table
+{
+    int [3] Slots
+}
+
+Totals
+#{
+    int Last = 0
+    Table Numbers
+}
+
+Main()
+{
+    ${
+        // The compiler cannot see what Absolute touches.
+        Totals.Last = Absolute(-42)
+        Print(Totals.Last)
+    }
+    ${
+        // Which element each write hits is only known while the block runs.
+        for i : 0...2
+        {
+            Totals.Numbers.Slots[i] = i + 1
+        }
+        Print(Totals.Numbers.Slots[0] + Totals.Numbers.Slots[1] + Totals.Numbers.Slots[2])
+    }
+}

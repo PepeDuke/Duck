@@ -65,6 +65,9 @@ if(BUILD_TESTING)
     add_test(NAME compiler.lifetimes COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/Tests/lifetimes.py
       --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
+    add_test(NAME compiler.ordered COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/Tests/ordered.py
+      --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
     add_test(NAME compiler.native COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/Tests/native_interop.py
       --builder $<TARGET_FILE:duck> --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})

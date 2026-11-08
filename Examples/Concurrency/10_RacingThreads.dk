@@ -1,0 +1,36 @@
+// EXPECT: 40000.
+// PITFALL: the compiler never runs conflicting work at the same time, but it
+// cannot see threads started by native code. Here two real threads add to
+// one static. Without the $ block, updates are lost and the total comes up
+// short; with it, each read-then-write happens as one step.
+extern "C" void* CreateThread(void* security, long stack, void* start, void* argument, int flags, void* id)
+extern "C" int WaitForSingleObject(void* handle, int milliseconds)
+extern "C" int CloseHandle(void* handle)
+
+Shared
+#{
+    int Total = 0
+}
+
+int Worker(void* unused)
+{
+    for i : 1...20000
+    {
+        ${
+            int seen = Shared.Total
+            Shared.Total = seen + 1
+        }
+    }
+    return 0
+}
+
+Main()
+{
+    first : CreateThread(null, 0, &Worker, null, 0, null)
+    second : CreateThread(null, 0, &Worker, null, 0, null)
+    WaitForSingleObject(first, -1)
+    WaitForSingleObject(second, -1)
+    CloseHandle(first)
+    CloseHandle(second)
+    Print(Shared.Total)
+}

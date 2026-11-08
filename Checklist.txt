@@ -4,9 +4,9 @@ Language design: README.md | Bootstrap implementation: Compiler
 Concurrency and locking
 [x] Schedule independent work for parallel execution.
    Proposal: Start with calls whose effects are known. Lower independent calls to worker tasks, join at the first dependent use or scope exit, and compare output against sequential execution with one and several workers.
-[] Track resource reads and writes across calls and wait for conflicting earlier work.
+[x] Track resource reads and writes across calls and wait for conflicting earlier work.
    Proposal: Add read/write summaries to function signatures. Propagate effects through recursive call groups, map parameters back to caller resources, and treat unknown native effects as a synchronization barrier.
-[] Implement ordered ${ ... } blocks that lock resources used by the block and its callees.
+[x] Implement ordered ${ ... } blocks that lock resources used by the block and its callees.
    Proposal: Parse an ordered-block statement. Acquire its transitive resource set in stable identity order and reuse locks held by an enclosing block. For effects that cannot be resolved before entry, begin with a shared scheduler-wide exclusion mechanism.
 
 Ownership and null safety
@@ -72,7 +72,7 @@ Collections
    Proposal: Resolve each mutation by collection kind and apply element cleanup on replacement or removal. First settle whether (s += x) returns the inserted index or the new count, then test empty collections and the first insertion.
 [x] Support multidimensional arrays and negative-index dimensions.
    Proposal: Store each fixed dimension's extent and check it before computing a flattened offset. Use nested dynamic storage for variable dimensions and sparse signed-coordinate storage for grids spanning int.Min to int.Max.
-[] Support collection size hints such as [*] and [50*].
+[x] Support collection size hints such as [*] and [50*].
    Proposal: Record the size annotation as an estimate on the array type or declaration. Feed it to the scheduling cost model; a [50*] array must still grow beyond 50 elements without changing program behavior.
 
 Loops and ranges

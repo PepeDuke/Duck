@@ -62,6 +62,11 @@ struct Type {
   std::shared_ptr<const Type> element, key;
   std::shared_ptr<const FuncSignature> signature;
   unsigned long long extent = 0; // A fixed array's element count.
+  // `T [50*]` and `T [*]`: how many elements a dynamic array is expected to
+  // hold. Only the scheduler's cost model reads it, so it is not part of the
+  // type's identity and never limits how far the array can grow.
+  unsigned long long sizeHint = 0;
+  static constexpr unsigned long long HugeHint = ~0ull; // `T [*]`.
   Type(Kind kind = Void) : base(kind) {}
   static Type array(const Type &element, unsigned long long extent) {
     Type t(Array);

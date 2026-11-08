@@ -311,9 +311,9 @@ the if. These bootstrap rules do not settle default initialization of future
 containers or fields.
 
 Calls whose effects are fully known can run on worker threads; see
-[worker tasks](#worker-tasks). Everything else executes sequentially. The
-compiler does not yet track resource reads and writes across calls, implement
-`${ ... }` resource locking, or all of Duck's ownership rules; see
+[worker tasks](#worker-tasks) and [ordered blocks](#ordered-blocks).
+Everything else executes sequentially. The compiler does not yet implement all
+of Duck's ownership rules; see
 [Owned heap locals](#owned-heap-locals) and [Owning fields and tracked
 storage](#owning-fields-and-tracked-storage). Local reference declarations, reference returns, arrays,
 mutable text buffers, range-based loops,
@@ -502,9 +502,9 @@ Each static has a `$init` function that runs at most once. It first runs the
 previous static's `$init`, or, for a module's first static, every imported
 static's, so the order holds whichever module's startup runs first. Each
 module with static fields registers a startup routine in `llvm.global_ctors`.
-`tiny` fields and pointer fields other than `void*` are not supported yet. A
-function that touches static storage is never run as a worker task, because
-the storage is shared between threads.
+`tiny` fields and pointer fields other than `void*` are not supported yet.
+Static storage is one resource each to the scheduler, so work touching the
+same static never runs at the same time.
 
 Declare parents after a colon, as in `Cat : Animal, Human { ... }`. Each
 parent's state is embedded at the front of the derived layout in list order,
@@ -911,6 +911,16 @@ releasing text and `big` values, and running a container's heap cleanup
 of a dynamic array cannot be passed by reference or have its address taken,
 because growing the array would move it. Dynamic arrays are move-only: pass
 them by reference and return locals to move them.
+
+### Size hints
+
+`T [50*]` and `T [*]` declare ordinary dynamic arrays and add an estimate of
+how many elements to expect: about fifty, or a huge number. Each dimension of
+a multidimensional array can have its own hint. A hint is not part of the
+type, so hinted arrays are interchangeable with `T []`, and it is not a
+capacity: `int [3*] a` grows past three elements like any other array. Only the
+[cost model](#worker-tasks) reads it. `[0*]` and a hint on a `[-]` grid are
+rejected. See [06_SizeHints.dk](../Examples/Collections/06_SizeHints.dk).
 
 ## Collection literals
 
@@ -1665,56 +1675,112 @@ imported conflicts, diagnostics and the real Windows clock example.
 
 ## Worker tasks
 
-The compiler starts with calls whose effects are known. A function is
-*isolated* when it has a body, is not an instance method, takes and returns
-only numeric or `bool` values (no references, pointers, text or containers),
-uses only such locals, never calls `Print`, and calls only other isolated
-functions. Recursive groups qualify together; a single call to a native,
-imported, printing, or otherwise unknown function excludes the caller.
+Each function gets a read/write summary: the static fields, and the fields of
+its reference parameters and receiver, that it may read or write. A summary is
+a least fixpoint over the call graph, so a recursive group shares its effects.
+At a call the callee's summary is rewritten in the caller's terms, so `Add(x)`
+writes `x`, and `Move(a.Left)` writes that field of `a`. Two resources conflict
+when they share a root and one field path is a prefix of the other; every array
+element counts as its whole array. Effects are *unknown* when they cannot be
+named: native and imported functions, pointers, lambdas and duck calls, and
+calls on `this` or a reference parameter whose method is overridden. In a
+library those calls are always unknown, because an importer may override them.
 
-A declaration in a statement list whose initializer is a direct call to an
-isolated function, such as `a : Fib(30)` or `long a = Fib(30)`, becomes a
-worker task. Its arguments are evaluated on the calling thread, in source order,
-when the declaration is reached. The task joins and stores its result:
+A statement whose initializer or whole body is a direct call can become a
+worker task when the callee's effects are known, it never calls `Print`, its
+body exchanges only plain data (numbers, `bool`, enums, and containers or arrays
+of those), and the [cost model](#the-cost-model) says it is worth a thread.
+Arguments are evaluated on the calling thread, in source order, when the
+statement is reached. A task joins:
 
-- before the first later statement in the same list that mentions its name,
-  anywhere inside that statement;
-- before a statement with an external effect: `Print`, or a call to a function
-  that is not isolated;
+- before the first later statement in the same list that conflicts with it,
+  including one that uses its result;
+- before a statement with an external or unknown effect;
 - before a statement containing `return`, `break`, or `continue`, or a loop
   that never exits;
 - at the end of its statement list, before scope cleanup.
 
 ```c++
-int Fib(int n)
-{
-    if n < 2 { return n }
-    left : Fib(n - 1)     // Runs as a task.
-    right : Fib(n - 2)    // Runs here, overlapping the task.
-    return left + right   // Joins left first.
-}
+tally.FillEvens(n)   // Runs as a task.
+tally.FillOdds(n)    // Overlaps it: the two touch different fields.
+Print(tally.Evens)   // Print waits for every earlier task.
 ```
 
-A declaration is not spawned when the very next statement would join it, so
-`right` above runs on the caller. Tasks only exchange values with their caller,
-and joins precede every external effect, so program output, runtime traps and
-nontermination occur in the same order as sequential execution. See
-[15_WorkerTasks.dk](../Examples/Bootstrap/15_WorkerTasks.dk).
+A call is not spawned when the very next statement would join it. Only
+conflicting work is ordered, and joins precede every external effect, so program
+output, runtime traps and nontermination occur in the same order as sequential
+execution. See [15_WorkerTasks.dk](../Examples/Bootstrap/15_WorkerTasks.dk) and
+[05_TasksWaitForConflicts.dk](../Examples/Concurrency/05_TasksWaitForConflicts.dk).
 
 At run time, `DUCK_WORKERS=n` limits the number of threads executing Duck code,
 including the main thread; it defaults to the active processor count. When the
 limit is reached the task runs inline on the caller, so nested tasks never wait
 for a free worker. `DUCK_WORKERS=1` runs every task inline, in source order.
 `duckc --sequential` disables task lowering entirely. Each task currently
-starts a Windows thread (`CreateThread`), so the runtime targets Windows x64,
-and small calls can cost more than they save; a cost model is future work.
+starts a Windows thread (`CreateThread`), so the runtime targets Windows x64.
 For-loop initializers and steps, assignments to existing variables, and calls
 inside larger expressions still run on the caller.
+
+### The cost model
+
+A task must pay for its thread, so the scheduler estimates how many simple
+operations a call performs and spawns only at 1000 or more. A loop runs for its
+literal bounds when it has them, or else for the element count of the
+collection it visits: a fixed array's length, or a [size hint](#size-hints),
+which follows reference arguments into the callee. A loop with neither is
+assumed to run 1000 times, and recursion is assumed to be large. The estimate
+only ever changes how fast a program runs, never what it does.
 
 `Tests/tasks.cmake` compiles each scheduled program with and without
 `--sequential`, links both at `-O0` and `-O2`, and requires identical output
 with one worker, four workers, and the default. It also checks that a trapping
 task stops the program before later output.
+
+## Ordered blocks
+
+A statement `${ ... }` runs its body in order and atomically with respect to
+every other `${ }` block touching the same resources:
+
+```c++
+int Withdraw(int amount)
+{
+    ${
+        if Cash < amount
+            return 0
+        Cash -= amount
+        return amount
+    }
+}
+```
+
+Its lock set is what its body and all of its callees read and write, computed
+from the same [summaries](#worker-tasks) that schedule tasks. Before the first
+statement runs, earlier conflicting tasks are joined, then the locks are taken.
+Nothing inside a block is spawned, and a task started by one of its callees
+runs inline, so a thread holding locks never waits for other work. Every exit
+releases them: reaching the end, `return`, `break`, `continue`, and an `@end`
+unwinding through it.
+
+Each scalar field and static is a lock identified by its address, hashed to one
+of 64 stripes that are always acquired in ascending order, so blocks cannot
+deadlock on each other. Locks are reentrant through nesting: an enclosing block's set
+includes everything its callees lock, so an inner block finds them held. A
+block whose only resources are its own locals takes no lock at all.
+
+Some effects cannot be named before the block starts: unknown calls, array
+elements (an index is only known while the block runs), and a callee locking
+something the block itself created. Such a block takes the scheduler-wide
+exclusion instead. Every block holds one reader/writer lock: shared when it
+named its resources, exclusive when it could not, so an exclusive block excludes
+every other block in the program, and the need for one propagates to the
+blocks enclosing it. See [Examples/Concurrency](../Examples/Concurrency).
+
+The locks exist for threads the scheduler cannot see, such as those started by
+native code; work the compiler starts itself is already ordered by its
+conflicts. Lock state is shared across modules, and blocks work the same under
+`--sequential`. Blocks are also allowed in `#` compile-time calls, where they
+simply run their body. `Tests/ordered.py` races native threads against
+each other to check this exclusion.
 
 ## Explicit compile-time calls
 
@@ -1902,7 +1968,8 @@ The compiler is a reusable `duck_compiler` library with explicit stage APIs in
 | Collect declarations | Syntax tree â†’ function signatures | `Symbols.cpp` |
 | Analyze a function | Function + signatures â†’ types, conversions, literal constants | `Semantics.cpp` |
 | Evaluate marked calls | Typed bodies and constant arguments to typed results | `CompileTime.cpp` |
-| Schedule tasks | All analyses â†’ isolated functions, task spawns and joins | `Scheduling.cpp` |
+| Summarize effects | All analyses to read/write summaries and `${ }` lock sets | `Scheduling.cpp` |
+| Schedule tasks | Summaries to task spawns, conflicts, and joins | `Scheduling.cpp` |
 | Lower a function | Function + signatures + analysis â†’ LLVM fragment | `Codegen.cpp` |
 | Assemble | Fragments in source order â†’ LLVM module | `Pipeline.cpp` |
 
