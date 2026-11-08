@@ -156,7 +156,7 @@ class Parser {
            at("float") || at("double") || at("bool") || at("void") || at("cstring") ||
            at("string") || at("name") || at("char") || at("date") ||
            at("time") || at("datetime") || at("big") || at("ubig") || at("tiny") ||
-           at("utiny");
+           at("utiny") || at("func");
   }
   // char(...), date(...), time(...), and datetime(...) construct validated values.
   bool constructorType() const {
@@ -235,6 +235,7 @@ class Parser {
   Type plainType() {
     Type t = baseType();
     while (accept("*")) t = t.pointerTo();
+    if (t.depth && t.base == Type::Func) fail(peek(), "pointers to func values are unsupported");
     if (t.depth && (t.base == Type::String || t.base == Type::Name ||
                     t.base == Type::Big || t.base == Type::UBig))
       fail(peek(), "pointers to managed text or big integers are unsupported");
@@ -292,6 +293,7 @@ class Parser {
     if (accept("date")) return Type::Date;
     if (accept("time")) return Type::Time;
     if (accept("datetime")) return Type::DateTime;
+    if (accept("func")) return funcType();
     if (accept("big")) return Type::Big;
     if (accept("ubig")) return Type::UBig;
     if (accept("tiny")) return Type::Tiny;
@@ -300,6 +302,107 @@ class Parser {
       return Type::Text;
     expect("void");
     return Type::Void;
+  }
+  // After `func`: a signature ahead, as in `func int(float)` or `func (int)`.
+  bool funcSignatureAhead() {
+    if (at("(")) return true;
+    if (!isType() && !namedType()) return false;
+    const auto saved = pos;
+    plainType();
+    const bool found = at("(");
+    pos = saved;
+    return found;
+  }
+  // `func`, or `func result(parameter types)`. Parameters may be named.
+  Type funcType() {
+    Type t(Type::Func);
+    if (!funcSignatureAhead()) return t;
+    auto signature = std::make_shared<FuncSignature>();
+    if (!at("(")) signature->result = type();
+    expect("(");
+    lines();
+    if (!at(")"))
+      do {
+        lines();
+        Type parameter = type();
+        if (parameter == Type::Void) fail(peek(), "parameter cannot have void type");
+        requireFuncSignature(parameter, "a func parameter");
+        bool reference = accept("&");
+        if (!at(",") && !at(")") && !at("\n")) identifier();
+        signature->parameters.push_back({parameter, reference});
+        lines();
+      } while (accept(","));
+    expect(")");
+    requireFuncSignature(signature->result, "a func result");
+    t.signature = signature;
+    return t;
+  }
+  void requireFuncSignature(const Type &t, const std::string &what) const {
+    if (funcValue(t) && !t.signature)
+      fail(peek(), what + " needs a signature, as in func int(float)");
+  }
+  // `[A, B.C]` lists before a declaration.
+  std::vector<Tag> attributes() {
+    std::vector<Tag> tags;
+    while (accept("[")) {
+      do {
+        lines();
+        auto token = identifier();
+        while (accept(".")) token.text += "." + identifier().text;
+        tags.push_back({token});
+        lines();
+      } while (accept(","));
+      expect("]");
+      lines();
+    }
+    return tags;
+  }
+  // The parameter list of a function or lambda, from '(' through ')'.
+  void parameterList(Function &f) {
+    expect("(");
+    lines();
+    if (!at(")"))
+      do {
+        lines();
+        if (!declarationType())
+          fail(peek(),
+               "parameter requires a supported explicit type (int8, short, "
+               "int16, int, int32, long, int64, byte, uint, uint8, uint16, "
+               "uint32, uint64, i1-i64, u1-u64, big, ubig, tiny, utiny, float, double, bool, "
+               "string, name, char, date, time, "
+               "datetime, cstring, func, or void*)");
+        Type t = type();
+        if (t == Type::Void)
+          fail(peek(), "parameter cannot have void type");
+        requireFuncSignature(t, "a func parameter");
+        bool reference = accept("&");
+        f.params.push_back({identifier(), t, reference});
+        lines();
+      } while (accept(","));
+    expect(")");
+  }
+  // `@ result(parameters) { body }`, after the '@'.
+  void lambdaExpression(Expr &e) {
+    e.kind = "lambda";
+    Type result = Type::Void;
+    if (!at("(")) result = type();
+    requireFuncSignature(result, "a func result");
+    Token name = e.token;
+    name.text = "$lambda";
+    Function f{name, result, {}, {}, false, {}};
+    f.usings = usings;
+    parameterList(f);
+    const bool outerOwner = returnsOwner;
+    returnsOwner = false;
+    f.body = block();
+    if (returnsOwner) fail(name, "a lambda cannot return ownership with return ::");
+    returnsOwner = outerOwner;
+    auto signature = std::make_shared<FuncSignature>();
+    signature->result = result;
+    for (const auto &p : f.params) signature->parameters.push_back({p.type, p.reference});
+    e.castType = Type(Type::Func);
+    e.castType.signature = signature;
+    e.lambda = std::make_shared<Function>(std::move(f));
   }
   static int precedence(const Token &t) {
     if (t.string)
@@ -335,11 +438,14 @@ class Parser {
       e->args.push_back(expression(11, stopAtPipe));
     } else if (accept("?")) {
       // `?a[i]` guards an index: a missing element skips a write and reads
-      // as the element type's default.
+      // as the element type's default. `?e..Foo()` skips a missing method.
       e->kind = "guard";
       e->args.push_back(expression(11, stopAtPipe));
-      if (e->args[0]->kind != "index")
-        fail(e->token, "'?' guards an index such as ?a[i]; guarded member and call chains are not supported yet");
+      if (e->args[0]->kind != "index" && e->args[0]->kind != "duckCall")
+        fail(e->token, "'?' guards an index such as ?a[i] or a duck call such as ?e..Foo(); "
+                       "guarded member and call chains are not supported yet");
+    } else if (accept("@")) {
+      lambdaExpression(*e);
     } else if (accept("(")) {
       lines();
       if ((isType() && !constructorType() && !typeMember()) ||
@@ -444,7 +550,21 @@ class Parser {
       e->kind = "name";
     }
     std::string path = e->kind == "name" ? e->token.text : "";
-    while (at(".") || at("(") || at("[")) {
+    while (at(".") || at("(") || at("[") || at("..")) {
+      if (accept("..")) {
+        // Dynamic dispatch: `e..Foo()`, and the checks `e..?Foo()` (would
+        // this call run?) and `e..?Foo` (does any method of that name exist?).
+        auto call = std::make_unique<Expr>();
+        call->kind = accept("?") ? "duckCheck" : "duckCall";
+        call->token = identifier();
+        call->receiver = std::move(e);
+        if (accept("(")) call->args = callArguments();
+        else if (call->kind == "duckCheck") call->kind = "duckExists";
+        else fail(call->token, "a duck call needs an argument list, as in e..Foo()");
+        e = std::move(call);
+        path.clear();
+        continue;
+      }
       if (at("[")) {
         auto index = std::make_unique<Expr>();
         index->kind = "index";
@@ -467,6 +587,18 @@ class Parser {
         e = std::move(member);
       } else {
         expect("(");
+        if (e->kind == "call" || e->kind == "invoke" || e->kind == "index" || e->kind == "lambda" ||
+            e->kind == "duckCall") {
+          // The callee is itself a value, as in MakeAdder(1)(2).
+          auto invoke = std::make_unique<Expr>();
+          invoke->kind = "invoke";
+          invoke->token = e->token;
+          invoke->receiver = std::move(e);
+          invoke->args = callArguments();
+          e = std::move(invoke);
+          path.clear();
+          continue;
+        }
         if (e->kind != "name" && e->kind != ".") fail(e->token, "expected a function or method name");
         if (e->kind == ".") {
           e->receiver = std::move(e->args.front());
@@ -816,26 +948,8 @@ class Parser {
       token.text = "this";
       f.params.push_back({token, self, true});
     }
-    expect("(");
-    lines();
-    if (!at(")"))
-      do {
-        lines();
-        if (!declarationType())
-          fail(peek(),
-               "parameter requires a supported explicit type (int8, short, "
-               "int16, int, int32, long, int64, byte, uint, uint8, uint16, "
-               "uint32, uint64, i1-i64, u1-u64, big, ubig, tiny, utiny, float, double, bool, "
-               "string, name, char, date, time, "
-               "datetime, cstring, or void*)");
-        Type t = type();
-        if (t == Type::Void)
-          fail(peek(), "parameter cannot have void type");
-        bool reference = accept("&");
-        f.params.push_back({identifier(), t, reference});
-        lines();
-      } while (accept(","));
-    expect(")");
+    requireFuncSignature(f.result, "a func result");
+    parameterList(f);
     if (external) {
       f.nativeSymbol = nativeName;
       if (accept("=")) {
@@ -878,10 +992,13 @@ class Parser {
     expect("{");
     lines();
     while (!accept("}")) {
+      const auto tagged = peek();
+      auto tags = attributes();
       const auto modifier = peek();
       const bool isProtected = accessModifier();
       // ~Name() declares the container's destructor.
       if (at("~")) {
+        if (!tags.empty()) fail(tagged, "attributes apply to fields and methods, not destructors");
         const auto tilde = pop();
         auto name = identifier();
         if (name.text != bare || tilde.line != name.line || tilde.column + 1 != name.column)
@@ -902,6 +1019,7 @@ class Parser {
       // -Name(...) declares a partial constructor.
       if (name.text == bare && at("(")) {
         if (typed) fail(name, "a constructor has no result type");
+        if (!tags.empty()) fail(tagged, "attributes apply to fields and methods, not constructors");
         auto constructor = function(name, Type::Void, false, "", tag.text);
         const std::vector<Parameter> params(constructor.params.begin() + 1, constructor.params.end());
         constructor.name.text = constructorKey(tag.text, params, isProtected);
@@ -919,13 +1037,22 @@ class Parser {
         name.text = methodKey(tag.text, name.text);
         program.push_back(function(std::move(name), t, false, "", tag.text));
         program.back().protectedAccess = isProtected;
+        program.back().tags = std::move(tags);
       } else {
         if (!typed || t == Type::Void)
           fail(name, "container fields require a known value type");
         std::shared_ptr<Expr> initializer;
         if (accept("=")) initializer = expression();
+        const bool lambdaDefault = initializer && initializer->kind == "lambda";
+        if (funcValue(t) && !t.signature) {
+          if (!lambdaDefault)
+            fail(name, "func field '" + name.text + "' needs a signature or a lambda default, as in func int() " + name.text);
+          t = initializer->castType;
+        }
         record.fields.push_back({name, t, false, isProtected, false, std::move(initializer)});
         record.fields.back().usings = usings;
+        record.fields.back().tags = std::move(tags);
+        record.fields.back().memberLambda = funcValue(t) && lambdaDefault;
       }
       if (!at("}") && !at("\n")) fail(peek(), "expected member terminator");
       lines();
@@ -1095,9 +1222,26 @@ class Parser {
 
   // A function definition ahead: `[type] Name(...)` and then its block. The
   // block is the only difference between a definition and a call.
-  bool functionAhead() const {
+  bool functionAhead() {
     auto punct = [&](size_t k, const char *text) { return !tokens[k].string && tokens[k].text == text; };
     size_t k = pos;
+    // A func result's own signature is not the parameter list.
+    if (at("func")) {
+      const auto saved = pos;
+      ++pos;
+      const bool signature = funcSignatureAhead();
+      pos = saved;
+      if (signature) {
+        while (!punct(k, "(") && !punct(k, "<eof>") && !punct(k, "\n")) ++k;
+        for (int depth = 0; !punct(k, "<eof>"); ++k) {
+          if (punct(k, "(")) ++depth;
+          else if (punct(k, ")") && --depth == 0) {
+            ++k;
+            break;
+          }
+        }
+      }
+    }
     for (; !punct(k, "("); ++k)
       if (tokens[k].string || punct(k, "<eof>") || punct(k, "\n") || punct(k, "=") || punct(k, ":") || punct(k, "::"))
         return false;
@@ -1157,7 +1301,17 @@ class Parser {
     while (!at("<eof>") && !(nested && at("}"))) {
       if (at("using"))
         fail(peek(), "using directives must come before the other declarations in their scope");
-      if (!nested && fileStatement()) {
+      // `[args]` marks the enum that follows as attribute data.
+      bool attributeEnum = false;
+      if (at("[")) {
+        const auto opening = peek();
+        const auto tags = attributes();
+        if (nested || tags.size() != 1 || tags[0].token.text != "args" || !namedType())
+          fail(opening, nested ? "attributes on static members are not supported yet"
+                               : "only [args] can precede a file-scope declaration, and it marks an enum");
+        attributeEnum = true;
+      }
+      if (!nested && !attributeEnum && fileStatement()) {
         statements.push_back(statement());
         if (!at("\n")) fail(peek(), "expected newline between statements");
         lines();
@@ -1178,6 +1332,7 @@ class Parser {
         auto tag = identifier();
         lines();
         if (parentList() || at("{") || staticBody()) {
+          if (attributeEnum) fail(tag, "[args] marks an enum, not a container");
           if (modified) fail(modifier, "access modifiers on nested containers are not supported");
           std::vector<Token> parents;
           if (accept(":")) {
@@ -1190,9 +1345,11 @@ class Parser {
           containerChain(functions, tag, std::move(parents), prefix, nested);
           continue;
         }
+        if (attributeEnum && !at(":") && !enumBlock()) fail(tag, "[args] marks an enum, not a container");
         if (at(":") || enumBlock()) {
           if (nested) fail(tag, "enum declarations must be at file scope");
           enumFragment(functions, tag);
+          functions.enums.back().attribute = attributeEnum;
           if (!at("<eof>") && !at("\n")) fail(peek(), "expected newline after enum");
           lines();
           continue;

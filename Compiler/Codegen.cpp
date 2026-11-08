@@ -7,7 +7,19 @@
 #include <sstream>
 namespace duck {
 namespace {
+// The layouts of a type descriptor, its member table, and its attribute
+// lists. Runtime lookup reads the same fields; see metaRuntimeIR.
+//   type:   string name, name name, member count, members
+//   member: string name, name name, cstring signature, string declaring,
+//           name declaring, flags, tag count, tags, function, offset, table
+//   tag:    cstring enum name, member index
+const char *const typeLayout = "{ ptr, ptr, i64, ptr }";
+const char *const memberLayout = "{ ptr, ptr, ptr, ptr, ptr, i32, i32, ptr, ptr, i64, ptr }";
+const char *const tagLayout = "{ ptr, i32 }";
+enum MemberField { MemberName, MemberNameBytes, MemberSignature, MemberDeclaring, MemberDeclaringBytes,
+                   MemberFlags, MemberTagCount, MemberTags, MemberFunction, MemberOffset, MemberTable };
 std::string irType(Type t) {
+  if (funcValue(t)) return "ptr";
   if (fixedArray(t)) return "[" + std::to_string(t.extent) + " x " + irType(*t.element) + "]";
   if (collectionValue(t) || dynamicArray(t)) return "ptr";
   if (integral(t))
@@ -130,7 +142,7 @@ std::string tableSymbol(const DispatchTable &table) {
   return symbol + "\"";
 }
 std::string tableType(const Symbols &symbols, const std::string &record) {
-  std::string type = "{ i64, i64";
+  std::string type = "{ i64, i64, ptr";
   for (size_t i = 0; i < symbols.records.at(record).parents.size(); ++i) type += ", ptr";
   for (size_t i = 0; i < symbols.dispatchNames(record).size(); ++i) type += ", ptr, i64, ptr";
   return type + " }";
@@ -165,6 +177,8 @@ struct Binding {
   // current element at each use, so a collection that moved stays safe.
   const Iteration *iteration = nullptr;
   bool iterationKey = false; // The key variable of `for k, v : pair`.
+  // A local shared with lambdas: the address of the word holding its box.
+  std::string box;
 };
 class Generator {
   const Symbols &functions;
@@ -192,9 +206,12 @@ class Generator {
   bool usesTextRuntime = false, usesHeapRuntime = false, usesTaskRuntime = false;
   bool usesCalendarRuntime = false, usesWideRuntime = false;
   bool usesBigRuntime = false, usesDecimalRuntime = false, usesCollectionRuntime = false;
+  bool usesFuncRuntime = false, usesMetaRuntime = false;
+  int lambdaCount = 0;
   std::set<std::string> cleanups, destroys;
   std::map<std::string, std::string> helpers;
   std::set<DispatchTable> tables;
+  std::set<std::string> types;
   // The receiver's container inside a method, and whether the method takes
   // a dispatch table (%vt); constructors and destructors use their own
   // container's table, so their calls on this never reach an override.
@@ -210,7 +227,7 @@ class Generator {
     for (auto index : path) {
       auto slot = fresh(), child = fresh();
       emit(slot + " = getelementptr " + tableType(functions, record) + ", ptr " + vt + ", i32 0, i32 " +
-           std::to_string(2 + index));
+           std::to_string(3 + index));
       emit(child + " = load ptr, ptr " + slot);
       vt = child;
       record = functions.records.at(record).fields[index].type.record;
@@ -282,7 +299,7 @@ class Generator {
       const auto &record = r.root.type.record;
       const auto type = tableType(functions, record);
       const auto names = functions.dispatchNames(record);
-      const auto first = 2 + functions.records.at(record).parents.size() +
+      const auto first = 3 + functions.records.at(record).parents.size() +
                          3 * (std::find(names.begin(), names.end(), memberName(target)) - names.begin());
       auto field = [&](size_t index, const std::string &ir) {
         auto slot = fresh(), value = fresh();
@@ -395,7 +412,10 @@ class Generator {
       auto part = fresh();
       emit(part + " = extractvalue " + irType(value.type) + " " + value.value + ", " + std::to_string(i));
       if (recordValue(field.type)) eachManaged({field.type, part}, runtime);
-      else {
+      else if (funcValue(field.type)) {
+        usesFuncRuntime = true;
+        emit("call void @duck.cell$" + runtime + "(ptr " + part + ")");
+      } else {
         usesTextRuntime = true;
         emit("call void @duck.text." + runtime + "(ptr " + part + ")");
       }
@@ -403,6 +423,10 @@ class Generator {
   }
   void retain(Value value) {
     if (recordValue(value.type) && functions.managed(value.type)) return eachManaged(value, "retain");
+    if (funcValue(value.type)) {
+      usesFuncRuntime = true;
+      return emit("call void @duck.cell$retain(ptr " + value.value + ")");
+    }
     if (!managedValue(value.type)) return;
     usesTextRuntime = true;
     emit("call void @duck.text.retain(ptr " + value.value + ")");
@@ -436,15 +460,23 @@ class Generator {
   // releasing text and big values, or a container's heap cleanup, which runs
   // its destructor and releases its fields.
   std::string elementCleanup(const Type &type) {
-    if (managedValue(type)) return slotRelease(type);
+    if (funcValue(type)) {
+      usesFuncRuntime = true;
+      return "@duck$slot.func";
+    }
+    if (managedValue(type)) {
+      usesCollectionRuntime = true;
+      return slotRelease(type);
+    }
     if (recordValue(type) && functions.needsCleanup(type)) {
       cleanups.insert(type.record);
       usesTextRuntime = true;
       return "@duck$cleanup." + type.record;
     }
-    if (arrayValue(type) && functions.needsCleanup(type)) {
+    if (collectionValue(type) || (arrayValue(type) && functions.needsCleanup(type))) {
       // An element that is itself an array: a dynamic one frees its storage
-      // and elements, a fixed one cleans up each element in place.
+      // and elements, a fixed one cleans up each element in place. A boxed
+      // local holding a queue, stack, or pair frees it the same way.
       std::string name = "@duck$cleanup.array.";
       for (unsigned char c : typeName(type))
         if (std::isalnum(c)) name += char(c);
@@ -453,7 +485,14 @@ class Generator {
       helpers[name] = "";
       usesCollectionRuntime = true;
       std::string body = "define internal void " + name + "(ptr %slot) {\nentry:\n";
-      if (dynamicArray(type)) {
+      if (collectionValue(type)) {
+        body += "  %c = load ptr, ptr %slot\n";
+        if (type.base == Type::Pair)
+          body += "  call void @duck.pair$free(ptr %c, ptr " + slotRelease(*type.key) + ", ptr " +
+                  slotRelease(*type.element) + ")\n";
+        else
+          body += "  call void @duck.seq$free(ptr %c, ptr " + slotRelease(*type.element) + ")\n";
+      } else if (dynamicArray(type)) {
         body += "  %c = load ptr, ptr %slot\n  call void @duck.seq$free(ptr %c, ptr " +
                 elementCleanup(*type.element) + ")\n";
       } else {
@@ -781,6 +820,10 @@ class Generator {
       emit(value.value + " = load " + irType(value.type) + ", ptr " + slot);
     }
     if (recordValue(value.type) && functions.managed(value.type)) return eachManaged(value, "release");
+    if (funcValue(value.type)) {
+      usesFuncRuntime = true;
+      return emit("call void @duck.cell$release(ptr " + value.value + ")");
+    }
     if (!managedValue(value.type)) return;
     usesTextRuntime = true;
     emit("call void @duck.text.release(ptr " + value.value + ")");
@@ -921,6 +964,13 @@ class Generator {
   // destroy is false for a value moved out by `return local`: its storage
   // still drops its references, but the object lives on in the caller.
   void releaseBinding(const Binding &binding, bool destroy = true) {
+    if (!binding.box.empty()) {
+      // The payload dies with the box's last reference, which may be a lambda's.
+      auto cell = fresh();
+      emit(cell + " = load ptr, ptr " + binding.box);
+      emit("call void @duck.cell$release(ptr " + cell + ")");
+      return;
+    }
     if (binding.scopedBorrow) return;
     if (binding.type.role != Type::Raw) {
       // An owner frees the payload, so it supplies the payload's cleanup.
@@ -1163,6 +1213,12 @@ class Generator {
     return {type, symbol};
   }
   Value binary(const std::string &op, Value a, Value b) {
+    if (funcValue(a.type)) {
+      auto compared = fresh();
+      emit(compared + " = icmp " + (op == "==" ? "eq" : "ne") + " ptr " + a.value + ", null");
+      release(a);
+      return {Type::Bool, compared};
+    }
     if (arbitraryNumber(a.type)) return bigBinary(op, a, b);
     if (managedText(a.type)) {
       usesTextRuntime = true;
@@ -1445,10 +1501,21 @@ class Generator {
   }
   void declare(const Token &t, Value value, bool constant = false, bool scopedBorrow = false) {
     auto address = fresh();
-    allocations << "  " << address << " = alloca " << irType(value.type)
-                << '\n';
+    std::string boxSlot;
+    if (analysis.captured.count(captureKey(t))) {
+      // Lambdas share this local, so it lives in a box that outlives the scope.
+      usesFuncRuntime = true;
+      boxSlot = fresh();
+      allocations << "  " << boxSlot << " = alloca ptr\n";
+      auto box = fresh();
+      emit(box + " = call ptr @duck.box$new(i64 " + sizeOf(value.type) + ", ptr " + elementCleanup(value.type) + ")");
+      emit("store ptr " + box + ", ptr " + boxSlot);
+      emit(address + " = getelementptr i8, ptr " + box + ", i64 32");
+    } else
+      allocations << "  " << address << " = alloca " << irType(value.type) << '\n';
     if (recordValue(value.type) && value.value.empty()) value.value = defaultValue(value.type);
-    if ((managedValue(value.type) || collectionValue(value.type) || dynamicArray(value.type)) &&
+    if ((managedValue(value.type) || funcValue(value.type) || collectionValue(value.type) ||
+         dynamicArray(value.type)) &&
         value.value.empty())
       value.value = "null";
     const bool defaults = fixedArray(value.type) && value.value.empty();
@@ -1457,7 +1524,9 @@ class Generator {
       emit("store " + irType(value.type) + " " + value.value + ", ptr " +
            address);
     if (defaults) fillDefaults(address, value.type);
-    bind(t, {value.type, address, constant, true, scopedBorrow});
+    Binding binding{value.type, address, constant, true, scopedBorrow};
+    binding.box = boxSlot;
+    bind(t, binding);
   }
   std::string textConstant(const std::string &value) {
     std::string name = "@str." + symbolPrefix + "." + std::to_string(strings++),
@@ -1676,6 +1745,13 @@ class Generator {
   Value lowerExpression(const Expr &e) {
     const auto &op = e.token.text;
     if (e.kind == "mutation") return mutate(*e.args[0], op, e.args.size() > 1 ? e.args[1].get() : nullptr, true);
+    if (e.kind == "lambda") return closure(e);
+    if (e.kind == "invoke" || analysis.indirectCalls.count(&e)) return indirectCall(e);
+    if (e.kind == "duckCall" || e.kind == "duckCheck" || e.kind == "duckExists") return duckCall(e, false);
+    if (e.kind == "guard" && e.args[0]->kind == "duckCall") return duckCall(*e.args[0], true);
+    if (analysis.reflections.count(&e)) return reflect(e);
+    if (auto function = analysis.functionValues.find(&e); function != analysis.functionValues.end())
+      return functionClosure(function->second, analysis.expressionTypes.at(&e));
     if (e.kind == "guard") return readOrDefault(elementSlot(*e.args[0], true), analysis.expressionTypes.at(&e));
     // Reading an unwritten grid cell gives the default without storing it.
     if (std::vector<const Expr *> coordinates; e.kind == "index")
@@ -2054,6 +2130,405 @@ class Generator {
     auto b = expression(*e.args[1]);
     return binary(op, a, b);
   }
+  // The word capture `index` occupies in the closure at `base`.
+  std::string captureSlot(const std::string &base, size_t index) {
+    auto slot = fresh();
+    emit(slot + " = getelementptr i8, ptr " + base + ", i64 " + std::to_string(24 + 8 * index));
+    return slot;
+  }
+  // A lambda expression: a constant closure, or one holding its captures.
+  Value closure(const Expr &e) {
+    using Capture = FunctionAnalysis::Capture;
+    usesFuncRuntime = true;
+    const auto &info = analysis.lambdas.at(&e);
+    const auto type = analysis.expressionTypes.at(&e);
+    const auto id = std::to_string(lambdaCount++);
+    const auto function = "@duck$lambda." + symbolPrefix + "." + id;
+    Generator inner(functions, analysis, symbolPrefix + "$l" + id);
+    thunks << inner.lambdaBody(*e.lambda, info, function);
+    absorb(inner);
+    if (info.captures.empty()) {
+      const auto symbol = "@duck$closure." + symbolPrefix + "." + id;
+      globals << symbol << " = private unnamed_addr constant { i64, ptr, ptr } { i64 "
+              << (info.bound ? "-2" : "-1") << ", ptr null, ptr " << function << " }\n";
+      return {type, symbol};
+    }
+    size_t words = 0;
+    for (const auto &capture : info.captures)
+      words += capture.kind == Capture::This || (capture.kind == Capture::Borrow && recordValue(capture.type)) ? 2 : 1;
+    auto cell = fresh(), slot = fresh();
+    emit(cell + " = call ptr @duck.cell$new(i64 " + std::to_string(24 + 8 * words) + ", ptr " + function + ".drop)");
+    emit(slot + " = getelementptr i8, ptr " + cell + ", i64 16");
+    emit("store ptr " + function + ", ptr " + slot);
+    // Dispose releases what the closure holds; borrowed storage needs nothing.
+    std::string dispose = "define internal void " + function + ".drop(ptr %c) {\nentry:\n";
+    size_t word = 0;
+    for (const auto &capture : info.captures) {
+      const auto binding = variable(capture.token);
+      const auto target = captureSlot(cell, word);
+      const auto offset = std::to_string(24 + 8 * word);
+      if (capture.kind == Capture::Box) {
+        auto box = fresh();
+        emit(box + " = load ptr, ptr " + binding.box);
+        emit("call void @duck.cell$retain(ptr " + box + ")");
+        emit("store ptr " + box + ", ptr " + target);
+        dispose += "  %s" + offset + " = getelementptr i8, ptr %c, i64 " + offset + "\n  %b" + offset +
+                   " = load ptr, ptr %s" + offset + "\n  call void @duck.cell$release(ptr %b" + offset + ")\n";
+        ++word;
+      } else if (capture.kind == Capture::Alias) {
+        usesHeapRuntime = true;
+        auto alias = fresh();
+        emit(alias + " = call ptr @duck.heap$alias(ptr " + binding.value + ", i1 " + ownerFlag(binding.type) + ")");
+        emit("store ptr " + alias + ", ptr " + target);
+        dispose += "  %s" + offset + " = getelementptr i8, ptr %c, i64 " + offset +
+                   "\n  call void @duck.heap$drop(ptr %s" + offset + ", i1 false, ptr null)\n";
+        ++word;
+      } else {
+        emit("store ptr " + binding.value + ", ptr " + target);
+        ++word;
+        if (capture.kind == Capture::This || recordValue(capture.type)) {
+          emit("store ptr " + binding.table + ", ptr " + captureSlot(cell, word));
+          ++word;
+        }
+      }
+    }
+    thunks << dispose << "  ret void\n}\n\n";
+    return {type, cell};
+  }
+  void absorb(Generator &inner) {
+    globals << inner.globals.str();
+    usesTextRuntime = usesTextRuntime || inner.usesTextRuntime;
+    usesHeapRuntime = usesHeapRuntime || inner.usesHeapRuntime;
+    usesCalendarRuntime = usesCalendarRuntime || inner.usesCalendarRuntime;
+    usesWideRuntime = usesWideRuntime || inner.usesWideRuntime;
+    usesBigRuntime = usesBigRuntime || inner.usesBigRuntime;
+    usesDecimalRuntime = usesDecimalRuntime || inner.usesDecimalRuntime;
+    usesCollectionRuntime = usesCollectionRuntime || inner.usesCollectionRuntime;
+    usesMetaRuntime = usesMetaRuntime || inner.usesMetaRuntime;
+    cleanups.insert(inner.cleanups.begin(), inner.cleanups.end());
+    destroys.insert(inner.destroys.begin(), inner.destroys.end());
+    tables.insert(inner.tables.begin(), inner.tables.end());
+    types.insert(inner.types.begin(), inner.types.end());
+    helpers.insert(inner.helpers.begin(), inner.helpers.end());
+  }
+  // The generated function of a lambda. Its first parameter is the closure,
+  // or for a member lambda the object it was called on.
+  std::string lambdaBody(const Function &f, const FunctionAnalysis::LambdaInfo &info, const std::string &symbol) {
+    using Capture = FunctionAnalysis::Capture;
+    scopes.emplace_back();
+    size_t word = 0;
+    std::string self, vt;
+    auto load = [&](const std::string &slot) {
+      auto value = fresh();
+      emit(value + " = load ptr, ptr " + slot);
+      return value;
+    };
+    for (const auto &capture : info.captures) {
+      const auto slot = captureSlot("%env", word++);
+      if (capture.kind == Capture::Box) {
+        auto payload = fresh();
+        const auto box = load(slot);
+        emit(payload + " = getelementptr i8, ptr " + box + ", i64 32");
+        Binding binding{capture.type, payload};
+        binding.box = slot;
+        bind(capture.token, binding);
+      } else if (capture.kind == Capture::Alias) {
+        bind(capture.token, {capture.type, slot});
+      } else if (capture.kind == Capture::This) {
+        self = load(slot);
+        vt = load(captureSlot("%env", word++));
+      } else {
+        Binding binding{capture.type, load(slot)};
+        if (recordValue(capture.type)) binding.table = load(captureSlot("%env", word++));
+        bind(capture.token, binding);
+      }
+    }
+    if (info.bound) {
+      self = "%env";
+      vt = table({info.record, {}});
+    }
+    if (info.usesThis) {
+      Type record = Type::Record;
+      record.record = info.record;
+      selfRecord = info.record;
+      for (const auto &path : functions.visibleFields(info.record)) {
+        auto address = fresh();
+        emit(address + " = getelementptr " + irType(record) + ", ptr " + self + ", i32 0" + indexList(path.indices));
+        bind(path.field->name, {path.field->type, address});
+      }
+      Token token = f.name;
+      token.text = "this";
+      Binding binding{record, self};
+      binding.table = vt;
+      bind(token, binding);
+    }
+    scopes.emplace_back();
+    std::ostringstream output;
+    output << "define internal " << irType(f.result) << " " << symbol << "(ptr %env";
+    for (size_t i = 0; i < f.params.size(); ++i) {
+      const auto &parameter = f.params[i];
+      const auto arg = "%arg" + std::to_string(i);
+      output << ", " << (parameter.reference ? "ptr" : irType(parameter.type)) << " " << arg;
+      if (parameter.reference) {
+        Binding binding{parameter.type, arg};
+        if (carriesTable(parameter)) {
+          binding.table = "%vt" + std::to_string(i);
+          output << ", ptr " << binding.table;
+        }
+        bind(parameter.name, binding);
+      } else {
+        retain({parameter.type, arg});
+        declare(parameter.name, {parameter.type, arg});
+      }
+    }
+    if (!sequence(f.body)) {
+      cleanupScopes(0);
+      emit("ret void");
+    }
+    output << ") {\nentry:\n" << allocations.str() << code.str() << "}\n\n" << thunks.str();
+    return output.str();
+  }
+  // A global function as a value: a constant closure around a thunk that
+  // drops the environment parameter.
+  Value functionClosure(const std::string &target, const Type &type) {
+    usesFuncRuntime = true;
+    const auto symbol = "@duck$fn." + target;
+    if (!helpers.count(symbol)) {
+      const auto &f = functions.at(target);
+      std::string parameters, arguments;
+      for (size_t i = 0; i < f.parameters.size(); ++i) {
+        const auto &parameter = f.parameters[i];
+        const auto arg = (parameter.reference ? std::string("ptr") : irType(parameter.type)) + " %a" + std::to_string(i);
+        parameters += ", " + arg;
+        arguments += (i ? ", " : "") + arg;
+        if (carriesTable(parameter)) {
+          parameters += ", ptr %t" + std::to_string(i);
+          arguments += ", ptr %t" + std::to_string(i);
+        }
+      }
+      const auto result = irType(f.result);
+      std::string body = "define internal " + result + " " + symbol + "(ptr %env" + parameters + ") {\nentry:\n  ";
+      if (f.result == Type::Void) body += "call void @duck." + target + "(" + arguments + ")\n  ret void\n}\n";
+      else body += "%r = call " + result + " @duck." + target + "(" + arguments + ")\n  ret " + result + " %r\n}\n";
+      body += "@duck$fc." + target + " = private unnamed_addr constant { i64, ptr, ptr } { i64 -1, ptr null, ptr " +
+              symbol + " }\n";
+      helpers[symbol] = body;
+    }
+    return {type, "@duck$fc." + target};
+  }
+  // A call through a func value. The closure is kept alive across the call,
+  // since the callee may overwrite the variable it was read from.
+  Value indirectCall(const Expr &e) {
+    usesFuncRuntime = true;
+    const auto &call = analysis.indirectCalls.at(&e);
+    std::string closureValue, self;
+    Value temporary{Type::Void, ""};
+    if (e.kind == "invoke") {
+      closureValue = expression(*e.receiver).value;
+    } else {
+      if (call.field) {
+        const auto r = receiver(e.receiver.get(), e.token);
+        temporary = r.temporary;
+        Type owner = Type::Record;
+        owner.record = call.owner;
+        auto field = fresh();
+        emit(field + " = getelementptr " + irType(owner) + ", ptr " + r.address + ", i32 0" + indexList(call.path));
+        // A member lambda runs on the state that declares its field.
+        self = r.address;
+        if (call.path.size() > 1) {
+          self = fresh();
+          emit(self + " = getelementptr " + irType(owner) + ", ptr " + r.address + ", i32 0" +
+               indexList({call.path.begin(), call.path.end() - 1}));
+        }
+        closureValue = fresh();
+        emit(closureValue + " = load ptr, ptr " + field);
+      } else {
+        const auto binding = variable(e.token);
+        closureValue = fresh();
+        emit(closureValue + " = load ptr, ptr " + binding.value);
+      }
+      retain({call.type, closureValue});
+    }
+    auto present = fresh();
+    emit(present + " = icmp ne ptr " + closureValue + ", null");
+    require(present);
+    auto functionSlot = fresh(), function = fresh();
+    emit(functionSlot + " = getelementptr i8, ptr " + closureValue + ", i64 16");
+    emit(function + " = load ptr, ptr " + functionSlot);
+    auto env = closureValue;
+    if (call.field) {
+      auto count = fresh(), bound = fresh();
+      env = fresh();
+      emit(count + " = load i64, ptr " + closureValue);
+      emit(bound + " = icmp eq i64 " + count + ", -2");
+      emit(env + " = select i1 " + bound + ", ptr " + self + ", ptr " + closureValue);
+    }
+    std::string args = "ptr " + env;
+    std::vector<Value> arguments;
+    const auto &signature = *call.type.signature;
+    for (size_t i = 0; i < e.args.size(); ++i) {
+      Parameter parameter;
+      parameter.type = signature.parameters[i].type;
+      parameter.reference = signature.parameters[i].reference;
+      if (parameter.reference) {
+        args += ", " + referenceArgument(*e.args[i], parameter, false);
+        continue;
+      }
+      const auto v = expression(*e.args[i]);
+      arguments.push_back(v);
+      args += ", " + irType(v.type) + " " + v.value;
+    }
+    auto id = signature.result == Type::Void ? "" : fresh();
+    emit((id.empty() ? "" : id + " = ") + "call " + irType(signature.result) + " " + function + "(" + args + ")");
+    for (const auto &argument : arguments) release(argument);
+    release({call.type, closureValue});
+    if (!temporary.value.empty()) releaseBinding({temporary.type, temporary.value});
+    return {signature.result, id};
+  }
+  // GetName, GetDeclaringName, and GetTags read the container's descriptor.
+  Value reflect(const Expr &e) {
+    const auto &info = analysis.reflections.at(&e);
+    types.insert(info.record);
+    const auto type = analysis.expressionTypes.at(&e);
+    const auto symbol = "@duck$type." + info.record;
+    const auto members = functions.members(info.record);
+    const auto table = "[" + std::to_string(members.size()) + " x " + memberLayout + "]";
+    if (info.query != "GetTags") {
+      const bool bytes = type == Type::Name;
+      auto slot = fresh(), value = fresh();
+      if (info.member < 0)
+        emit(slot + " = getelementptr " + std::string(typeLayout) + ", ptr " + symbol + ", i32 0, i32 " + (bytes ? "1" : "0"));
+      else
+        emit(slot + " = getelementptr " + table + ", ptr " + symbol + ".members, i32 0, i32 " +
+             std::to_string(info.member) + ", i32 " +
+             std::to_string(int(info.query == "GetName" ? MemberName : MemberDeclaring) + (bytes ? 1 : 0)));
+      emit(value + " = load ptr, ptr " + slot);
+      return {type, value};
+    }
+    usesCollectionRuntime = true;
+    auto holder = fresh();
+    allocations << "  " << holder << " = alloca ptr\n";
+    emit("store ptr null, ptr " + holder);
+    const auto &tags = members.at(size_t(info.member)).tags;
+    const auto list = "[" + std::to_string(tags.size()) + " x " + tagLayout + "]";
+    for (auto index : info.tags) {
+      auto entry = fresh(), member = fresh(), slot = fresh();
+      emit(entry + " = getelementptr " + list + ", ptr " + symbol + ".tags." + std::to_string(info.member) +
+           ", i32 0, i32 " + std::to_string(index) + ", i32 1");
+      emit(member + " = load i32, ptr " + entry);
+      Type tagType = Type::Enum;
+      tagType.record = tags[index].type;
+      const auto value = enumValue(info.element) ? Value{info.element, member} : enumUnderlying({tagType, member});
+      emit(slot + " = call ptr @duck.seq$push(ptr " + holder + ", i64 " + sizeOf(info.element) + ")");
+      emit("store " + irType(info.element) + " " + value.value + ", ptr " + slot);
+    }
+    auto result = fresh();
+    emit(result + " = load ptr, ptr " + holder);
+    return {type, result};
+  }
+  // `e..Foo(...)` finds the method on the receiver's runtime type. A required
+  // call traps on a miss; `?e..Foo(...)` skips it, arguments included, and
+  // reads as the default result; the checks give a bool and run nothing.
+  Value duckCall(const Expr &e, bool guarded) {
+    usesMetaRuntime = true;
+    const auto &info = analysis.duckCalls.at(&e);
+    const auto *base = e.receiver.get();
+    const bool pointer = analysis.expressionTypes.at(base).depth != 0;
+    const bool check = e.kind != "duckCall";
+    const bool tolerant = guarded || check;
+    Receiver r;
+    if (pointer) r.address = (tolerant ? expression(*base) : dereference(*base)).value;
+    else r = receiver(base, e.token);
+    const Type resultType = check ? Type(Type::Bool) : info.result;
+    const bool hasResult = resultType != Type::Void;
+    std::string slot;
+    if (tolerant && hasResult) {
+      slot = fresh();
+      allocations << "  " << slot << " = alloca " << irType(resultType) << '\n';
+    }
+    const auto miss = label(), done = label();
+    if (tolerant && pointer) {
+      auto alive = fresh();
+      const auto present = label();
+      emit(alive + " = icmp ne ptr " + r.address + ", null");
+      emit("br i1 " + alive + ", label %" + present + ", label %" + miss);
+      startBlock(present);
+    }
+    std::string descriptor, object;
+    if (r.rooted && r.view.empty()) {
+      const auto layout = tableType(functions, r.root.type.record);
+      auto ownSlot = fresh(), own = fresh(), typeSlot = fresh(), back = fresh();
+      descriptor = fresh();
+      object = fresh();
+      emit(ownSlot + " = getelementptr " + layout + ", ptr " + r.root.table + ", i32 0, i32 0");
+      emit(own + " = load i64, ptr " + ownSlot);
+      emit(typeSlot + " = getelementptr " + layout + ", ptr " + r.root.table + ", i32 0, i32 2");
+      emit(descriptor + " = load ptr, ptr " + typeSlot);
+      emit(back + " = sub i64 0, " + own);
+      emit(object + " = getelementptr i8, ptr " + r.address + ", i64 " + back);
+    } else {
+      types.insert(info.record.record);
+      descriptor = "@duck$type." + info.record.record;
+      object = r.address;
+    }
+    const auto signature = e.kind == "duckExists" ? std::string("null") : textConstant(info.signature);
+    auto member = fresh(), found = fresh();
+    emit(member + " = call ptr @duck.meta$find(ptr " + descriptor + ", ptr " + textConstant(e.token.text) + ", ptr " +
+         signature + ")");
+    emit(found + " = icmp ne ptr " + member + ", null");
+    if (check) {
+      emit("store i1 " + found + ", ptr " + slot);
+      emit("br label %" + done);
+    } else {
+      if (guarded) {
+        const auto hit = label();
+        emit("br i1 " + found + ", label %" + hit + ", label %" + miss);
+        startBlock(hit);
+      } else
+        require(found);
+      auto field = [&](MemberField index, const std::string &ir) {
+        auto at = fresh(), value = fresh();
+        emit(at + " = getelementptr " + std::string(memberLayout) + ", ptr " + member + ", i32 0, i32 " +
+             std::to_string(int(index)));
+        emit(value + " = load " + ir + ", ptr " + at);
+        return value;
+      };
+      const auto function = field(MemberFunction, "ptr"), offset = field(MemberOffset, "i64"), table = field(MemberTable, "ptr");
+      auto self = fresh();
+      emit(self + " = getelementptr i8, ptr " + object + ", i64 " + offset);
+      std::string args = "ptr " + self + ", ptr " + table;
+      std::vector<Value> arguments;
+      for (size_t i = 0; i < e.args.size(); ++i) {
+        const auto &parameter = info.parameters[i];
+        if (parameter.reference) {
+          args += ", " + referenceArgument(*e.args[i], parameter, false);
+          continue;
+        }
+        const auto v = expression(*e.args[i]);
+        arguments.push_back(v);
+        args += ", " + irType(v.type) + " " + v.value;
+      }
+      auto id = hasResult ? fresh() : "";
+      emit((id.empty() ? "" : id + " = ") + "call " + irType(resultType) + " " + function + "(" + args + ")");
+      for (const auto &argument : arguments) release(argument);
+      if (!tolerant) {
+        if (!r.temporary.value.empty()) releaseBinding({r.temporary.type, r.temporary.value});
+        return {resultType, id};
+      }
+      if (hasResult) emit("store " + irType(resultType) + " " + id + ", ptr " + slot);
+      emit("br label %" + done);
+    }
+    startBlock(miss);
+    if (hasResult)
+      emit("store " + irType(resultType) + " " + (check ? std::string("0") : missingElement(resultType).value) + ", ptr " + slot);
+    emit("br label %" + done);
+    startBlock(done);
+    if (!r.temporary.value.empty()) releaseBinding({r.temporary.type, r.temporary.value});
+    if (!hasResult) return {Type::Void, ""};
+    auto value = fresh();
+    emit(value + " = load " + irType(resultType) + ", ptr " + slot);
+    return {resultType, value};
+  }
   // Store the magnitude as little-endian 32-bit limbs for @duck.wide.print.
   void printWide(Value v) {
     usesWideRuntime = true;
@@ -2419,6 +2894,7 @@ class Generator {
         guardedSlots[&target] = slot;
       }
       auto address = location(target);
+      address.box.clear(); // Assignment replaces the payload, not the shared box.
       if (address.type.role != Type::Raw) {
         auto word = aliasWord(*s.expr); // Retain first, including on self-assignment.
         releaseBinding(address);
@@ -2510,7 +2986,7 @@ public:
     output << ") {\nentry:\n" << allocations.str() << code.str() << "}\n\n" << thunks.str();
     return {globals.str(), output.str(), usesTextRuntime, usesHeapRuntime, usesTaskRuntime,
             usesCalendarRuntime, usesWideRuntime, usesBigRuntime, usesDecimalRuntime, usesCollectionRuntime,
-            cleanups, destroys, tables, helpers};
+            usesFuncRuntime, usesMetaRuntime, cleanups, destroys, tables, helpers, types};
   }
 };
 } // namespace
@@ -2596,6 +3072,7 @@ void releaseFields(const Symbols &symbols, const std::string &record, const std:
     const auto part = "%v" + std::to_string(next++);
     ir += "  " + part + " = extractvalue " + irType(type) + " " + value + ", " + std::to_string(i) + "\n";
     if (recordValue(fields[i].type)) releaseFields(symbols, fields[i].type.record, part, next, ir);
+    else if (funcValue(fields[i].type)) ir += "  call void @duck.cell$release(ptr " + part + ")\n";
     else ir += "  call void @duck.text.release(ptr " + part + ")\n";
   }
 }
@@ -2665,17 +3142,95 @@ std::string emitDestroys(const Symbols &symbols, std::set<std::string> container
   }
   return ir;
 }
-std::string emitTables(const Symbols &symbols, std::set<DispatchTable> tables) {
+namespace {
+std::string cstringGlobal(const std::string &symbol, const std::string &text) {
+  const char *hex = "0123456789ABCDEF";
+  std::string escaped;
+  for (unsigned char c : text) {
+    escaped += '\\';
+    escaped += hex[c >> 4];
+    escaped += hex[c & 15];
+  }
+  return symbol + " = private unnamed_addr constant [" + std::to_string(text.size() + 1) + " x i8] c\"" + escaped +
+         "\\00\"\n";
+}
+// A container's descriptor: its names, and for each member its names,
+// signature, declaring container, attributes, and, for a method, the final
+// overrider with its receiver offset and table. Adds those tables to `tables`.
+std::string typeDescriptor(const Symbols &symbols, const std::string &record, std::set<DispatchTable> &tables) {
+  const auto symbol = "@duck$type." + record;
+  const auto members = symbols.members(record);
+  std::string ir;
+  auto text = [&](const std::string &name, const std::string &value, Type type) {
+    Token token;
+    token.text = value;
+    ir += managedTextGlobal(name, token, type);
+    return name;
+  };
+  const auto typeName_ = text(symbol + ".name", record, Type::String);
+  const auto typeBytes = text(symbol + ".bytes", record, Type::Name);
+  std::string entries;
+  for (size_t i = 0; i < members.size(); ++i) {
+    const auto &member = members[i];
+    const auto prefix = symbol + ".m" + std::to_string(i);
+    const auto name = text(prefix + ".name", member.name, Type::String);
+    const auto bytes = text(prefix + ".bytes", member.name, Type::Name);
+    const auto declaring = text(prefix + ".from", member.declaring, Type::String);
+    const auto declaringBytes = text(prefix + ".frombytes", member.declaring, Type::Name);
+    const auto signature = prefix + ".signature";
+    ir += cstringGlobal(signature, member.signature ? signatureText(member.signature->result, member.signature->parameters, 1)
+                                                    : typeName(member.type));
+    std::string tags = "null";
+    // Every member with attributes has a list, named by its member index.
+    if (!member.tags.empty()) {
+      tags = symbol + ".tags." + std::to_string(i);
+      std::string list;
+      for (size_t t = 0; t < member.tags.size(); ++t) {
+        const auto owner = prefix + ".tag" + std::to_string(t);
+        ir += cstringGlobal(owner, member.tags[t].type);
+        list += std::string(t ? ", " : "") + tagLayout + " { ptr " + owner + ", i32 " + std::to_string(member.tags[t].member) + " }";
+      }
+      ir += tags + " = private unnamed_addr constant [" + std::to_string(member.tags.size()) + " x " + tagLayout + "] [" + list + "]\n";
+    }
+    std::string function = "null", table = "null";
+    if (member.signature) {
+      function = "@duck." + member.key;
+      table = tableSymbol({record, member.path});
+      tables.insert({record, member.path});
+    }
+    entries += std::string(i ? ", " : "") + memberLayout + " { ptr " + name + ", ptr " + bytes + ", ptr " + signature +
+               ", ptr " + declaring + ", ptr " + declaringBytes + ", i32 " +
+               std::to_string((member.signature ? 1 : 0) | (member.isProtected ? 2 : 0)) + ", i32 " +
+               std::to_string(member.tags.size()) + ", ptr " + tags + ", ptr " + function + ", i64 " +
+               pathOffset(record, member.path) + ", ptr " + table + " }";
+  }
+  const auto count = std::to_string(members.size());
+  ir += symbol + ".members = private unnamed_addr constant [" + count + " x " + memberLayout + "] ";
+  ir += members.empty() ? std::string("zeroinitializer\n") : "[" + entries + "]\n";
+  ir += symbol + " = internal constant " + typeLayout + " { ptr " + typeName_ + ", ptr " + typeBytes + ", i64 " + count +
+        ", ptr " + symbol + ".members }\n";
+  return ir;
+}
+} // namespace
+std::string emitTables(const Symbols &symbols, std::set<DispatchTable> tables, std::set<std::string> types) {
   std::string ir;
   std::set<DispatchTable> emitted;
-  while (!tables.empty()) {
+  std::set<std::string> described;
+  while (!tables.empty() || !types.empty()) {
+    if (!types.empty()) {
+      const auto record = *types.begin();
+      types.erase(types.begin());
+      if (described.insert(record).second) ir += typeDescriptor(symbols, record, tables);
+      continue;
+    }
     const auto table = *tables.begin();
     tables.erase(tables.begin());
     if (!emitted.insert(table).second) continue;
     const auto &[record, path] = table;
     const auto seen = symbols.recordAt(record, path);
     ir += tableSymbol(table) + " = internal constant " + tableType(symbols, seen) + " { i64 " +
-          pathOffset(record, path) + ", i64 " + std::to_string(path.size());
+          pathOffset(record, path) + ", i64 " + std::to_string(path.size()) + ", ptr @duck$type." + record;
+    types.insert(record);
     for (size_t i = 0; i < symbols.records.at(seen).parents.size(); ++i) {
       auto parent = path;
       parent.push_back(i);

@@ -1426,9 +1426,38 @@ accepts it. It is distinct from an opaque handle and cannot be null or cast to
 `void*`. Native callees must not modify its storage. Native references borrow
 Duck storage only during the call and must not be retained. These native
 contracts are the binding author's responsibility; Duck does not inspect the
-library implementation. Pointer arithmetic, indirect Duck calls, structures passed to C by
+library implementation. Pointer arithmetic, structures passed to C by
 value, varargs, C++ name mangling, and alternate calling conventions remain
 unsupported.
+
+### Reflection, duck calls, and func values
+
+Each container used through a dispatch table, reflection, or a duck call gets a
+private descriptor, `@duck$type.<container>`: its names and a member table of
+fields then methods, each with its names, signature text, declaring container,
+flags (1 method, 2 protected), attributes, and for a method the final overrider
+with its receiver offset and table. Every dispatch table points at the
+descriptor of its dynamic type, so `this` and container reference parameters
+find the runtime type; every other receiver's static type is already exact.
+
+`e..Foo(args)` takes its shape from the methods the receiver could dispatch to,
+when they agree on it, and otherwise from the arguments. `@duck.meta$find`
+compares name and signature text against the public methods, which makes a
+signature mismatch the same as a missing method.
+
+A `func` is one word: null, or a reference-counted closure
+`{ count, dispose, fn, captures... }`. `fn` takes the closure, then the call's
+arguments. A count below zero is an immortal constant, used for lambdas without
+captures and functions used as values (-1) and for member lambdas (-2), whose
+first argument is the object instead of the closure.
+
+Each captured local lives in a box, `{ count, dispose, cleanup, pad, payload }`,
+which the scope and each closure hold a reference to, so assignments are shared
+and the payload is destroyed with the last reference. A captured tracked pointer
+takes a `heap$alias` slot in the closure. `this` and reference parameters are
+stored as raw addresses, which is why those lambdas stay in a local of the frame.
+
+Arrays, collections, and static fields cannot hold `func` values yet.
 
 ### Owned heap locals
 

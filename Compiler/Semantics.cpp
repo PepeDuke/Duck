@@ -34,6 +34,14 @@ std::string typeName(Type type) {
     return prefix + typeName(type.pointee()) + "*";
   }
   if (recordValue(type) || enumValue(type)) return type.record;
+  if (funcValue(type)) {
+    if (!type.signature) return "func";
+    std::string text = "func " + typeName(type.signature->result) + "(";
+    for (size_t i = 0; i < type.signature->parameters.size(); ++i)
+      text += (i ? "," : "") + typeName(type.signature->parameters[i].type) +
+              (type.signature->parameters[i].reference ? "&" : "");
+    return text + ")";
+  }
   if (customInteger(type))
     return (type.base == Type::UIntN ? "u" : "i") + std::to_string(type.bits / 8);
   switch (type.base) {
@@ -165,6 +173,8 @@ struct Local {
   // every path) still be missing, by ConstructionPart::id.
   std::set<std::string> mayMiss, mustMiss;
   Token declaration;
+  bool memberLambda = false; // A func field that can only be called through its object.
+  bool callOnly = false;     // Holds a lambda over this frame: it can be called, not copied.
 };
 class Analyzer {
   const Symbols &symbols;
@@ -200,6 +210,23 @@ class Analyzer {
   bool initializerScope = false; // Analyzing a default or static initializer.
   // Inferring an untyped getter's type: its return sets the result.
   bool inferring = false;
+  // A generated `$default$Field` method: the lambda it assigns is a member lambda.
+  const Expr *memberLambdaSite = nullptr;
+  // The lambda a local declaration may keep over this frame, and whether it did.
+  const Expr *scopedLambda = nullptr;
+  bool scopedLambdaBorrowed = false;
+  // The enclosing states of the lambdas being analyzed, outermost first.
+  // frames[i].scopes are the scopes lambda i was written in, and
+  // frames[i].info describes lambda i.
+  struct Frame {
+    Scopes scopes;
+    std::vector<LoopFlow> loops;
+    std::vector<Iteration> iterations;
+    Type result;
+    const Expr *ownerDestination, *incompleteAllowed, *movable, *scopedLambda;
+    FunctionAnalysis::LambdaInfo info;
+  };
+  std::vector<Frame> frames;
 
   void require(Type actual, Type expected, const Token &token) {
     if (actual != expected)
@@ -212,7 +239,66 @@ class Analyzer {
       if (local != scope->end())
         return &local->second;
     }
-    return nullptr;
+    return frames.empty() ? nullptr : capture(frames.size() - 1, token, scopes);
+  }
+  // Finds token in the scopes lambda `level` was written in, capturing through
+  // any lambdas between, and binds it in `into`, the scopes of that lambda.
+  Local *capture(size_t level, const Token &token, Scopes &into) {
+    Local *outer = nullptr;
+    auto &enclosing = frames[level].scopes;
+    for (auto scope = enclosing.rbegin(); scope != enclosing.rend() && !outer; ++scope) {
+      auto found = scope->find(token.text);
+      if (found != scope->end()) outer = &found->second;
+    }
+    if (!outer && level > 0) outer = capture(level - 1, token, enclosing);
+    if (!outer) return nullptr;
+    auto &info = frames[level].info;
+    if (!outer->iterating.empty())
+      fail(token, "a lambda cannot capture the for loop variable '" + token.text +
+                      "': it names the current element only while the loop runs; copy it into a local first");
+    if (!outer->initialized) fail(token, "variable '" + token.text + "' may be read before assignment");
+    if (!outer->mayMiss.empty())
+      fail(token, "a lambda cannot capture '" + token.text + "' while it may be incomplete");
+    if (outer->callOnly)
+      fail(token, "'" + token.text + "' holds a lambda over this frame; it can be called here but not captured");
+    Local inner = *outer;
+    inner.borrowed = inner.growable = false;
+    inner.iterating.clear();
+    auto add = [&](FunctionAnalysis::Capture::Kind kind, Token named, const Type &type) {
+      for (const auto &existing : info.captures)
+        if (existing.token.text == named.text) return;
+      info.captures.push_back({kind, named, type});
+    };
+    using Capture = FunctionAnalysis::Capture;
+    if (outer->receiver) {
+      // this and fields are reached through the captured receiver.
+      Token self = token;
+      self.text = "this";
+      Type record = Type::Record;
+      record.record = container;
+      add(Capture::This, self, record);
+      info.usesThis = info.borrowed = true;
+      info.record = container;
+    } else if (outer->type.role != Type::Raw) {
+      // A tracked pointer is captured as an alias: the lambda never owns it.
+      inner.type.role = Type::Alias;
+      inner.constant = true;
+      add(Capture::Alias, token, inner.type);
+    } else if (outer->borrowed) {
+      add(Capture::Borrow, token, outer->type);
+      info.borrowed = true;
+    } else {
+      add(Capture::Box, token, outer->type);
+      analysis.captured.insert(captureKey(outer->declaration));
+    }
+    return &into[0].insert_or_assign(token.text, inner).first->second;
+  }
+  // A use of the receiver that names no local: an implicit method or property.
+  void useReceiver(const Token &token) {
+    if (frames.empty() || !method) return;
+    Token self = token;
+    self.text = "this";
+    findLocal(self);
   }
   Local &lookup(const Token &token) {
     if (auto local = findLocal(token)) return *local;
@@ -257,6 +343,7 @@ class Analyzer {
     for (const auto &iteration : iterations)
       if (iteration.root == token.text)
         fail(token, "'" + token.text + "' names the collection a for loop is iterating; use another name here");
+    if (local.declaration.text.empty()) local.declaration = token;
     if (!scopes.back().emplace(token.text, local).second)
       fail(token, "duplicate variable '" + token.text + "'");
   }
@@ -613,7 +700,8 @@ class Analyzer {
           }
         }
         require(local.type, parameter.type, argument.token);
-      } else if (argument.kind == "name" && lookup(argument.token).type.role != Type::Raw) {
+      } else if (argument.kind == "name" && findLocal(argument.token) &&
+                 lookup(argument.token).type.role != Type::Raw) {
         auto tracked = expression(argument);
         tracked.role = Type::Raw;
         if (!signature.nonescapingParameters.count(i + offset) || tracked != parameter.type)
@@ -698,6 +786,7 @@ class Analyzer {
         return false;
       if (!has(container, e.token.text)) return false;
       owner = container;
+      useReceiver(e.token);
       return true;
     }
     if (e.kind != "." || enumOf(e) || !staticPath(e).empty()) return false;
@@ -1124,6 +1213,9 @@ class Analyzer {
     } else if (e.kind == "name") {
       if (std::string owner; !findLocal(e.token) && propertyOf(e, owner)) notStorage(e);
       local = lookup(e.token);
+      if (read && local.memberLambda) notFuncValue(e.token);
+      if (read && local.callOnly)
+        fail(e.token, "'" + e.token.text + "' holds a lambda that uses this frame's storage; it can only be called here");
       if (local.receiver) analysis.receiverStorage.insert(&e);
       if (read) requireInitialized(e.token);
     } else if (e.kind == "index") {
@@ -1190,6 +1282,7 @@ class Analyzer {
       if (!symbols.findField(local.type.record, e.token.text, path))
         fail(e.token, "unknown container field '" + e.token.text + "'");
       requireAccess(path.field->protectedAccess, path.declaring, e.token.text, e.token);
+      if (read && path.field->memberLambda) notFuncValue(e.token);
       analysis.fieldIndices[&e] = path.indices;
       local.type = path.field->type;
     } else fail(e.token, "operand must be a mutable variable, field, or dereference");
@@ -1203,8 +1296,294 @@ class Analyzer {
       return heapStorage(*e.args[0]);
     return false;
   }
+  [[noreturn]] void notFuncValue(const Token &token) const {
+    fail(token, "'" + token.text + "' is a lambda field that runs against its object; call it, as in x." +
+                    token.text + "(), instead of reading it");
+  }
+  // A signature as parameters for arguments().
+  static Signature shapeOf(const Type &func, const Token &token) {
+    Signature shape;
+    shape.result = func.signature->result;
+    for (const auto &parameter : func.signature->parameters) {
+      Parameter p;
+      p.name = token;
+      p.type = parameter.type;
+      p.reference = parameter.reference;
+      shape.parameters.push_back(p);
+    }
+    return shape;
+  }
+  Type indirectCall(const Expr &e, const Type &type, FunctionAnalysis::IndirectCall call) {
+    const auto shape = shapeOf(type, e.token);
+    if (shape.parameters.size() != e.args.size())
+      fail(e.token, "wrong argument count for a call through " + typeName(type));
+    arguments(e, shape, 0);
+    call.type = type;
+    analysis.indirectCalls[&e] = std::move(call);
+    return shape.result;
+  }
+  // A global or static function named where a value is expected, or Void.
+  Type functionValue(const Expr &e) {
+    std::string path;
+    const Expr *root = &e;
+    while (root->kind == ".") {
+      path = "." + root->token.text + path;
+      root = root->args[0].get();
+    }
+    if (root->kind != "name" || findLocal(root->token) || !staticPath(e).empty()) return Type::Void;
+    path = root->token.text + path;
+    const auto found = resolve(path, e.token);
+    if (found == symbols.end() || found->second.method) return Type::Void;
+    const auto &signature = found->second;
+    if (!signature.nativeSymbol.empty())
+      fail(e.token, "native function '" + path + "' cannot be a func value; pass &" + path + " as a callback");
+    if (signature.result.role != Type::Raw)
+      fail(e.token, "a function that returns ownership cannot be a func value");
+    requireAccess(found, e.token);
+    auto shape = std::make_shared<FuncSignature>();
+    shape->result = signature.result;
+    for (const auto &parameter : signature.parameters) shape->parameters.push_back({parameter.type, parameter.reference});
+    Type type(Type::Func);
+    type.signature = shape;
+    analysis.functionValues[&e] = found->first;
+    return type;
+  }
+  Type lambdaExpression(const Expr &e) {
+    const auto &f = *e.lambda;
+    Frame frame{std::move(scopes), std::move(loops), std::move(iterations), result,
+                ownerDestination, incompleteAllowed, movable, scopedLambda, {}};
+    const bool bound = &e == memberLambdaSite;
+    frames.push_back(std::move(frame));
+    scopes.clear();
+    loops.clear();
+    iterations.clear();
+    result = f.result;
+    ownerDestination = incompleteAllowed = movable = scopedLambda = nullptr;
+    scopes.emplace_back(); // Captures, or the receiver's fields of a member lambda.
+    if (bound) {
+      frames.back().info.bound = true;
+      frames.back().info.usesThis = true;
+      frames.back().info.record = container;
+      for (const auto &path : symbols.visibleFields(container)) {
+        Local field{path.field->type, false, true, true};
+        field.memberLambda = path.field->memberLambda;
+        bind(path.field->name, field);
+      }
+      scopes.emplace_back();
+      Token self = f.name;
+      self.text = "this";
+      Type record = Type::Record;
+      record.record = container;
+      bind(self, {record, false, true, true, true});
+    }
+    scopes.emplace_back();
+    symbols.validateType(result, f.name);
+    for (const auto &parameter : f.params) {
+      symbols.validateType(parameter.type, parameter.name);
+      bind(parameter.name, {parameter.type, false, true, false, parameter.reference});
+    }
+    const bool terminated = sequence(f.body);
+    if (!terminated) requireCompleteScopes(0);
+    if (!terminated && result != Type::Void) fail(e.token, "not all paths of this lambda return a value");
+    auto info = std::move(frames.back().info);
+    scopes = std::move(frames.back().scopes);
+    loops = std::move(frames.back().loops);
+    iterations = std::move(frames.back().iterations);
+    result = frames.back().result;
+    ownerDestination = frames.back().ownerDestination;
+    incompleteAllowed = frames.back().incompleteAllowed;
+    movable = frames.back().movable;
+    scopedLambda = frames.back().scopedLambda;
+    frames.pop_back();
+    if (info.borrowed) {
+      if (&e != scopedLambda)
+        fail(e.token, "this lambda uses 'this' or a reference parameter, so it cannot outlive the call; "
+                      "store it directly in a local and call it there");
+      scopedLambdaBorrowed = true;
+    }
+    analysis.lambdas[&e] = std::move(info);
+    return e.castType;
+  }
+  // The container a reflection path such as this.Example names, or empty.
+  std::string reflectedContainer(const Expr &path) {
+    if (path.kind != ".") return "";
+    const auto &base = *path.args[0];
+    auto record = reflectedContainer(base);
+    if (record.empty()) {
+      if (!storage(base)) return "";
+      auto type = location(base).type;
+      if (type.depth) type = type.pointee();
+      if (!recordValue(type)) return "";
+      record = type.record;
+    }
+    MemberPath field;
+    if (symbols.findField(record, path.token.text, field) && !field.field->parentView) return "";
+    auto named = [&](const std::string &candidate) {
+      return candidate == path.token.text ||
+             (candidate.size() > path.token.text.size() &&
+              candidate.compare(candidate.size() - path.token.text.size() - 1, std::string::npos,
+                                "." + path.token.text) == 0);
+    };
+    if (named(record)) return record;
+    std::function<std::string(const std::string &)> ancestor = [&](const std::string &current) -> std::string {
+      for (const auto &parent : symbols.records.at(current).parents) {
+        if (named(parent.text)) return parent.text;
+        if (auto found = ancestor(parent.text); !found.empty()) return found;
+      }
+      return "";
+    };
+    return ancestor(record);
+  }
+  // this.Example.GetName(), this.Example.Money.GetName(), .GetTags(), and
+  // .GetDeclaringName(). Nothing on the path is evaluated.
+  bool reflectionCall(const Expr &e, Type expected, Type &type) {
+    const auto query = memberName(e.token.text);
+    if (query != "GetName" && query != "GetTags" && query != "GetDeclaringName") return false;
+    if (!e.receiver || e.receiver->kind != ".") return false;
+    const Expr *root = e.receiver.get();
+    while (root->kind == ".") root = root->args[0].get();
+    if (root->kind != "name" || !findLocal(root->token)) return false;
+    FunctionAnalysis::Reflection reflection;
+    reflection.query = query;
+    const auto &path = *e.receiver;
+    auto owner = reflectedContainer(*path.args[0]);
+    const TypeMember *member = nullptr;
+    std::vector<TypeMember> members;
+    if (!owner.empty()) {
+      members = symbols.members(owner);
+      for (size_t i = 0; i < members.size(); ++i)
+        if (members[i].name == path.token.text) {
+          member = &members[i];
+          reflection.member = long(i);
+        }
+    }
+    if (!member) {
+      owner = reflectedContainer(path);
+      if (owner.empty()) return false;
+      // A parent's own GetName method stays callable through its view.
+      MemberPath own;
+      if (symbols.findMethod(owner, query, own) != symbols.end()) return false;
+    }
+    if (!e.args.empty()) fail(e.token, query + " takes no arguments");
+    reflection.record = owner;
+    if (member) requireAccess(member->isProtected, member->declaring, member->name, e.token);
+    if (query != "GetTags") {
+      if (query == "GetDeclaringName" && !member) fail(e.token, "GetDeclaringName applies to a member, not a container");
+      type = expected == Type::Name ? Type(Type::Name) : Type(Type::String);
+      analysis.reflections[&e] = std::move(reflection);
+      return true;
+    }
+    if (!member) fail(e.token, "GetTags applies to a field or method, not a container");
+    // The expected element type selects the attributes; without one, they
+    // must all share an underlying type.
+    Type element = dynamicArray(expected) ? *expected.element : Type(Type::Void);
+    if (expected != Type::Void && !dynamicArray(expected))
+      fail(e.token, "GetTags gives a dynamic array, not " + typeName(expected));
+    for (size_t i = 0; i < member->tags.size(); ++i) {
+      const auto &tag = member->tags[i];
+      Type tagType = Type::Enum;
+      tagType.record = tag.type;
+      const auto underlying = symbols.enums.at(tag.type).type;
+      if (element == Type::Void) element = underlying;
+      else if (expected == Type::Void && element != underlying)
+        fail(e.token, "the attributes of '" + member->name + "' have different underlying types; "
+                      "declare the result, as in " + typeName(underlying) + " [] tags = ...");
+      if (element == underlying || element == tagType) reflection.tags.push_back(i);
+    }
+    if (element == Type::Void) element = Type::UInt8;
+    if (!enumValue(element) && !integral(element) && !floating(element) && !managedText(element))
+      fail(e.token, "GetTags cannot give " + typeName(element) + " elements");
+    reflection.element = element;
+    type = Type::array(element, 0);
+    analysis.reflections[&e] = std::move(reflection);
+    return true;
+  }
+  // `e..Foo(...)`, `e..?Foo(...)`, and `e..?Foo`. The site's shape comes from
+  // the methods its receiver could dispatch to when they agree; otherwise
+  // from the arguments. The runtime lookup compares that shape, so a method
+  // of the right name but a different signature counts as absent.
+  Type duckCall(const Expr &e, Type expected) {
+    const auto &base = *e.receiver;
+    requireComplete(base);
+    Type type;
+    bool constant = false;
+    if (storage(base)) {
+      const auto local = location(base);
+      type = local.type;
+      constant = !type.depth && local.constant;
+    } else
+      type = expression(base);
+    if (type.depth) type = type.pointee();
+    if (!recordValue(type)) fail(base.token, "a duck call needs a container receiver, not " + typeName(type));
+    FunctionAnalysis::DuckCall call;
+    call.record = type;
+    if (e.kind == "duckExists") {
+      analysis.duckCalls[&e] = std::move(call);
+      return Type::Bool;
+    }
+    if (constant && e.kind == "duckCall") fail(base.token, "cannot call a mutable method on a constant");
+    std::vector<const Signature *> candidates;
+    for (const auto &[key, signature] : symbols) {
+      if (!dispatched(key, signature.method) || signature.protectedAccess || memberName(key) != e.token.text ||
+          signature.parameters.size() != e.args.size() + 1)
+        continue;
+      const auto owner = key.substr(0, key.rfind('.'));
+      if (owner == type.record || symbols.derivesFrom(owner, type.record) || symbols.derivesFrom(type.record, owner))
+        candidates.push_back(&signature);
+    }
+    Signature shape;
+    for (size_t i = 0; i < e.args.size(); ++i) {
+      bool agree = !candidates.empty();
+      for (const auto *candidate : candidates)
+        agree = agree && candidate->parameters[i + 1].type == candidates.front()->parameters[i + 1].type &&
+                candidate->parameters[i + 1].reference == candidates.front()->parameters[i + 1].reference;
+      Parameter parameter;
+      const auto savedAnalysis = analysis;
+      const auto savedScopes = scopes;
+      // An argument that cannot convert is not a compile error: the call
+      // keeps its own shape, and the runtime lookup reports the mismatch.
+      if (agree && !candidates.front()->parameters[i + 1].reference) {
+        try {
+          expression(*e.args[i], candidates.front()->parameters[i + 1].type);
+        } catch (const std::runtime_error &) {
+          agree = false;
+        }
+        analysis = savedAnalysis;
+        scopes = savedScopes;
+      }
+      if (agree) parameter = candidates.front()->parameters[i + 1];
+      else {
+        parameter.name = e.args[i]->token;
+        parameter.type = expression(*e.args[i]);
+        analysis = savedAnalysis;
+        scopes = savedScopes;
+        if (parameter.type == Type::Void) fail(e.args[i]->token, "a duck call argument must produce a value");
+      }
+      shape.parameters.push_back(parameter);
+    }
+    arguments(e, shape, 0);
+    bool agree = !candidates.empty();
+    for (const auto *candidate : candidates) agree = agree && candidate->result == candidates.front()->result;
+    if (agree) call.result = candidates.front()->result;
+    else if (expected != Type::Void) call.result = expected;
+    else if (candidates.empty()) call.result = Type::Void;
+    else fail(e.token, "methods named '" + e.token.text + "' disagree on their result; declare the type you expect");
+    if (call.result.role != Type::Raw) fail(e.token, "a duck call cannot receive ownership");
+    call.parameters = shape.parameters;
+    call.signature = signatureText(call.result, call.parameters, 0);
+    const auto produced = e.kind == "duckCheck" ? Type(Type::Bool) : call.result;
+    analysis.duckCalls[&e] = std::move(call);
+    return produced;
+  }
   Type checkExpression(const Expr &e, Type expected) {
     const auto &op = e.token.text;
+    if (e.kind == "lambda") return lambdaExpression(e);
+    if (e.kind == "duckCall" || e.kind == "duckCheck" || e.kind == "duckExists") return duckCall(e, expected);
+    if (e.kind == "invoke") {
+      const auto callee = expression(*e.receiver);
+      if (!funcValue(callee)) fail(e.token, "only a func value can be called this way, not " + typeName(callee));
+      return indirectCall(e, callee, {});
+    }
     // Outside a for header a range is the array of its values.
     if (e.kind == "range") {
       if (expected != Type::Void && (!dynamicArray(expected) || !integral(*expected.element)))
@@ -1415,7 +1794,7 @@ class Analyzer {
       return type;
     }
     if (e.kind == "null")
-      return expected.depth ? expected : Type::Pointer;
+      return expected.depth || funcValue(expected) ? expected : Type::Pointer;
     if (e.kind == "bool")
       return Type::Bool;
     if (e.kind == "text")
@@ -1427,6 +1806,14 @@ class Analyzer {
       analysis.enumMembers[&e] = index;
       Type type = Type::Enum;
       type.record = e.args[0]->token.text;
+      return type;
+    }
+    if (e.kind == "guard" && e.args[0]->kind == "duckCall") {
+      // ?e..Foo() skips a missing method, and reads as the result type's default.
+      const auto type = duckCall(*e.args[0], expected);
+      analysis.expressionTypes.emplace(e.args[0].get(), type);
+      if (recordValue(type) && symbols.runtimeDefaults(type.record))
+        fail(e.token, "?.. cannot read '" + type.record + "': its default is built at run time; check e..?Foo() first");
       return type;
     }
     if (e.kind == "guard") {
@@ -1448,6 +1835,8 @@ class Analyzer {
       analysis.expressionTypes[&e] = *type.element;
       return *type.element;
     }
+    if (e.kind == "name" || e.kind == ".")
+      if (const auto function = functionValue(e); function != Type::Void) return function;
     if (e.addressable()) {
       if (std::string owner; propertyOf(e, owner)) return propertyRead(e, owner);
       if (const auto member = collectionMember(e); member != Type::Void) return member;
@@ -1504,10 +1893,24 @@ class Analyzer {
     if (e.kind == "call") {
       // `Gun g(5)` and `Gun* p(5)` arrive with the constructed type resolved.
       if (recordValue(e.castType)) return construction(e, e.castType.record);
+      if (Type reflected; reflectionCall(e, expected, reflected)) return reflected;
       // `g(w)` on a container local supplies its missing parts; on a
       // complete one, or on a pointer to one, it reinitializes the object.
       if (!e.receiver && op.find('.') == std::string::npos)
         if (const auto *local = findLocal(e.token)) {
+          if (funcValue(local->type)) {
+            requireInitialized(e.token);
+            FunctionAnalysis::IndirectCall call;
+            if (local->receiver) {
+              MemberPath field;
+              symbols.findField(container, e.token.text, field);
+              call.field = true;
+              call.owner = container;
+              call.path = field.indices;
+            }
+            const auto type = local->type;
+            return indirectCall(e, type, call);
+          }
           const bool pointer = local->type.depth == 1 && local->type.base == Type::Record;
           if ((recordValue(local->type) || pointer) && local->receiver)
             fail(e.token, "cannot reinitialize the receiver inside its own method");
@@ -1552,6 +1955,7 @@ class Analyzer {
           fail(e.token, "cannot print " + typeName(printed) + " directly; print its elements");
         if (printed.depth)
           fail(e.token, "cannot print an opaque pointer; compare it with null instead");
+        if (funcValue(printed)) fail(e.token, "cannot print a func value; call it instead");
         return Type::Void;
       }
       auto found = resolve(op, e.token);
@@ -1562,6 +1966,7 @@ class Analyzer {
         auto member = symbols.findMethod(container, op, path);
         if (member != symbols.end()) {
           found = member;
+          useReceiver(e.token);
           if (!path.indices.empty()) analysis.receiverPaths[&e] = {container, path.indices};
         }
       }
@@ -1600,6 +2005,15 @@ class Analyzer {
           MemberPath path;
           const auto name = op.substr(op.rfind('.') + 1);
           found = symbols.findMethod(t.record, name, path);
+          if (found == symbols.end() && symbols.findField(t.record, name, path) && funcValue(path.field->type)) {
+            requireAccess(path.field->protectedAccess, path.declaring, name, e.token);
+            FunctionAnalysis::IndirectCall call;
+            call.field = true;
+            call.owner = t.record;
+            call.path = path.indices;
+            const auto callee = path.field->type;
+            return indirectCall(e, callee, call);
+          }
           // `box.Inner(5)` on a container field reinitializes the field.
           if (found == symbols.end() && symbols.findField(t.record, name, path) &&
               recordValue(path.field->type) && !path.field->parentView) {
@@ -1650,6 +2064,12 @@ class Analyzer {
                                 : Type::Void);
     // Both conditional branches keep their enum type.
     if (e.kind != "conditional") first = decay(*e.args[0], first);
+    if (funcValue(first) && e.kind == "binary") {
+      if ((op != "==" && op != "!=") || e.args[1]->kind != "null")
+        fail(e.token, "a func value only compares with null, as in f != null");
+      expression(*e.args[1], first);
+      return Type::Bool;
+    }
     if (e.kind == "conditional") {
       require(first, Type::Bool, e.token);
       auto yes = expression(*e.args[1], expected);
@@ -1933,6 +2353,8 @@ class Analyzer {
           (collectionValue(result) || (arrayValue(result) && symbols.moveOnly(result)) ||
            (recordValue(result) && symbols.destructible(result.record)))) {
         const auto *local = findLocal(s.expr->token);
+        if (local && analysis.captured.count(captureKey(local->declaration)))
+          fail(s.expr->token, "cannot move '" + s.expr->token.text + "' out of this function: a lambda captured it");
         if (local && !local->receiver && !local->borrowed) {
           movable = s.expr.get();
           analysis.moves.insert(&s);
@@ -2020,6 +2442,11 @@ class Analyzer {
       symbols.validateType(s.type, s.token);
       // Inspect the initializer before choosing between raw storage and an alias.
       Type hint = s.type;
+      const bool inferredFunc = funcValue(s.type) && !s.type.signature;
+      if (inferredFunc) {
+        if (!s.expr) fail(s.token, "func local '" + s.name + "' needs an initializer or a signature, as in func int() " + s.name);
+        hint = Type::Void;
+      }
       if (s.expr && s.type.depth && s.expr->kind != "null") {
         const bool literal = s.expr->kind == "int" || s.expr->kind == "real" ||
             (s.expr->kind == "unary" && s.expr->token.text == "-" && s.expr->args[0]->kind == "int");
@@ -2035,7 +2462,13 @@ class Analyzer {
         missing = defaultMissing(s.type.record);
       if (s.kind == "let" && s.expr && recordValue(s.expr->castType)) incompleteAllowed = s.expr.get();
       incompleteMissing.clear();
+      if (s.kind == "let" && s.expr && s.expr->kind == "lambda") scopedLambda = s.expr.get();
+      scopedLambdaBorrowed = false;
       auto type = s.expr ? expression(*s.expr, hint) : s.type;
+      scopedLambda = nullptr;
+      const bool keepsFrame = scopedLambdaBorrowed;
+      scopedLambdaBorrowed = false;
+      if (inferredFunc && !funcValue(type)) fail(s.token, "func local '" + s.name + "' needs a func value, not " + typeName(type));
       if (incompleteAllowed) missing = incompleteMissing;
       incompleteAllowed = nullptr;
       ownerDestination = nullptr;
@@ -2063,7 +2496,7 @@ class Analyzer {
       }
       if (type == Type::Void)
         fail(s.token, "locals currently support only values, not void");
-      if (s.type != Type::Void) {
+      if (s.type != Type::Void && !inferredFunc) {
         auto declared = s.type;
         declared.role = type.role;
         require(type, declared, s.token);
@@ -2085,6 +2518,7 @@ class Analyzer {
       auto &bound = scopes.back().at(name.text);
       bound.mayMiss = bound.mustMiss = missing;
       bound.declaration = name;
+      bound.callOnly = keepsFrame;
     } else if (s.kind == "expr")
       expression(*s.expr);
     else {
@@ -2166,6 +2600,8 @@ public:
     usings = std::move(visible);
     initializerScope = true;
     scopes.emplace_back();
+    // A lambda default is built at run time, and analyzed with its generated method.
+    if (e.kind == "lambda") return std::nullopt;
     expression(e, type);
     if (bigInteger(type) || recordValue(type)) return std::nullopt;
     // A string or name literal; lowering emits it as immortal constant storage.
@@ -2215,10 +2651,16 @@ public:
       initializationTarget = function.body.front()->target.get();
     }
     if (method && !function.generated) {
-      for (const auto &path : symbols.visibleFields(container))
-        bind(path.field->name, {path.field->type, false, true, true});
+      for (const auto &path : symbols.visibleFields(container)) {
+        Local field{path.field->type, false, true, true};
+        field.memberLambda = path.field->memberLambda;
+        bind(path.field->name, field);
+      }
       scopes.emplace_back();
     }
+    if (function.generated && method && !function.body.empty() && function.body.front()->expr &&
+        function.body.front()->expr->kind == "lambda")
+      memberLambdaSite = function.body.front()->expr.get();
     symbols.validateType(result, function.name);
     for (const auto &parameter : function.params) {
       symbols.validateType(parameter.type, parameter.name);
@@ -2338,6 +2780,7 @@ std::unique_ptr<Expr> clone(const Expr &e) {
   copy->token = e.token;
   copy->kind = e.kind;
   copy->castType = e.castType;
+  copy->lambda = e.lambda;
   for (const auto &arg : e.args) copy->args.push_back(clone(*arg));
   if (e.receiver) copy->receiver = clone(*e.receiver);
   return copy;

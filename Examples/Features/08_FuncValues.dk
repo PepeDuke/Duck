@@ -1,0 +1,59 @@
+// EXPECT: 5, 5, 7, 12, 30, 11, then no callback.
+// PITFALL: a func has one signature for its whole life. Every indirect call
+// and assignment is checked against it at compile time.
+Calculator
+{
+    int Base = 2
+
+    func int() Five = @ int()
+    {
+        return 5
+    }
+
+    func PrintFive = @ ()
+    {
+        Print(Five())
+    }
+
+    func int(int) AddBase = @ int(int x)
+    {
+        return x + Base
+    }
+}
+
+int Add(int a, int b)
+{
+    return a + b
+}
+
+int Apply(func int(int, int) operation, int a, int b)
+{
+    return operation(a, b)
+}
+
+func int(int) Increment()
+{
+    return @ int(int x)
+    {
+        return x + 1
+    }
+}
+
+Main()
+{
+    Calculator c()
+    Print(c.Five())
+    c.PrintFive()
+    Print(c.AddBase(5))
+
+    func int(int, int) add = Add
+    Print(add(5, 7))
+    Print(Apply(@ int(int a, int b) { return a * b }, 5, 6))
+    Print(Increment()(10))
+
+    func int() nothing = null
+    if nothing == null
+    {
+        Print("no callback")
+    }
+}

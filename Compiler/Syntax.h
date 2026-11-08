@@ -22,6 +22,8 @@ inline std::string where(const Token &t) {
                            std::to_string(t.line) + ":" +
                            std::to_string(t.column) + ": error: " + message);
 }
+struct FuncSignature;
+bool sameSignature(const FuncSignature *a, const FuncSignature *b);
 struct Type {
   enum Kind {
     Void, Int8, Short, Int, Long, UInt8, UInt16, UInt32, UInt64,
@@ -32,7 +34,8 @@ struct Type {
     Tiny, UTiny, // 69-digit decimal floating point values.
     Enum,        // A #@ enum member; `record` holds the enum name.
     Queue, Stack, Pair, // Collections; `element` (and a pair's `key`) hold their types.
-    Array               // `element` holds the element type; `extent` is 0 when dynamic.
+    Array,              // `element` holds the element type; `extent` is 0 when dynamic.
+    Func                // A callable; `signature` is null until inferred from its initializer.
   };
   enum Role { Raw, Owner, Alias };
   Role role = Raw;
@@ -42,6 +45,7 @@ struct Type {
   std::string record;
   // A collection's element type, or a pair's value type, and a pair's key type.
   std::shared_ptr<const Type> element, key;
+  std::shared_ptr<const FuncSignature> signature;
   unsigned long long extent = 0; // A fixed array's element count.
   Type(Kind kind = Void) : base(kind) {}
   static Type array(const Type &element, unsigned long long extent) {
@@ -84,12 +88,33 @@ struct Type {
       return a == b || (a && b && *a == *b);
     };
     return role == t.role && base == t.base && depth == t.depth && bits == t.bits &&
-           record == t.record && extent == t.extent && same(element, t.element) && same(key, t.key);
+           record == t.record && extent == t.extent && same(element, t.element) && same(key, t.key) &&
+           sameSignature(signature.get(), t.signature.get());
   }
   bool operator!=(const Type &t) const { return !(*this == t); }
   static const Type Pointer;
 };
 inline const Type Type::Pointer = Type(Type::Void).pointerTo();
+// What a func value takes and gives. Indirect calls are checked against it.
+struct FuncParameter {
+  Type type;
+  bool reference = false;
+};
+struct FuncSignature {
+  Type result;
+  std::vector<FuncParameter> parameters;
+};
+inline bool sameSignature(const FuncSignature *a, const FuncSignature *b) {
+  if (a == b) return true;
+  if (!a || !b || a->result != b->result || a->parameters.size() != b->parameters.size()) return false;
+  for (size_t i = 0; i < a->parameters.size(); ++i)
+    if (a->parameters[i].type != b->parameters[i].type ||
+        a->parameters[i].reference != b->parameters[i].reference)
+      return false;
+  return true;
+}
+// A func value is one word: a reference-counted closure, or null.
+inline bool funcValue(const Type &t) { return !t.depth && t.base == Type::Func; }
 inline bool recordValue(const Type &t) { return !t.depth && t.base == Type::Record; }
 // `T [N]` stores N elements inline; `T []` is a handle to growable heap
 // storage, null while empty.
@@ -184,12 +209,15 @@ inline Type arbitraryCommon(const Type &a, const Type &b) {
   return big ? (unsignedResult ? Type::UBig : Type::Big)
              : (unsignedResult ? Type::UTiny : Type::Tiny);
 }
+struct Function;
 struct Expr {
   Token token;
   std::string kind;
   Type castType = Type::Void;
   std::vector<std::unique_ptr<Expr>> args;
   std::unique_ptr<Expr> receiver;
+  // A lambda's generated function. Shared because field defaults are cloned.
+  std::shared_ptr<Function> lambda;
   bool addressable() const {
     return kind == "name" || kind == "." || kind == "index" || (kind == "unary" && token.text == "*");
   }
@@ -216,6 +244,13 @@ struct Using {
 // The directives visible at a declaration, outermost first. Shared because
 // every declaration in a scope sees the same list.
 using Usings = std::shared_ptr<const std::vector<Using>>;
+// One `[Name]` attribute. `type` and `member` name the enum member it
+// resolves to, filled in by resolveAttributes.
+struct Tag {
+  Token token;
+  std::string type;
+  size_t member = 0;
+};
 struct Parameter {
   Token name;
   Type type;
@@ -233,6 +268,10 @@ struct Parameter {
   // evaluates it during construction.
   bool runtimeDefault = false;
   Usings usings; // Visible where a field default was written.
+  std::vector<Tag> tags;
+  // A func field whose default is a lambda: its body runs against the object
+  // it is called on, so it is called through a receiver and never read.
+  bool memberLambda = false;
 };
 // Instance methods live in their own namespace, so a chained static block
 // can declare a function with the same name: Meter.Read is static and
@@ -265,6 +304,7 @@ struct Function {
   mutable bool inferred = false;
   // The hidden function holding a file's executable statements, run by Exec.
   bool script = false;
+  std::vector<Tag> tags;
 };
 struct Record {
   Token name;
@@ -282,6 +322,7 @@ struct EnumFragment {
   Token name;
   Type type = Type::Void; // Void when this fragment omits the underlying type.
   std::vector<EnumMember> members;
+  bool attribute = false; // Marked [args], so members can be used as attributes.
 };
 // A field declared in a static block, as in `Math #{ int Count = 0 }`. The
 // name is qualified by its enclosing containers, like a static function.

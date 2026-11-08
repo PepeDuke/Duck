@@ -26,6 +26,11 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
       "; Duck bootstrap LLVM IR\ndeclare i32 @printf(ptr, ...)\n"
       "declare double @llvm.floor.f64(double)\ndeclare void @llvm.trap()\n";
   bool needsText = false, needsBig = false, needsDecimal = false, needsCollections = mainArguments;
+  bool needsFunc = false, needsMeta = false;
+  for (const auto &f : functions) {
+    needsFunc = needsFunc || f.usesFuncRuntime;
+    needsMeta = needsMeta || f.usesMetaRuntime;
+  }
   for (const auto &f : functions) {
     needsBig = needsBig || f.usesBigRuntime;
     needsDecimal = needsDecimal || f.usesDecimalRuntime;
@@ -36,7 +41,9 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
   for (const auto &f : functions) needsText = needsText || f.usesTextRuntime || needsBig || needsCollections;
   bool needsHeap = false;
   for (const auto &f : functions) needsHeap = needsHeap || f.usesHeapRuntime;
-  if (needsText || needsHeap) module += "declare ptr @malloc(i64)\ndeclare void @free(ptr)\n";
+  if (needsText || needsHeap || needsFunc) module += "declare ptr @malloc(i64)\ndeclare void @free(ptr)\n";
+  if (needsFunc) module += funcRuntimeIR();
+  if (needsMeta) module += metaRuntimeIR();
   if (needsHeap) module += heapRuntimeIR();
   bool needsTasks = false;
   for (const auto &f : functions) needsTasks = needsTasks || f.usesTaskRuntime;
@@ -111,6 +118,7 @@ std::string compileModule(const Program &program, const Program &imports,
   resolveInheritance(symbols);
   resolveProperties(symbols, {&program, &imports}, {&symbols, &imported});
   validateOverrides(symbols);
+  resolveAttributes(symbols);
   validateLayouts(symbols);
   validateLifetimes(symbols);
   for (const auto &[name, info] : symbols.statics) symbols.validateType(info.type, info.declaration);
@@ -158,10 +166,16 @@ std::string compileModule(const Program &program, const Program &imports,
   // Generated initializers run sequentially; they are never task candidates.
   for (const auto &function : generated)
     fragments.push_back(lowerFunction(function, symbols, analyzeFunction(function, symbols)));
+  // A heap cleanup can release a func field in a function that never touches one.
+  for (const auto &[name, record] : symbols.records)
+    for (const auto &field : record.fields)
+      if (funcValue(field.type) && !fragments.empty()) fragments.front().usesFuncRuntime = true;
   std::set<std::string> cleanups, destroys;
   std::set<DispatchTable> tables;
+  std::set<std::string> types;
   std::map<std::string, std::string> helpers;
   for (const auto &fragment : fragments) {
+    types.insert(fragment.types.begin(), fragment.types.end());
     helpers.insert(fragment.helpers.begin(), fragment.helpers.end());
     tables.insert(fragment.tables.begin(), fragment.tables.end());
     cleanups.insert(fragment.cleanups.begin(), fragment.cleanups.end());
@@ -195,7 +209,7 @@ std::string compileModule(const Program &program, const Program &imports,
     helperIR += definition;
   }
   return helperIR + emitRecords(symbols) + emitEnums(symbols) + emitStatics(symbols) + emitCleanups(symbols, cleanups) +
-         emitDestroys(symbols, destroys) + emitTables(symbols, tables) +
+         emitDestroys(symbols, destroys) + emitTables(symbols, tables, types) +
          emitDeclarations(declarations) +
          assembleModule(fragments, entry, nativeSymbols,
                         entry && !symbols.at("Main").parameters.empty());

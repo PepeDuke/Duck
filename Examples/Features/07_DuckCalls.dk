@@ -1,0 +1,44 @@
+// EXPECT: duck 0.5 tick, then rock skipped, then true false true false, then 12, then 0.
+// PITFALL: the lookup uses the object's runtime type, so a parameter typed as
+// Entity still finds Tick on a Duck. A different signature counts as absent.
+Entity {}
+
+Duck : Entity
+{
+    Tick(float deltaTime)
+    {
+        Print("duck tick")
+    }
+
+    int Score()
+    {
+        return 12
+    }
+}
+
+Rock : Entity {}
+
+Advance(Entity& e)
+{
+    ?e..Tick(0.5)
+}
+
+Main()
+{
+    Duck duck()
+    Rock rock()
+
+    Advance(duck)
+    Advance(rock)
+    Print("rock skipped")
+
+    Print(duck..?Tick(0.5))
+    Print(rock..?Tick(0.5))
+    Print(duck..?Tick)
+    Print(duck..?Tick("wrong"))
+
+    Print(duck..Score())
+
+    int missing = ?rock..Score()
+    Print(missing)
+}

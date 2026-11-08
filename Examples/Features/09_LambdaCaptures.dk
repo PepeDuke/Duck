@@ -1,0 +1,71 @@
+// EXPECT: 1 2 3, 7, 6, used, expired.
+// PITFALL: a lambda captures locals by reference and keeps them alive, but it
+// never owns a tracked pointer: when the owner lets go, the capture expires.
+Item
+{
+    Use()
+    {
+        Print("used")
+    }
+}
+
+func int() MakeCounter()
+{
+    int count = 0
+    return @ int()
+    {
+        count += 1
+        return count
+    }
+}
+
+Bank
+{
+    int Cash = 5
+
+    int Deposit(int amount)
+    {
+        add : @ ()
+        {
+            Cash += amount
+        }
+        add()
+        return Cash
+    }
+}
+
+Main()
+{
+    counter : MakeCounter()
+    Print(counter())
+    Print(counter())
+    Print(counter())
+
+    int shared = 5
+    bump : @ ()
+    {
+        shared += 2
+    }
+    bump()
+    Print(shared)
+
+    Bank bank()
+    Print(bank.Deposit(1))
+
+    Item* owner()
+    alias : owner
+    use : @ ()
+    {
+        if alias != null
+        {
+            alias.Use()
+        }
+        else
+        {
+            Print("expired")
+        }
+    }
+    use()
+    owner = null
+    use()
+}

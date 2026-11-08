@@ -1305,6 +1305,10 @@ if e..?Foo() // check if Foo is valid
 
 ```
 
+`e..?Foo()` answers whether that exact call would run, without evaluating its arguments. `e..?Foo`, with no parentheses, only asks whether any public method of that name exists.
+
+The lookup uses the object's runtime type, so a parameter declared as `Entity& e` finds `Tick` on a `Duck`. Protected methods are not visible to duck calls, and a method with the right name but a different signature counts as missing. A skipped `?e..Foo(Bar())` does not evaluate `Bar()`, and if `Foo` returns a value the guarded call reads as that type's default.
+
 The common use case is where we have Tick function that we want to call on anything in the world that has it implemented, to keep the Entity as light as possible we might not want to add the Tick function there.
 ``` c++
 Entity
@@ -1478,6 +1482,50 @@ Lambda
 Lambda l()
 l.F2()  // prints 5
 ``` 
+A `func` has one signature for its whole life, taken from its initializer or written out, and every call through it is checked against that signature at compile time. Parameters, results, and fields without a lambda default must write it out.
+
+``` c++
+int Add(int a, int b)
+{
+    return a + b
+}
+
+int Apply(func int(int, int) operation, int a, int b) // result first, then parameters
+{
+    return operation(a, b)
+}
+
+func int(int, int) add = Add      // a global or static function is a value too
+Print(Apply(add, 2, 3))           // 5
+Print(Apply(@ int(int a, int b) { return a * b }, 2, 3)) // 6
+
+func int() nothing = null
+if nothing == null
+    Print("calling a null func is a runtime error")
+```
+
+Lambdas capture locals by reference and keep them alive, so a lambda can safely outlive the scope that created it.
+
+``` c++
+func int() MakeCounter()
+{
+    int count = 0
+    return @ int()
+    {
+        count += 1
+        return count
+    }
+}
+
+counter : MakeCounter()
+counter() // 1
+counter() // 2
+```
+
+A lambda never owns a tracked pointer. Capturing an owner or an alias captures an alias, which expires when the owner lets the resource go, and which the lambda cannot reassign.
+
+A lambda that uses `this`, a field, or a reference parameter depends on the current call's storage, so it must be stored directly in a local and can only be called there. A lambda written as a field's default is the exception: it runs against whichever object it is called on, so it is always called through its object (`l.F2()`) and cannot be read as a value.
+
 ## Threading control in Duck
 Duck synchronizes resource use with preceding work affecting that resource. For example, reading `c.Value` below waits for both earlier increments to finish, so the printed value is guaranteed to be 2.
 
@@ -1606,6 +1654,12 @@ Example
 }
 
 ``` 
+
+Only enums marked `[args]` can be used as attributes. A member can carry several, as in `[Hidden, Slow]`, and `[Visibility.Hidden]` qualifies a name two enums share. Attributes apply to instance fields and methods.
+
+`GetTags()` returns a dynamic array. The declared element type selects the attributes: `byte []` keeps those whose enum is stored as `byte`, and `Visibility []` keeps that enum's members as enum values. Without a declared type, all of the member's attributes must share one underlying type. An override reports its own attributes.
+
+`GetName()` gives a `string`, or a `name` when one is expected, and containers report their qualified name. `this.Player.Reset.GetDeclaringName()` gives the container that declared a member, which for an inherited member is its parent. A parent's path works too, as in `this.Entity.GetName()`, and a method the parent declares with one of these names takes priority.
 
 ## Unit tests in Duck
 Unit test are part of the core code as Duck will use them it gage correctness and speed while optimizing the compiled code for multithreading, this is sort of to force users of Duck to make test as part of their workflow,

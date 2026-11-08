@@ -1,0 +1,23 @@
+// INTENTIONALLY BROKEN: the method exists, but with a different signature.
+// EXPECT: runtime error.
+// FIX: pass a float, or guard the call with ?actor..Tick("soon").
+Actor
+{
+    Tick(float deltaTime) {}
+}
+
+Other
+{
+    Tick(string when) {}
+}
+
+Run(Actor& actor)
+{
+    actor..Tick("soon")
+}
+
+Main()
+{
+    Actor actor()
+    Run(actor)
+}

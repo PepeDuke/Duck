@@ -1,0 +1,17 @@
+// INTENTIONALLY BROKEN: only enums marked [args] can be used as attributes.
+// EXPECT: compile error: not marked [args].
+// FIX: write [args] before the Color enum.
+Color : byte
+#@{
+    Red, Green
+}
+
+Paint
+{
+    [Red]
+    int Amount = 0
+}
+
+Main()
+{
+}

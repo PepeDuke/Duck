@@ -39,6 +39,11 @@ class Scheduler {
   bool barrier(const Stmt &s) const {
     bool found = false;
     auto expr = [&](const Expr &e) {
+      // Runtime dispatch and lambdas have effects only known when they run.
+      if (e.kind == "duckCall" || e.kind == "invoke" || e.kind == "lambda" || analysis.indirectCalls.count(&e)) {
+        found = true;
+        return;
+      }
       if (e.kind != "call") return;
       if (e.token.text == "Print") { found = true; return; }
       auto target = analysis.callTargets.find(&e);
@@ -108,7 +113,8 @@ std::set<std::string> isolatedFunctions(const Program &program,
     bool known = a.staticFields.empty();
     for (const auto &[expr, type] : a.expressionTypes)
       // Builtins and construction have no call target; Print is an external effect.
-      known = known && plainValue(type) && (expr->kind != "call" || a.callTargets.count(expr));
+      known = known && plainValue(type) && expr->kind != "duckCall" && expr->kind != "invoke" &&
+              (expr->kind != "call" || a.callTargets.count(expr));
     for (const auto &[stmt, type] : a.localTypes) {
       (void)stmt;
       known = known && plainValue(type);

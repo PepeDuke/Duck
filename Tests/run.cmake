@@ -3970,4 +3970,254 @@ endif()
 
 message(STATUS "Duck integration tests passed")
 
+# Reflection, duck calls, and lambdas.
+function(run_example name path expected)
+  file(READ "${SOURCE}/${path}" source)
+  run_program(${name} "${source}" "${expected}")
+endfunction()
+function(reject_example name path diagnostic)
+  file(READ "${SOURCE}/${path}" source)
+  reject(${name} "${source}" "${diagnostic}")
+endfunction()
+function(trap_example name path)
+  file(READ "${SOURCE}/${path}" source)
+  trap_program(${name} "${source}")
+endfunction()
+run_example(reflection_names "Examples/Features/02_Reflection.dk" "Actor->Describe()\n")
+run_example(reflection_tags "Examples/Features/06_ReflectionTags.dk"
+  "Player\nMoney\nMoney is visible but read only\nVisibleNonEditable\n1\nEntity\n")
+run_example(duck_optional "Examples/Containers/03_OptionalDuckCalls.dk" "duck tick\n")
+run_example(duck_calls "Examples/Features/07_DuckCalls.dk"
+  "duck tick\nrock skipped\n1\n0\n1\n0\n12\n0\n")
+run_example(func_values "Examples/Features/08_FuncValues.dk" "5\n5\n7\n12\n30\n11\nno callback\n")
+run_example(lambda_captures "Examples/Features/09_LambdaCaptures.dk" "1\n2\n3\n7\n6\nused\nexpired\n")
+trap_example(duck_missing "Examples/FailureCases/04_UncheckedMissingMethod.dk")
+trap_example(duck_signature "Examples/FailureCases/19_DuckSignatureMismatch.dk")
+reject_example(func_mismatch "Examples/FailureCases/20_FuncSignatureMismatch.dk" "type mismatch: expected int, got string")
+reject_example(lambda_escape_this "Examples/FailureCases/21_EscapingReceiverCapture.dk" "cannot outlive the call")
+reject_example(attribute_unmarked "Examples/FailureCases/22_UnmarkedAttributeEnum.dk" "not marked \\[args\\]")
+
+run_program(duck_runtime_type [=[
+A { int X = 1 }
+B {
+ int Y = 2
+ int GetY() { return Y }
+ int Name() { return 10 }
+}
+C : A, B {
+ int Name() { return 20 }
+}
+Probe(C& c) { Print(c..GetY()) }
+View(B& b) {
+ Print(b..GetY())
+ Print(b..Name())
+}
+Main() {
+ C c()
+ Probe(c)
+ View(c)
+ B plain()
+ View(plain)
+}
+]=] "2\n2\n20\n2\n10\n")
+run_program(duck_pointer_receivers [=[
+Item { int V = 3
+ int Read() { return V }
+}
+Main() {
+ Item* owner()
+ Print(owner..Read())
+ alias : owner
+ owner = null
+ Print(alias..?Read())
+ Print(?alias..Read())
+}
+]=] "3\n0\n0\n")
+run_program(duck_skips_arguments [=[
+Quiet {}
+Loud { Hear(int x) { Print(x) } }
+int Noisy() {
+ Print("evaluated")
+ return 1
+}
+Main() {
+ Quiet q()
+ Loud l()
+ ?q..Hear(Noisy())
+ ?l..Hear(Noisy())
+}
+]=] "evaluated\n1\n")
+run_program(duck_hides_protected [=[
+Safe { -Secret() { Print("leak") } }
+Main() {
+ Safe s()
+ Print(s..?Secret)
+ ?s..Secret()
+}
+]=] "0\n")
+run_program(lambda_managed_escape [=[
+func string() Greeter(string who) {
+ string prefix = "hi "
+ return @ string() { return prefix + who }
+}
+Main() {
+ g : Greeter("duck")
+ h : g
+ Print(g())
+ Print(h())
+}
+]=] "hi duck\nhi duck\n")
+run_program(lambda_destructor_timing [=[
+Res {
+ int V = 1
+ ~Res() { Print("gone") }
+}
+func int() Hold() {
+ Res r
+ return @ int() { return r.V }
+}
+Main() {
+ {
+  f : Hold()
+  Print(f())
+  Print("still")
+ }
+ Print("after")
+}
+]=] "1\nstill\ngone\nafter\n")
+run_program(lambda_nested_capture [=[
+func int() Nested() {
+ int n = 1
+ outer : @ int() {
+  inner : @ int() {
+   n += 1
+   return n
+  }
+  return inner()
+ }
+ return outer
+}
+Main() {
+ f : Nested()
+ Print(f())
+ Print(f())
+}
+]=] "2\n3\n")
+run_program(lambda_loop_and_rebinding [=[
+Main() {
+ int total = 0
+ for i : 0...2 {
+  int v = i * 10
+  g : @ int() { return v }
+  total += g()
+ }
+ Print(total)
+ func int() f = null
+ {
+  int kept = 3
+  f = @ int() { return kept }
+ }
+ Print(f())
+}
+]=] "30\n3\n")
+run_program(lambda_reference_parameter [=[
+Main() {
+ func (int&) inc = @ (int& x) { x += 1 }
+ int v = 1
+ inc(v)
+ Print(v)
+}
+]=] "2\n")
+run_program(lambda_borrows_reference [=[
+Twice(int& x) {
+ add : @ () { x += x }
+ add()
+}
+Main() {
+ int v = 4
+ Twice(v)
+ Print(v)
+}
+]=] "8\n")
+run_program(lambda_fields_and_copies [=[
+Base {
+ int Seed = 7
+ func int() Read = @ int() { return Seed }
+}
+Child : Base {
+ int Own = 1
+}
+Holder {
+ func int() Callback
+}
+Main() {
+ Child c()
+ Print(c.Read())
+ Child d = c
+ d.Seed = 9
+ Print(d.Read())
+ Print(c.Read())
+ Holder* h()
+ int local = 5
+ h.Callback = @ int() { return local }
+ Print(h.Callback())
+}
+]=] "7\n9\n7\n5\n")
+run_program(lambda_method_dispatch [=[
+Animal {
+ string Name() { return "animal" }
+ Speak() {
+  say : @ () { Print(Name()) }
+  say()
+ }
+}
+Dog : Animal {
+ string Name() { return "dog" }
+}
+Main() {
+ Dog d()
+ d.Speak()
+}
+]=] "dog\n")
+run_program(lambda_waits_for_tasks [=[
+int Slow(int n) {
+ int total = 0
+ for int i = 0; i < n; i++ { total += i % 3 }
+ return total
+}
+Main() {
+ a : Slow(1000)
+ b : Slow(2000)
+ show : @ int() { return a + b }
+ Print(show())
+}
+]=] "2998\n")
+trap_program(func_null_call [=[
+Main() {
+ func int() f = null
+ Print(f())
+}
+]=])
+reject(func_needs_signature "Main() { func f\n}" "needs an initializer or a signature")
+reject(func_parameter_signature "Use(func f) {}\nMain() {}" "func parameter needs a signature")
+reject(func_field_signature "C { func F }\nMain() {}" "needs a signature or a lambda default")
+reject(func_argument_count "Main() {\nf : @ int(int x) { return x }\nPrint(f())\n}" "wrong argument count")
+reject(func_assign_mismatch "Main() {\nf : @ int() { return 1 }\nf = @ int(int x) { return x }\n}" "type mismatch")
+reject(func_native_value "extern \"C\" int abs(int v)\nMain() {\nf : abs\n}" "cannot be a func value")
+reject(func_field_read "C { func int() F = @ int() { return 1 } }\nMain() {\nC c()\ng : c.F\n}" "lambda field that runs against its object")
+reject(lambda_return_all_paths "Main() {\nf : @ int() { }\n}" "not all paths of this lambda")
+reject(lambda_capture_loop_variable "Main() {\nint [] a = {1}\nfor x : a {\nf : @ int() { return x }\n}\n}" "cannot capture the for loop variable")
+reject(lambda_capture_unassigned "Main() {\nint x\nf : @ int() { return x }\n}" "may be read before assignment")
+reject(lambda_scoped_read "Twice(int& x) {\nadd : @ () { x += x }\ng : add\n}\nMain() {}" "can only be called here")
+reject(lambda_alias_rebinding "I {}\nMain() {\nI* o()\na : o\nf : @ () { a = null }\n}" "cannot modify constant")
+reject(lambda_move_captured "R {\nint V = 0\n~R() {}\n}\nR Make() {\nR r\nf : @ int() { return r.V }\nreturn r\n}\nMain() {}" "a lambda captured it")
+reject(reflection_container_tags "C { Go() { byte [] t = this.C.GetTags() } }\nMain() {}" "GetTags applies to a field or method")
+reject(reflection_protected "C { -int X = 0 }\nMain() {\nC c()\nPrint(c.C.X.GetName())\n}" "protected member")
+reject(attribute_unknown "C { [Nope] int X = 0 }\nMain() {}" "unknown attribute")
+reject(attribute_ambiguous "[args]\nA : int #@{ X }\n[args]\nB : int #@{ X }\nC { [X] int V = 0 }\nMain() {}" "ambiguous")
+reject(attribute_on_container "[args]\nC { }\nMain() {}" "marks an enum")
+reject(attribute_on_constructor "[args]\nA : int #@{ X }\nC { [X] C() {} }\nMain() {}" "not constructors")
+reject(duck_non_container "Main() {\nint x = 1\nx..Foo()\n}" "duck call needs a container receiver")
+reject(duck_needs_arguments "C {}\nMain() {\nC c()\nc..Foo\n}" "needs an argument list")
+reject(duck_constant_receiver "C { Go() {} }\nMain() {\n#C c = {}\nc..Go()\n}" "mutable method on a constant")
 trap_program(expired_heap_alias "Main() { int* value = 5\nalias : value\nvalue = null\nPrint(*alias) }")

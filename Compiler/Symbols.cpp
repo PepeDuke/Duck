@@ -112,6 +112,7 @@ std::map<std::string, EnumInfo> resolveEnums(const std::vector<EnumFragment> &fr
       fail(typed->name, "enum underlying type must be an integer, float, double, string, or name; got " +
                             typeName(type));
     EnumInfo info{group.front()->name, type, {}, {}};
+    for (const auto *fragment : group) info.attribute = info.attribute || fragment->attribute;
     // Integers count up by 1 and floating values by 0.5, both from 0 or from
     // the previous member. Text defaults to the member name.
     std::string integer = "-1";
@@ -162,6 +163,8 @@ bool borrowsOnly(const Expr &e, const std::string &name, bool pointee = false,
   const bool indirect = e.kind == "." || (e.kind == "unary" && e.token.text == "*");
   const bool nullCheck = e.kind == "binary" && (e.token.text == "==" || e.token.text == "!=") &&
                          (e.args[0]->kind == "null" || e.args[1]->kind == "null");
+  // A lambda body is not inspected, so it may capture or keep anything.
+  if (e.kind == "lambda" || e.kind == "duckCall") return false;
   mayEscape = mayEscape || (e.kind == "unary" && e.token.text == "&") ||
               (e.kind == "call" && e.token.text != "Print");
   if (e.receiver && !borrowsOnly(*e.receiver, name, false, true)) return false;
@@ -260,7 +263,7 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
                          where(existing->second.declaration));
     }
     if (f.name.text == "Print" || f.name.text == "Length" || f.name.text == "CodeUnitAt" || f.name.text == "Exec" ||
-        !symbols.emplace(f.name.text, Signature{f.result, f.params, f.nativeSymbol, f.name, {}, f.method, f.protectedAccess, f.inferred}).second)
+        !symbols.emplace(f.name.text, Signature{f.result, f.params, f.nativeSymbol, f.name, {}, f.method, f.protectedAccess, f.inferred, f.tags}).second)
       fail(f.name, "duplicate or reserved function '" + f.name.text + "'");
     if (f.nativeSymbol.empty()) {
       auto &safe = symbols.at(f.name.text).nonescapingParameters;
@@ -529,6 +532,33 @@ void checkParents(const Symbols &symbols, const std::string &name,
   complete.insert(name);
 }
 } // namespace
+std::vector<TypeMember> Symbols::members(const std::string &record) const {
+  std::vector<TypeMember> result;
+  for (const auto &path : visibleFields(record)) {
+    TypeMember member;
+    member.name = path.field->name.text;
+    member.declaring = path.declaring;
+    member.isProtected = path.field->protectedAccess;
+    member.path = path.indices;
+    member.tags = path.field->tags;
+    member.type = path.field->type;
+    result.push_back(std::move(member));
+  }
+  for (const auto &name : dispatchNames(record)) {
+    const auto [key, receiver] = overrider(record, {}, name);
+    const auto &signature = at(key);
+    TypeMember member;
+    member.name = name;
+    member.key = key;
+    member.declaring = key.substr(0, key.rfind('.'));
+    member.isProtected = signature.protectedAccess;
+    member.path = receiver;
+    member.tags = signature.tags;
+    member.signature = &signature;
+    result.push_back(std::move(member));
+  }
+  return result;
+}
 std::vector<MemberPath> Symbols::visibleFields(const std::string &record) const {
   std::vector<MemberPath> result;
   std::set<std::string> seen;
@@ -586,6 +616,44 @@ void resolveInheritance(Symbols &symbols) {
   for (const auto &[name, record] : symbols.records)
     for (const auto &field : record.fields)
       if (!field.parentView) requireNew(record, field.name.text, field.name, true);
+}
+void resolveAttributes(Symbols &symbols) {
+  auto resolve = [&](Tag &tag) {
+    const auto &text = tag.token.text;
+    const auto dot = text.rfind('.');
+    if (dot != std::string::npos) {
+      const auto owner = symbols.enums.find(text.substr(0, dot));
+      if (owner == symbols.enums.end()) fail(tag.token, "unknown enum in attribute '" + text + "'");
+      if (!owner->second.attribute)
+        fail(tag.token, "enum '" + owner->first + "' is not marked [args], so it cannot be used as an attribute");
+      tag.type = owner->first;
+      tag.member = owner->second.find(text.substr(dot + 1));
+      if (tag.member == owner->second.members.size()) fail(tag.token, "unknown attribute '" + text + "'");
+      return;
+    }
+    bool unmarked = false;
+    for (const auto &[name, info] : symbols.enums) {
+      const auto member = info.find(text);
+      if (member == info.members.size()) continue;
+      if (!info.attribute) {
+        unmarked = true;
+        continue;
+      }
+      if (!tag.type.empty())
+        fail(tag.token, "attribute '" + text + "' is ambiguous between enums '" + tag.type + "' and '" + name +
+                            "'; qualify it, as in [" + name + "." + text + "]");
+      tag.type = name;
+      tag.member = member;
+    }
+    if (tag.type.empty())
+      fail(tag.token, unmarked ? "'" + text + "' belongs to an enum not marked [args]; write [args] before that enum"
+                               : "unknown attribute '" + text + "'; attributes are members of enums marked [args]");
+  };
+  for (auto &[name, record] : symbols.records)
+    for (auto &field : record.fields)
+      for (auto &tag : field.tags) resolve(tag);
+  for (auto &[name, signature] : symbols)
+    for (auto &tag : signature.tags) resolve(tag);
 }
 void validateOverrides(const Symbols &symbols) {
   auto describe = [](const std::string &owner, const std::string &key, const Signature &signature) {

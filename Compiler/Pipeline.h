@@ -58,6 +58,7 @@ inline bool carriesTable(const Parameter &parameter) {
 // layout, for the container B at path, is:
 //   i64 the byte offset of path within record,
 //   i64 the length of path, zero only for the whole object,
+//   ptr the type descriptor of record, for duck calls,
 //   ptr the table for each of B's parents, in order,
 //   then, for each name of dispatchNames(B): ptr the final overrider,
 //   i64 the byte offset of the overrider's receiver within record, and
@@ -97,6 +98,24 @@ struct Signature {
   bool method = false;
   bool protectedAccess = false;
   bool inferred = false; // An accessor whose property type is not known yet.
+  std::vector<Tag> tags;
+};
+// The text a duck call site and a method descriptor compare: "void(float,int&)".
+inline std::string signatureText(const Type &result, const std::vector<Parameter> &parameters, size_t first) {
+  std::string text = typeName(result) + "(";
+  for (size_t i = first; i < parameters.size(); ++i)
+    text += (i > first ? "," : "") + typeName(parameters[i].type) + (parameters[i].reference ? "&" : "");
+  return text + ")";
+}
+// One member of a type descriptor. Fields come first in layout order, then
+// methods in dispatch order; inherited members keep their declaring parent.
+struct TypeMember {
+  std::string name, key, declaring; // key is empty for a field.
+  bool isProtected = false;
+  std::vector<size_t> path; // A field's indices, or a method's receiver state.
+  std::vector<Tag> tags;
+  const Signature *signature = nullptr; // Null for a field.
+  Type type;                            // A field's type.
 };
 // Property accessors are instance methods named get-Name and set-Name, so
 // they override, dispatch, and inherit like other methods.
@@ -118,6 +137,7 @@ struct EnumInfo {
   Type type;
   std::vector<Token> members;
   std::vector<std::string> values;
+  bool attribute = false; // Marked [args]: members can be used as attributes.
   size_t find(const std::string &member) const {
     size_t i = 0;
     while (i < members.size() && members[i].text != member) ++i;
@@ -178,6 +198,8 @@ struct Symbols : std::map<std::string, Signature> {
   // Fields an instance method may name directly, inherited ones included,
   // with each name bound to its highest-priority declaration.
   std::vector<MemberPath> visibleFields(const std::string &record) const;
+  // Every member the container's type descriptor lists.
+  std::vector<TypeMember> members(const std::string &record) const;
   // A container holding string, name, or big storage anywhere in its layout,
   // nested containers and parents included. Copies retain and cleanup releases.
   bool managedRecord(const std::string &record) const;
@@ -198,11 +220,11 @@ struct Symbols : std::map<std::string, Signature> {
   // (fields and parents). Such values are move-only and destroyed once.
   bool destructible(const std::string &record) const;
   bool managed(const Type &type) const {
-    return managedValue(type) || (recordValue(type) && managedRecord(type.record));
+    return managedValue(type) || funcValue(type) || (recordValue(type) && managedRecord(type.record));
   }
   // Storage that must release, destroy, or free something when it dies.
   bool needsCleanup(const Type &type) const {
-    return managedValue(type) || collectionValue(type) || dynamicArray(type) ||
+    return managedValue(type) || funcValue(type) || collectionValue(type) || dynamicArray(type) ||
            (fixedArray(type) && needsCleanup(*type.element)) ||
            (recordValue(type) && (managedRecord(type.record) || destructible(type.record)));
   }
@@ -216,6 +238,12 @@ struct Symbols : std::map<std::string, Signature> {
   // without constructors, defaults, or anything to clean up.
   bool zeroDefault(const Type &type) const;
   void validateType(const Type &type, const Token &token) const {
+    if (funcValue(type)) {
+      if (!type.signature) return; // Inferred from the initializer.
+      validateType(type.signature->result, token);
+      for (const auto &parameter : type.signature->parameters) validateType(parameter.type, token);
+      return;
+    }
     if (arrayValue(type)) {
       const auto &element = *type.element;
       const bool plain = !element.depth && (numeric(element) || element == Type::Bool || element == Type::Char ||
@@ -276,6 +304,8 @@ void resolveProperties(Symbols &symbols, const std::vector<const Program *> &pro
 // Checks that every override keeps its overridden methods' signatures.
 // Runs once property types are known.
 void validateOverrides(const Symbols &symbols);
+// Resolves every [Name] attribute on a field or method to its enum member.
+void resolveAttributes(Symbols &symbols);
 void validateLayouts(const Symbols &symbols);
 // Static storage is initialized before Main from compile-time constants
 // only, so no initialization order exists to observe. Fills each value.
@@ -297,6 +327,10 @@ void validateNativeSymbols(const Symbols &symbols);
 // into by-value parameters or held in static storage.
 void validateLifetimes(const Symbols &symbols);
 
+// Identifies a declared local across analysis and lowering.
+inline std::string captureKey(const Token &t) {
+  return t.source + ":" + std::to_string(t.line) + ":" + std::to_string(t.column) + ":" + t.text;
+}
 // Expression pointers refer to the input AST, which must outlive this artifact.
 // Each function gets its own analysis, suitable for independent worker tasks.
 struct FunctionAnalysis {
@@ -360,6 +394,50 @@ struct FunctionAnalysis {
   std::set<const Stmt *> taskSpawns;
   std::set<const Stmt *> taskBarriers;
   std::map<const Stmt *, std::set<std::string>> taskUses;
+  // GetName, GetDeclaringName, and GetTags: the container, the member's index
+  // in its descriptor (-1 for the container), and the attributes returned.
+  struct Reflection {
+    std::string record;
+    long member = -1;
+    std::string query;
+    std::vector<size_t> tags;
+    Type element;
+  };
+  std::map<const Expr *, Reflection> reflections;
+  // `e..Foo(...)` and its checks: the shape the call site passes.
+  struct DuckCall {
+    Type record, result;
+    std::vector<Parameter> parameters;
+    std::string signature;
+  };
+  std::map<const Expr *, DuckCall> duckCalls;
+  // Calls through a func value. A field callee names its owner and field
+  // indices, so a member lambda receives the object it was called on.
+  struct IndirectCall {
+    Type type;
+    bool field = false;
+    std::string owner;
+    std::vector<size_t> path;
+  };
+  std::map<const Expr *, IndirectCall> indirectCalls;
+  // Global functions used as values: the qualified name.
+  std::map<const Expr *, std::string> functionValues;
+  struct Capture {
+    enum Kind { Box, Alias, Borrow, This };
+    Kind kind;
+    Token token;
+    Type type;
+  };
+  struct LambdaInfo {
+    std::vector<Capture> captures;
+    bool bound = false;    // A member lambda: its env is the receiver object.
+    bool borrowed = false; // Holds this or a reference: it cannot outlive the frame.
+    bool usesThis = false;
+    std::string record; // The receiver's container, when usesThis or bound.
+  };
+  std::map<const Expr *, LambdaInfo> lambdas;
+  // Locals a lambda captures by reference; they live in a shared heap box.
+  std::set<std::string> captured;
 };
 FunctionAnalysis analyzeFunction(const Function &function,
                                  const Symbols &symbols);
@@ -382,6 +460,8 @@ struct FunctionIR {
   bool usesBigRuntime = false;
   bool usesDecimalRuntime = false;
   bool usesCollectionRuntime = false;
+  bool usesFuncRuntime = false;
+  bool usesMetaRuntime = false;
   // Containers whose heap cleanup functions this function's owners use.
   std::set<std::string> cleanups;
   // Containers whose @duck$destroy.<container> routines this function calls.
@@ -391,6 +471,8 @@ struct FunctionIR {
   // Module-level helper definitions by symbol, such as the cleanup of a
   // nested array element; emitted once per module.
   std::map<std::string, std::string> helpers;
+  // Containers whose type descriptors this function reads.
+  std::set<std::string> types;
 };
 FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
                          const FunctionAnalysis &analysis);
@@ -411,6 +493,9 @@ std::string calendarRuntimeIR();
 std::string wideRuntimeIR();
 std::string bigRuntimeIR();
 std::string decimalRuntimeIR();
+// Closures, shared boxes, and the descriptor lookup behind duck calls.
+std::string funcRuntimeIR();
+std::string metaRuntimeIR();
 std::string taskRuntimeIR(const std::set<std::string> &nativeSymbols);
 std::string emitRecords(const Symbols &symbols);
 std::string emitEnums(const Symbols &symbols);
@@ -425,8 +510,8 @@ std::string emitCleanups(const Symbols &symbols, const std::set<std::string> &co
 // destructible container in their layouts: the user destructor, then the
 // fields in reverse layout order, so parents are destroyed last.
 std::string emitDestroys(const Symbols &symbols, std::set<std::string> containers);
-// Module-private dispatch tables, with every table they reference.
-std::string emitTables(const Symbols &symbols, std::set<DispatchTable> tables);
+// Module-private dispatch tables and type descriptors, with everything they reference.
+std::string emitTables(const Symbols &symbols, std::set<DispatchTable> tables, std::set<std::string> types = {});
 
 // Sequential orchestration. Analysis finishes before lowering begins.
 // parallel = false keeps every call on the calling thread.

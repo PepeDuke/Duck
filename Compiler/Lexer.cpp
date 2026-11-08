@@ -156,6 +156,8 @@ std::vector<Token> lex(const std::string &source,
       if (t.text == "." && source.compare(i, 2, "..") == 0) {
         t.text += take();
         t.text += take();
+      } else if (t.text == "." && i < source.size() && source[i] == '.') {
+        t.text += take(); // The duck call operator.
       } else if (i < source.size()) {
         std::string pair = t.text + source[i];
         if (pair == "::" || pair == "==" || pair == "!=" || pair == "<=" || pair == ">=" ||

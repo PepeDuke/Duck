@@ -1,0 +1,8 @@
+// INTENTIONALLY BROKEN: indirect calls are checked against the func signature.
+// EXPECT: compile error: type mismatch.
+// FIX: pass an int.
+Main()
+{
+    func int(int) twice = @ int(int x) { return x * 2 }
+    Print(twice("two"))
+}

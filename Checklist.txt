@@ -100,13 +100,13 @@ Types, enums, and constants
    Proposal: Proposed resolution: keep the existing initialized-constant rule and change the README example to #int age = 18. Keep a rejection test for a missing initializer and one for reassignment.
 
 Reflection, duck typing, and lambdas
-[] Expose type and member metadata, including names, attributes, and GetTags().
+[x] Expose type and member metadata, including names, attributes, and GetTags().
    Proposal: Emit a descriptor per container containing its qualified name, members, signatures, and typed attributes. Resolve GetName and GetTags through those descriptors and preserve the declaring parent on inherited members.
-[] Implement runtime duck calls (..), method-existence checks, and optional duck calls.
+[x] Implement runtime duck calls (..), method-existence checks, and optional duck calls.
    Proposal: Parse dynamic dispatch separately from ordinary dot calls. Look up the member on the runtime type, validate its signature, and distinguish presence checks, guarded misses, and required calls that fail when absent.
-[] Implement func values, indirect Duck calls, and @ lambda expressions.
+[x] Implement func values, indirect Duck calls, and @ lambda expressions.
    Proposal: Represent a Duck callable with a checked signature, function entry point, and optional environment pointer. Lower each lambda body as a generated function and type-check indirect calls against its signature.
-[] Capture outer bindings in lambdas.
+[x] Capture outer bindings in lambdas.
    Proposal: Compute each lambda's free variables and place captures in its environment. For escaping lambdas, promote referenced local storage as needed and retain tracked aliases without making them owners. Test invocation after the original scope exits.
 
 Entry points and scripts

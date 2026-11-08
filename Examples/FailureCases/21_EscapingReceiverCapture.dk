@@ -1,0 +1,19 @@
+// INTENTIONALLY BROKEN: a lambda that uses this cannot outlive the call.
+// EXPECT: compile error: cannot outlive the call.
+// FIX: capture a copy of the value in a local instead of using the field.
+Counter
+{
+    int Value = 0
+
+    func int() Reader()
+    {
+        return @ int() { return Value }
+    }
+}
+
+Main()
+{
+    Counter c()
+    reader : c.Reader()
+    Print(reader())
+}

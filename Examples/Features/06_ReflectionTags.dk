@@ -1,0 +1,51 @@
+// EXPECT: Player, Money, VisibleNonEditable, 1 tag on Health, Reset declared by Entity.
+// PITFALL: GetTags takes its element type from the declaration; an inherited
+// member still reports the parent that declared it.
+[args]
+Visibility : byte
+#@{
+    Hidden, VisibleNonEditable, VisibleEditable
+}
+
+Entity
+{
+    [VisibleEditable]
+    int Health = 10
+
+    [Hidden]
+    Reset()
+    {
+        Health = 0
+    }
+}
+
+Player : Entity
+{
+    [VisibleNonEditable]
+    int Money = 0
+
+    Describe()
+    {
+        Print(this.Player.GetName())
+        Print(this.Player.Money.GetName())
+
+        byte [] tags = this.Player.Money.GetTags()
+        if tags.Len > 0 && tags[0] == Visibility.VisibleNonEditable
+        {
+            Print("Money is visible but read only")
+        }
+
+        Visibility [] named = this.Player.Money.GetTags()
+        Print(named[0])
+
+        byte [] health = this.Player.Health.GetTags()
+        Print(health.Len)
+        Print(this.Player.Reset.GetDeclaringName())
+    }
+}
+
+Main()
+{
+    Player p()
+    p.Describe()
+}
