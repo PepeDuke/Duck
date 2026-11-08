@@ -64,13 +64,13 @@ Collections
    Proposal: Represent a fixed array with an element type and compile-time extent. Give dynamic arrays data, length, and capacity fields, and generate element-aware moves and cleanup when storage grows or leaves scope.
 [x] Implement queues, stacks, and keyed pair collections.
    Proposal: Use a ring buffer for queues, end insertion/removal for stacks, and keyed storage with insertion order for pairs. Preserve the documented first-out, last-out, and last-added-key behavior in runtime tests.
-[] Support collection literals and collection type inference.
+[x] Support collection literals and collection type inference.
    Proposal: Let the expected type disambiguate record, sequence, and pair literals. Without an expected type, infer compatible element or key/value types and diagnose empty or heterogeneous literals whose type cannot be determined.
-[] Support indexed reads and writes, IsValid checks, and guarded indexing.
+[x] Support indexed reads and writes, IsValid checks, and guarded indexing.
    Proposal: Add an indexed expression that can denote writable storage. Evaluate the collection and index once and reuse the bounds result for guards and IsValid. Specify the result type of an invalid guarded scalar read before allowing it in value expressions.
-[] Implement collection length, insertion, removal, clearing, and result-producing mutations.
+[x] Implement collection length, insertion, removal, clearing, and result-producing mutations.
    Proposal: Resolve each mutation by collection kind and apply element cleanup on replacement or removal. First settle whether (s += x) returns the inserted index or the new count, then test empty collections and the first insertion.
-[] Support multidimensional arrays and negative-index dimensions.
+[x] Support multidimensional arrays and negative-index dimensions.
    Proposal: Store each fixed dimension's extent and check it before computing a flattened offset. Use nested dynamic storage for variable dimensions and sparse signed-coordinate storage for grids spanning int.Min to int.Max.
 [] Support collection size hints such as [*] and [50*].
    Proposal: Record the size annotation as an estimate on the array type or declaration. Feed it to the scheduling cost model; a [50*] array must still grow beyond 50 elements without changing program behavior.

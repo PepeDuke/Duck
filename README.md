@@ -939,9 +939,11 @@ s.Clear()            // removes all elements in collection
 ```
 if we need to know the index of add or remove we can add your assignment into () brackets then this expression will return an appropriate return type to the expression
 ``` c++
-int [] s = {1,1} 
-int index = (s += 4) 
-Print(index)  // prints 3
+int [] s = {1,1}
+index : (s += 4)  // the index of the inserted value, a long
+Print(index)      // prints 2
+last : (s--)      // removing gives the removed value
+Print(last)       // prints 4
 ```
 
 ## Bounds checking in Duck
@@ -952,14 +954,15 @@ if IsValid(s[6]) // this checks bound of the array s
   s[6] = 5       // this will not be executed as 6 is out of bounds
 //or
 ?s[6] = 5        // ? checks bound of the array s and will not be executed as 6 is out of bounds
+x : ?s[6]        // a guarded read gives the default value of the element type when out of bounds, here 0
 ```
 ## Multidimensional collections collections in Duck
 Duck supports multidimensional collections for multiple use cases 
 ``` c++
-int s1[5][10]  // <-- 2D static array 
-int s2[][]     // <-- 2D dynamic array
-int s3[-][-]   // <-- 2D dynamic array that has index from int.Min to int.Max. 
-               //     Meaning you can access values that are in negative index such as s3[-2][1] this is great for grids as you generally start at 0,0
+int [5][10] s1  // <-- 2D static array: 5 arrays of 10, s1[4][9] is the last value
+int [][] s2     // <-- 2D dynamic array: s2++ adds a row, s2[0] += 5 adds to row 0
+int [-][-] s3   // <-- 2D sparse grid that has index from int.Min to int.Max; unwritten cells read as 0
+                //     Meaning you can access values that are in negative index such as s3[-2][1] this is great for grids as you generally start at 0,0
 ```
 
 ## Collection size prediction in Duck
@@ -1405,7 +1408,7 @@ Population
 }
 @{
   MaxAge: Ages.Max, // returns 50
-  FirstAge: ?Ages[0] 	// checks if index 0 is valid and returns that value now it is 20, if index 0 is not valid it returns null
+  FirstAge: ?Ages[0] 	// checks if index 0 is valid and returns that value now it is 20, if index 0 is not valid it returns the default value of int, 0
 }
 ```
 Setter are similarly set inside the ={} block by

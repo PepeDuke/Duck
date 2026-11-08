@@ -50,6 +50,13 @@ struct Type {
     t.extent = extent;
     return t;
   }
+  // `T [-][-]`: a sparse grid of int coordinates. It is stored as a pair
+  // keyed by an [N x int] coordinate tuple, with extent holding N.
+  static Type grid(const Type &element, unsigned rank) {
+    Type t = collection(Pair, element, array(Int, rank));
+    t.extent = rank;
+    return t;
+  }
   static Type collection(Kind kind, const Type &element, const Type &key = Type()) {
     Type t(kind);
     t.element = std::make_shared<const Type>(element);
@@ -93,6 +100,10 @@ inline bool dynamicArray(const Type &t) { return arrayValue(t) && t.extent == 0;
 inline bool collectionValue(const Type &t) {
   return !t.depth && (t.base == Type::Queue || t.base == Type::Stack || t.base == Type::Pair);
 }
+// A sparse signed grid, `T [-]` or `T [-][-]`: a pair keyed by coordinates.
+inline bool gridValue(const Type &t) { return !t.depth && t.base == Type::Pair && t.extent != 0; }
+// A pair written as `K, V pair`, not a grid.
+inline bool pairValue(const Type &t) { return !t.depth && t.base == Type::Pair && t.extent == 0; }
 // An enum value is stored as its member's declaration index. Printing uses the
 // member name; operators, conversions, and concatenation use its underlying value.
 inline bool enumValue(const Type &t) { return !t.depth && t.base == Type::Enum; }

@@ -139,7 +139,9 @@ std::string compileModule(const Program &program, const Program &imports,
     fragments.push_back(lowerFunction(function, symbols, analyzeFunction(function, symbols)));
   std::set<std::string> cleanups, destroys;
   std::set<DispatchTable> tables;
+  std::map<std::string, std::string> helpers;
   for (const auto &fragment : fragments) {
+    helpers.insert(fragment.helpers.begin(), fragment.helpers.end());
     tables.insert(fragment.tables.begin(), fragment.tables.end());
     cleanups.insert(fragment.cleanups.begin(), fragment.cleanups.end());
     destroys.insert(fragment.destroys.begin(), fragment.destroys.end());
@@ -166,7 +168,12 @@ std::string compileModule(const Program &program, const Program &imports,
       }
     }
   }
-  return emitRecords(symbols) + emitEnums(symbols) + emitStatics(symbols) + emitCleanups(symbols, cleanups) +
+  std::string helperIR;
+  for (const auto &[symbol, definition] : helpers) {
+    (void)symbol;
+    helperIR += definition;
+  }
+  return helperIR + emitRecords(symbols) + emitEnums(symbols) + emitStatics(symbols) + emitCleanups(symbols, cleanups) +
          emitDestroys(symbols, destroys) + emitTables(symbols, tables) +
          emitDeclarations(declarations) + assembleModule(fragments, entry, nativeSymbols);
 }

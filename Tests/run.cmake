@@ -1915,7 +1915,7 @@ reject(collection_container_element "P { int X }\nMain() { P queue q }" "a colle
 reject(collection_float_key "Main() { double, int pair p }" "a pair cannot be keyed by double")
 reject(collection_entry_in_queue "Main() { int queue q\nq += 1 : 2 }" "key : value entries belong in a pair, not in int queue")
 reject(collection_pair_without_entry "Main() { string, int pair p\np += \"a\" }" "add to a pair as p \\+= key : value")
-reject(collection_unsupported "Main() { int queue q\nq *= 2 }" "'\\*=' is not supported on int queue yet")
+reject(collection_unsupported "Main() { int queue q\nq *= 2 }" "'\\*=' is not supported on int queue; collections support")
 reject(collection_member "Main() { int queue q\nPrint(q.Top) }" "int queue has no member 'Top'; a queue has Front and Len")
 reject(collection_read_only "Main() { int queue q\nq.Len = 3 }" "'Len' is a read-only member of int queue")
 reject(collection_field_copy "B { int queue Q }\nMain() { B a()\nB b = a }" "cannot copy 'B': it holds a collection, so it is move-only")
@@ -2031,14 +2031,383 @@ reject(array_fixed_append "Main() { int [3] a\na += 1 }" "int \\[3\\] has a fixe
 reject(array_element_reference "Use(int& x) {}\nMain() { int [] a\na += 1\nUse(a[0]) }" "cannot pass an element of a dynamic array by reference")
 reject(array_field_strings "G { string [2] Names }\nMain() {}" "field 'Names' cannot hold string \\[2\\] yet")
 reject(array_runtime_elements "P\n{\n    int X\n    P() { X = 1 }\n}\nMain() { P [2] ps }" "'ps' cannot default its elements")
-reject(array_pair_write "Main() { string, int pair p\np[\"a\"] = 1 }" "pair values are read-only so far")
 reject(array_index_scalar "Main() { int x = 1\nPrint(x[0]) }" "only arrays and pairs can be indexed")
 reject(array_float_index "Main() { int [3] a\nPrint(a[1.5]) }" "an array index must be an integer, not float")
 reject(array_zero_length "Main() { int [0] a }" "a fixed array needs at least one element")
 reject(array_of_collections "Main() { int queue [3] a }" "arrays of collections are not supported yet")
-reject(array_multidimensional "Main() { int [3] [2] a }" "multidimensional arrays are a later item")
+
+# Multidimensional arrays list dimensions in index order: int [2][3] holds
+# 2 arrays of 3. Fixed and dynamic dimensions mix, and each index is
+# bounds-checked before the next. A guarded index skips the whole chain.
+# int [-][-] is a sparse grid of int coordinates: an unwritten cell reads
+# as the element default without being stored, and writing stores it.
+run_program(multidimensional [=[
+Noisy
+{
+    int Id
+    ~Noisy() { Print(Id) }
+}
+Board
+{
+    int [2][2] Marks
+}
+Sheet
+{
+    string [-][-] Cells
+}
+Bump(int [3]& row)
+{
+    row[0] += 100
+}
+Main()
+{
+    int [2][3] f = {{1, 2, 3}, {4, 5, 6}}
+    f[1][2] += 10
+    Print(f[1][2])
+    Print(f.Len)
+    Print(f[0].Len)
+    Print(IsValid(f[1][3]))
+    Print(IsValid(f[2][0]))
+    Print(?f[5][0])
+    Bump(f[0])
+    Print(f[0][0])
+    int [3] copied = f[1]
+    copied[0] = 0
+    Print(f[1][0])
+    string [2][2] names
+    names[1][0] = "x"
+    Print(names[0][1] + "|" + names[1][0])
+    int [][] rows
+    rows++
+    rows[0] += 7
+    rows += {1, 2, 3}
+    rows[1] -= [0]
+    Print(rows.Len)
+    Print(rows[0][0] + rows[1][1])
+    Print(rows[1].Len)
+    Print(?rows[9][0])
+    Print(IsValid(rows[1][1]))
+    ?rows[4][0] = 9
+    int [] taken = (rows--)
+    Print(taken.Len)
+    int [3][] mixed
+    mixed[2] += 5
+    Print(mixed[2][0] + mixed[0].Len)
+    string [][2] labels
+    labels++
+    labels[0][1] = "b"
+    Print(labels[0][0] + "|" + labels[0][1])
+    nested : {{1}, {2, 3}}
+    Print(nested[1][1])
+    int [-][-] cells
+    cells[-2][1] = 5
+    cells[int.Min][int.Max] += 3
+    Print(cells[-2][1])
+    Print(cells[0][0])
+    Print(cells.Len)
+    Print(IsValid(cells[0][0]))
+    Print(IsValid(cells[-2][1]))
+    ?cells[7][7] = 1
+    Print(cells.Len)
+    Print((cells -= [-2][1]))
+    Print(cells.Len)
+    Print(cells[int.Min][int.Max])
+    string [-] line
+    line[-5] = "neg"
+    Print(line[-5] + line[3] + "|")
+    cells.Clear()
+    Print(cells.Len)
+    Board board
+    board.Marks[1][1] = 4
+    Print(board.Marks[1][1] + board.Marks[0][0])
+    Sheet sheet
+    sheet.Cells[3][-3] = "here"
+    Print(sheet.Cells[3][-3])
+    Print(sheet.Cells.Len)
+    Noisy [][] crowd
+    crowd++
+    crowd[0] += {Id: 1}
+    crowd[0] += {Id: 2}
+    crowd++
+    crowd[1] += {Id: 3}
+    crowd -= [0]
+    Print(100)
+}
+]=] "16\n2\n3\n0\n0\n0\n101\n4\n|x\n2\n10\n2\n0\n1\n2\n5\n|b\n3\n5\n0\n2\n0\n1\n2\n5\n1\n3\nneg|\n0\n4\nhere\n1\n1\n2\n100\n3\n")
+trap_program(multidimensional_inner_bounds "Main() { int [2][3] a\nint i = 3\nPrint(a[1][i]) }")
+trap_program(multidimensional_missing_row "Main() { int [][] rows\nrows++\nPrint(rows[1][0]) }")
+trap_program(grid_remove_missing "Main() { int [-][-] g\ng[1][1] = 1\ng -= [1][2] }")
+reject(multidimensional_copy_row "Main() { int [][] rows\nx : rows[0] }" "cannot copy int \\[\\] 'rows\\[...\\]': dynamic arrays are move-only")
+reject(multidimensional_row_reference "Use(int []& r) {}\nMain() { int [][] rows\nrows++\nUse(rows[0]) }" "cannot pass an element of a dynamic array by reference")
+reject(multidimensional_field_dynamic "G { int [][] Rows }\nMain() {}" "field 'Rows' cannot hold int \\[\\]\\[\\] yet")
+reject(multidimensional_runtime_leaf "P\n{\n    int X\n    P() { X = 1 }\n}\nMain() { P [2][2] ps }" "'ps' cannot default its elements: 'P'")
+reject(multidimensional_type_name "Main() { int [2][3] a\nstring s = a }" "int \\[2\\]\\[3\\]")
+reject(multidimensional_row_remove "Main() { int [][] a\na -= [0][1] }" "-= \\[i\\]\\[j\\] removes a cell from a grid")
+reject(grid_mixed "Main() { int [3][-] g }" "a signed \\[-\\] dimension cannot be mixed with \\[N\\] or \\[\\] dimensions")
+reject(grid_partial "Main() { int [-][-] g\nPrint(g[1]) }" "int \\[-\\]\\[-\\] takes 2 coordinates, as g\\[x\\]\\[y\\]; got 1")
+reject(grid_extra "Main() { int [-][-] g\nPrint(g[1][2][3]) }" "takes 2 coordinates, as g\\[x\\]\\[y\\]; got 3")
+reject(grid_add "Main() { int [-] g\ng += 1 }" "'\\+=' does not apply to int \\[-\\]")
+reject(grid_remove_rank "Main() { int [-][-] g\ng -= [1] }" "int \\[-\\]\\[-\\] removes a cell by its 2 coordinates; got 1")
+reject(grid_member "Main() { int [-][-] g\nPrint(g.LastKey) }" "int \\[-\\]\\[-\\] has no member 'LastKey'")
+reject(grid_literal "Main() { int [-][-] g = {1} }" "int \\[-\\]\\[-\\] starts empty and has no literal")
+reject(grid_long_coordinate "Main() { int [-][-] g\nlong x = 1\ng[x][0] = 1 }" "type mismatch: expected int, got long")
+reject(grid_float_coordinate "Main() { int [-] g\ng[1.5] = 1 }" "a grid coordinate must be an integer, not float")
+reject(grid_containers "P { int X }\nMain() { P [-] g }" "a grid cannot hold P")
+reject(grid_reference "Use(int& x) {}\nMain() { int [-] g\ng[0] = 1\nUse(g[0]) }" "nor a pair value")
 reject(array_constant "Main() { #int [3] a = Make()\na[0] = 1 }\nint [3] Make() { int [3] r\nreturn r }" "cannot modify constant 'a'")
+
+# Indexed writes, IsValid, and guarded indexing. p[key] names the value
+# stored for a present key. IsValid(a[i]) and ?a[i] evaluate the collection
+# and the index or key once; a guarded write skips its right side when the
+# element is missing, and a guarded read gives the element type's default.
+run_program(indexing [=[
+Point
+{
+    int X = 7
+    int Y
+}
+int Next(int& n)
+{
+    n += 1
+    return n
+}
+Main()
+{
+    int [3] f = {1, 2, 3}
+    int [] d = {4, 5}
+    string, int pair ages = {"Ada" : 36}
+    string, string pair towns = {"Bob" : "York"}
+    string [] words = {"a"}
+    Point [] points = {{X: 1}}
+    Print(IsValid(f[2]))
+    Print(IsValid(f[3]))
+    Print(IsValid(f[-1]))
+    Print(IsValid(d[1]))
+    Print(IsValid(d[2]))
+    Print(IsValid(ages["Ada"]))
+    Print(IsValid(ages["Zed"]))
+    Print(?f[1])
+    Print(?f[9])
+    Print(?d[5] + 100)
+    Print(?ages["Zed"])
+    Print(?words[0] + "|" + ?words[4] + "|")
+    Point missing = ?points[3]
+    Print(missing.X)
+    ?f[9] = 50
+    ?f[0] = 50
+    ?d[1] += 10
+    ?d[2] += 10
+    ages["Ada"] = ages["Ada"] * 2
+    ?ages["Ada"]++
+    int calls = 0
+    ?ages["Zed"] = Next(calls)
+    towns["Bob"] = "Leeds"
+    towns["Bob"] += "!"
+    ?towns["Ann"] = "Hull"
+    Print(f[0])
+    Print(d[1])
+    Print(ages["Ada"])
+    Print(ages.Len)
+    Print(calls)
+    Print(towns["Bob"])
+    Print(towns.Len)
+    int k = 0
+    Print(IsValid(d[Next(k)]))
+    Print(?d[Next(k)])
+    Print(k)
+    int [] empty
+    string, int pair none
+    Print(IsValid(empty[0]))
+    Print(?none["x"])
+    if IsValid(f[6])
+        f[6] = 5
+    ?f[6] = 5
+    Print(?f[6])
+}
+]=] "1\n0\n0\n1\n0\n1\n0\n2\n0\n100\n0\na||\n7\n50\n15\n73\n1\n0\nLeeds!\n1\n1\n0\n2\n0\n0\n0\n")
+# Collection mutations. (s += x) and (s++) give the inserted index (a
+# pair's entry position); (s--) and (s -= [i]) give the removed element,
+# moved out rather than released. p++ adds the next integer key. Clear()
+# frees every element and leaves the collection empty.
+run_program(mutations [=[
+Noisy
+{
+    int Id
+    ~Noisy() { Print(Id) }
+}
+Point
+{
+    int X = 7
+}
+Main()
+{
+    int [] s = {1, 1}
+    index : (s += 4)
+    Print(index)
+    Print((s++))
+    Print(s[3])
+    Print(s.Len)
+    s -= [0]
+    Print(s[0])
+    Print((s -= [1]))
+    Print((s--))
+    Print(s.Len)
+    s.Clear()
+    Print(s.Len)
+    Print((s += 9))
+    int [] never
+    never.Clear()
+    Print((never++))
+    string [] words = {"a", "b", "c"}
+    words -= [1]
+    Print(words[1])
+    Print((words -= [0]) + "!")
+    words.Clear()
+    Print(words.Len)
+    int queue q = {2, 3}
+    Print((q += 4))
+    Print((q--))
+    q++
+    Print(q.Len)
+    q.Clear()
+    Print((q += 8))
+    string stack st = {"x", "y"}
+    Print((st--))
+    Print((st++))
+    Print(st.Top + "|")
+    string, int pair ages = {"Ada" : 36, "Bob" : 41, "Cy" : 9}
+    Print((ages += "Bob" : 42))
+    Print((ages += "Dee" : 1))
+    Print((ages -= ["Bob"]))
+    Print(ages.Len)
+    Print((ages--))
+    Print(ages.LastKey)
+    ages -= ["Ada"]
+    Print(ages.LastKey)
+    ages.Clear()
+    Print((ages += "Eve" : 5))
+    int, string pair lines
+    Print((lines++))
+    lines++
+    lines += 10 : "ten"
+    Print((lines++))
+    Print(lines.LastKey)
+    Print(lines[11] + "|")
+    byte, int pair small
+    small += 254 : 0
+    small++
+    Print(small.LastKey)
+    Point [] points
+    points++
+    Point taken = (points--)
+    Print(taken.X + points.Len)
+    Noisy [] all = {{Id: 1}, {Id: 2}, {Id: 3}, {Id: 4}}
+    all -= [1]
+    Print(100)
+    Noisy kept = (all -= [0])
+    all--
+    Print(200)
+    all.Clear()
+    Print(300)
+}
+]=] "2\n3\n0\n4\n1\n4\n0\n1\n0\n0\n0\nc\na!\n0\n2\n2\n3\n0\ny\n1\n|\n1\n3\n42\n3\n1\nCy\nCy\n0\n0\n3\n11\n|\n255\n7\n2\n100\n4\n200\n3\n300\n1\n")
+trap_program(mutation_key_overflow "Main() { byte, int pair p\np += 255 : 1\np++ }")
+trap_program(mutation_key_present "Main() { int, int pair p\np += 1 : 1\np += 0 : 0\np++ }")
+trap_program(mutation_remove_outside "Main() { int [] a\na += 1\na -= [1] }")
+trap_program(mutation_remove_missing_key "Main() { string, int pair p\np += \"a\" : 1\np -= [\"b\"] }")
+trap_program(mutation_take_empty "Main() { int stack s\nPrint((s--)) }")
+reject(mutation_fixed_clear "Main() { int [3] a\na.Clear() }" "int \\[3\\] has a fixed length; Clear\\(\\) needs a dynamic array")
+reject(mutation_fixed_remove "Main() { int [3] a\na -= [0] }" "int \\[3\\] has a fixed length")
+reject(mutation_queue_remove_at "Main() { int queue q\nq -= [0] }" "int queue removes only at its end with --")
+reject(mutation_remove_value "Main() { int [] a\na -= 1 }" "remove from int \\[\\] with a -= \\[i\\] or a--")
+reject(mutation_pair_increment_text "Main() { string, int pair p\np++ }" "p\\+\\+ adds the next integer key, but string, int pair is keyed by string")
+reject(mutation_scalar_result "Main() { int x = 1\nPrint((x += 1)) }" "only collection mutations give a result")
+reject(mutation_unknown_method "Main() { int [] a\na.Sort() }" "int \\[\\] has no method 'Sort'; collections have Clear\\(\\)")
+reject(mutation_clear_arguments "Main() { int [] a\na.Clear(1) }" "Clear takes no arguments")
+reject(mutation_constant_clear "Main() { #int [] a = Make()\na.Clear() }\nint [] Make() { int [] r\nreturn r }" "cannot modify constant 'a'")
+reject(mutation_index_narrowing "Main() { int [] a\nint i = (a += 1) }" "type mismatch: expected int, got long")
+reject(mutation_stray_removal "Main() { int x = 1\nx -= [0] }" "-= \\[i\\] removes an element from an array or a pair")
+trap_program(indexing_pair_missing_write "Main() { string, int pair p\np += \"a\" : 1\np[\"b\"] = 2 }")
+trap_program(indexing_pair_empty_write "Main() { string, int pair p\np[\"a\"] += 1 }")
+reject(indexing_guard_member "P { int X }\nMain() { P [] ps\nPrint(?ps[0].X) }" "'\\?' guards an index such as \\?a\\[i\\]")
+reject(indexing_guard_name "Main() { int x = 1\nPrint(?x) }" "'\\?' guards an index such as \\?a\\[i\\]")
+reject(indexing_is_valid_value "Main() { int x = 1\nPrint(IsValid(x)) }" "IsValid expects one indexed element, as in IsValid\\(a\\[i\\]\\)")
+reject(indexing_guard_runtime_default "P\n{\n    int X\n    P() { X = 1 }\n}\nMain() { P [] ps\nP p = ?ps[0] }" "its default is built at run time")
+reject(indexing_pair_reference "Use(int& x) {}\nMain() { string, int pair p\np += \"a\" : 1\nUse(p[\"a\"]) }" "nor a pair value")
+reject(indexing_pair_address "Main() { string, int pair p\np += \"a\" : 1\nx : &p[\"a\"] }" "cannot take the address of a dynamic array or pair element")
+reject(indexing_pair_key_type "Main() { string, int pair p\np[1] = 2 }" "type mismatch")
+reject(indexing_guard_constant "Main() { #int [3] a = Make()\n?a[0] = 1 }\nint [3] Make() { int [3] r\nreturn r }" "cannot modify constant 'a'")
 reject(array_member "Main() { int [3] a\nPrint(a.Size) }" "int \\[3\\] has no member 'Size'; an array has Len")
+# { ... } literals: the expected type decides between a container's fields,
+# a sequence's values, and a pair's key : value entries. Without one, values
+# make a dynamic array and entries a pair of the entries' common types.
+run_program(collection_literals [=[
+Point
+{
+    int X
+    int Y = 2
+}
+Probe
+{
+    int Id
+    Probe(int id) { Id = id }
+    ~Probe() { Print(-Id) }
+}
+int Sum(int [3] values) { return values[0] + values[1] + values[2] }
+string [] Words() { return {"red", "green"} }
+Main()
+{
+    int [] s1 = {5, 1, 2}
+    Print(s1[0] + s1[2])
+    int queue s2 = {2, 3, 4}
+    Print(s2.Front)
+    int stack s3 = {2, 3, 4}
+    Print(s3.Top)
+    string, string pair s4 = {"name" : "Bob", "address" : "Code square 5", "city" : "New York"}
+    Print(s4["city"])
+    Print(s4.LastKey)
+    string pair s5 = {name: "Bob", address: "Code square 5"}
+    Print(s5["name"])
+    string who = "role"
+    string, string pair s6 = {who: "admin"}
+    Print(s6["role"])
+    int [3] fixed = {7, 8, 9}
+    Print(fixed[2])
+    Print(Sum({1, 2, 3}))
+    Point [] points = {{X: 1}, {X: 4, Y: 5}}
+    Print(points[0].Y + points[1].X)
+    Point p = {X: 3}
+    Print(p.X + p.Y)
+    t1 : {5, 1, 2}
+    Print(t1.Len)
+    t2 : {"name" : "Bob", "address" : "Code square 5"}
+    Print(t2["address"])
+    t3 : {1, 2.5}
+    Print(t3[1])
+    t4 : {name: 1, age: 2}
+    Print(t4["age"])
+    t5 : {1, 3000000000}
+    Print(t5[1])
+    s1 = {9}
+    Print(s1.Len)
+    string [] words = Words()
+    Print(words[1])
+    Probe [] probes = {Probe(1), Probe(2)}
+    int [] empty = {}
+    Print(empty.Len)
+    Print("end")
+}
+]=] "7\n2\n4\nNew York\ncity\nBob\nadmin\n9\n6\n6\n5\n3\nCode square 5\n2.5\n2\n3000000000\n1\ngreen\n0\nend\n-1\n-2\n")
+reject(literal_empty "Main() { x : {} }" "cannot infer the type of an empty literal")
+reject(literal_heterogeneous "Main() { x : {1, \"a\"} }" "the elements of this literal have incompatible types, int and string")
+reject(literal_heterogeneous_values "Main() { x : {\"a\" : 1, \"b\" : \"c\"} }" "the values of this literal have incompatible types")
+reject(literal_mixed "Main() { x : {1, a: 2} }" "a literal cannot mix values and key : value entries")
+reject(literal_fixed_count "Main() { int [3] a = {1, 2} }" "a literal of type int \\[3\\] needs exactly 3 elements, got 2")
+reject(literal_keyed_array "Main() { int [] a = {\"k\" : 2} }" "lists values, not key : value entries")
+reject(literal_values_pair "Main() { string, int pair p = {1, 2} }" "a literal of type string, int pair lists key : value entries")
+reject(literal_scalar "Main() { int x = {1} }" "a \\{ ... \\} literal builds a container, array, queue, stack, or pair, not int")
+reject(literal_record_values "P { int X }\nMain() { P p = {1, 2} }" "a 'P' literal names its fields")
+reject(literal_print "Main() { Print({1}) }" "cannot print int \\[\\] directly")
 file(WRITE "${WORK}/property_library.dk" "Person\n{\n    -int Years = 20\n    Show() { Print(Title) }\n}\n@{\n    Age: Years\n    Title: \"person\"\n}\n={\n    Age: Years = value\n}\n")
 file(WRITE "${WORK}/property_client.dk" "Kid : Person { int Toys = 1 }\n@{ Title: \"kid\" }\nMain()\n{\n    Kid k()\n    k.Age += 2\n    Print(k.Age)\n    k.Show()\n}\n")
 execute_process(COMMAND "${COMPILER}" --library "${WORK}/property_library.dk" -o "${WORK}/property_library.ll" RESULT_VARIABLE status ERROR_VARIABLE errors)

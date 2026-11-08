@@ -131,7 +131,8 @@ class Parser {
     };
     if (!punct(at, "[")) return false;
     size_t close = at + 1;
-    if (close < tokens.size() && !tokens[close].string && std::isdigit(static_cast<unsigned char>(tokens[close].text[0])))
+    if (close < tokens.size() && !tokens[close].string &&
+        (std::isdigit(static_cast<unsigned char>(tokens[close].text[0])) || tokens[close].text == "-"))
       ++close;
     if (!punct(close, "]") || close + 1 >= tokens.size()) return false;
     const auto &next = tokens[close + 1];
@@ -166,24 +167,46 @@ class Parser {
   Type type() {
     Type t = plainType();
     // `T [N]` is a fixed array of N elements and `T []` a dynamic array.
+    // Further dimensions follow in index order: `T [5][10]` holds 5 arrays
+    // of 10. `T [-][-]` is a sparse grid indexed by any int coordinates.
     if (arraySuffix(pos)) {
-      pop();
-      unsigned long long extent = 0;
-      if (!at("]")) {
-        const auto count = pop();
-        if (integerLiteralBase(count.text) != 10 || count.text.find_first_not_of("0123456789") != std::string::npos)
-          fail(count, "a fixed array's length must be a decimal integer literal");
-        try {
-          extent = std::stoull(count.text);
-        } catch (const std::exception &) {
-          fail(count, "fixed array length is too large");
+      struct Dimension {
+        Token token;
+        unsigned long long extent = 0;
+        bool signedIndex = false;
+      };
+      std::vector<Dimension> dimensions;
+      while (arraySuffix(pos)) {
+        Dimension d{pop()};
+        if (accept("-")) d.signedIndex = true;
+        else if (!at("]")) {
+          const auto count = pop();
+          if (integerLiteralBase(count.text) != 10 ||
+              count.text.find_first_not_of("0123456789") != std::string::npos)
+            fail(count, "a fixed array's length must be a decimal integer literal");
+          try {
+            d.extent = std::stoull(count.text);
+          } catch (const std::exception &) {
+            fail(count, "fixed array length is too large");
+          }
+          if (d.extent == 0) fail(count, "a fixed array needs at least one element; use T [] for a dynamic array");
         }
-        if (extent == 0) fail(count, "a fixed array needs at least one element; use T [] for a dynamic array");
+        expect("]");
+        dimensions.push_back(d);
       }
-      expect("]");
-      if (arraySuffix(pos) || collectionWord())
-        fail(peek(), "arrays of arrays or collections are not supported yet; multidimensional arrays are a later item");
-      return Type::array(t, extent);
+      if (collectionWord()) fail(peek(), "arrays of collections are not supported yet");
+      size_t signedCount = 0;
+      for (const auto &d : dimensions) signedCount += d.signedIndex;
+      if (signedCount) {
+        if (signedCount != dimensions.size())
+          for (const auto &d : dimensions)
+            if (!d.signedIndex)
+              fail(d.token, "a signed [-] dimension cannot be mixed with [N] or [] dimensions; "
+                            "make every dimension [-]");
+        return Type::grid(t, unsigned(dimensions.size()));
+      }
+      for (size_t i = dimensions.size(); i-- > 0;) t = Type::array(t, dimensions[i].extent);
+      return t;
     }
     // `K, V pair` names a pair keyed by K.
     if (at(",")) {
@@ -310,6 +333,13 @@ class Parser {
     if (accept("-") || accept("!") || accept("~") || accept("&") || accept("*")) {
       e->kind = "unary";
       e->args.push_back(expression(11, stopAtPipe));
+    } else if (accept("?")) {
+      // `?a[i]` guards an index: a missing element skips a write and reads
+      // as the element type's default.
+      e->kind = "guard";
+      e->args.push_back(expression(11, stopAtPipe));
+      if (e->args[0]->kind != "index")
+        fail(e->token, "'?' guards an index such as ?a[i]; guarded member and call chains are not supported yet");
     } else if (accept("(")) {
       lines();
       if ((isType() && !constructorType() && !typeMember()) ||
@@ -322,19 +352,56 @@ class Parser {
       } else {
         e = expression();
         lines();
+        if (at("+=") || at("-=") || at("++") || at("--")) {
+          // `(s += x)` gives the inserted index; `(s--)` and `(s -= [i])`
+          // give the removed element.
+          auto mutation = std::make_unique<Expr>();
+          mutation->kind = "mutation";
+          mutation->token = pop();
+          mutation->args.push_back(std::move(e));
+          if (mutation->token.text == "+=" || mutation->token.text == "-=")
+            mutation->args.push_back(mutationOperand(mutation->token.text));
+          e = std::move(mutation);
+          lines();
+        }
         expect(")");
       }
     } else if (accept("{")) {
+      // A literal: `{X: 1}` initializes a container's fields, `{1, 2}` lists
+      // values, and `{"a" : 1}` lists keyed entries. A bare name before ':'
+      // is a field-style entry (its value first, then the name as written);
+      // the expected type decides what the literal builds.
       e->kind = "initializer";
       lines();
       while (!at("}")) {
-        auto field = std::make_unique<Expr>();
-        field->token = identifier();
-        field->kind = "fieldInitializer";
-        expect(":");
-        field->args.push_back(expression());
-        e->args.push_back(std::move(field));
-        if (!at("}") && !at("\n") && !at(",")) fail(peek(), "expected field separator");
+        // A word right before ':' is a field-style key, even a keyword such
+        // as `name` in {name: "Bob"}.
+        const auto &next = tokens.at(pos + 1);
+        std::unique_ptr<Expr> first;
+        if (!peek().string && (std::isalpha(static_cast<unsigned char>(peek().text[0])) || peek().text[0] == '_') &&
+            !next.string && next.text == ":") {
+          first = std::make_unique<Expr>();
+          first->kind = "name";
+          first->token = pop();
+        } else
+          first = expression();
+        if (accept(":")) {
+          auto entry = std::make_unique<Expr>();
+          if (first->kind == "name") {
+            entry->kind = "fieldInitializer";
+            entry->token = first->token;
+            entry->args.push_back(expression());
+            entry->args.push_back(std::move(first));
+          } else {
+            entry->kind = "entry";
+            entry->token = first->token;
+            entry->args.push_back(std::move(first));
+            entry->args.push_back(expression());
+          }
+          e->args.push_back(std::move(entry));
+        } else
+          e->args.push_back(std::move(first));
+        if (!at("}") && !at("\n") && !at(",")) fail(peek(), "expected ',' or a new line between literal entries");
         accept(",");
         lines();
       }
@@ -545,6 +612,37 @@ class Parser {
     expect(")");
     return arguments;
   }
+  // The right side of += or -=: `key : value` adds an entry to a pair, and
+  // `[i]` or `[key]` after -= names the element to remove.
+  std::unique_ptr<Expr> mutationOperand(const std::string &op) {
+    if (op == "-=" && at("[")) {
+      auto removal = std::make_unique<Expr>();
+      removal->kind = "removal";
+      removal->token = pop();
+      lines();
+      removal->args.push_back(expression());
+      lines();
+      expect("]");
+      while (at("[")) {
+        pop();
+        lines();
+        removal->args.push_back(expression());
+        lines();
+        expect("]");
+      }
+      return removal;
+    }
+    auto value = expression();
+    if (op == "+=" && at(":")) {
+      auto entry = std::make_unique<Expr>();
+      entry->kind = "entry";
+      entry->token = pop();
+      entry->args.push_back(std::move(value));
+      entry->args.push_back(expression());
+      return entry;
+    }
+    return value;
+  }
   std::unique_ptr<Stmt> simpleStatement() {
     auto s = std::make_unique<Stmt>();
     s->token = peek();
@@ -601,16 +699,8 @@ class Parser {
         auto op = pop().text;
         s->kind = op == "=" ? "assign" : op;
         s->target = std::move(target);
-        if (op != "++" && op != "--") s->expr = expression();
-        // `p += key : value` adds an entry to a pair.
-        if (op == "+=" && at(":")) {
-          auto entry = std::make_unique<Expr>();
-          entry->kind = "entry";
-          entry->token = pop();
-          entry->args.push_back(std::move(s->expr));
-          entry->args.push_back(expression());
-          s->expr = std::move(entry);
-        }
+        if (op == "+=" || op == "-=") s->expr = mutationOperand(op);
+        else if (op != "++" && op != "--") s->expr = expression();
       } else {
         s->kind = "expr";
         s->expr = std::move(target);

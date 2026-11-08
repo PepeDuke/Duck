@@ -214,10 +214,10 @@ struct Symbols : std::map<std::string, Signature> {
       const bool plain = !element.depth && (numeric(element) || element == Type::Bool || element == Type::Char ||
                                             enumValue(element) || managedValue(element) ||
                                             decimalValue(element) || calendarValue(element));
-      if (!plain && !recordValue(element))
+      if (!plain && !recordValue(element) && !arrayValue(element))
         fail(token, "an array cannot hold " + typeName(element) +
                         "; elements are numbers, bool, char, enums, string, name, big, tiny, dates and times, "
-                        "and containers");
+                        "containers, and arrays");
       validateType(element, token);
       return;
     }
@@ -233,8 +233,10 @@ struct Symbols : std::map<std::string, Signature> {
                             managedValue(t) || calendarValue(t));
       };
       if (!element(*type.element))
-        fail(token, "a collection cannot hold " + typeName(*type.element) +
+        fail(token, std::string(gridValue(type) ? "a grid" : "a collection") + " cannot hold " +
+                        typeName(*type.element) +
                         "; elements are numbers, bool, char, enums, string, name, big, tiny, and dates and times");
+      if (gridValue(type)) return validateType(*type.element, token);
       if (type.key && !key(*type.key))
         fail(token, "a pair cannot be keyed by " + typeName(*type.key) +
                         "; keys are integers, bool, char, enums, string, name, big, and dates and times");
@@ -377,6 +379,9 @@ struct FunctionIR {
   std::set<std::string> destroys;
   // Dispatch tables this function passes to methods.
   std::set<DispatchTable> tables;
+  // Module-level helper definitions by symbol, such as the cleanup of a
+  // nested array element; emitted once per module.
+  std::map<std::string, std::string> helpers;
 };
 FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
                          const FunctionAnalysis &analysis);

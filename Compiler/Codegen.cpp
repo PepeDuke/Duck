@@ -180,6 +180,7 @@ class Generator {
   bool usesCalendarRuntime = false, usesWideRuntime = false;
   bool usesBigRuntime = false, usesDecimalRuntime = false, usesCollectionRuntime = false;
   std::set<std::string> cleanups, destroys;
+  std::map<std::string, std::string> helpers;
   std::set<DispatchTable> tables;
   // The receiver's container inside a method, and whether the method takes
   // a dispatch table (%vt); constructors and destructors use their own
@@ -358,6 +359,8 @@ class Generator {
   // A generated initializer writes storage that was never constructed, so
   // overwriting it destroys nothing.
   bool initializer = false;
+  // Element slots a guarded assignment already found, keyed by its index.
+  std::map<const Expr *, std::string> guardedSlots;
   std::string fresh() { return "%v" + std::to_string(next++); }
   std::string label() { return "b" + std::to_string(next++); }
   void emit(const std::string &s) { code << "  " << s << '\n'; }
@@ -426,7 +429,39 @@ class Generator {
       usesTextRuntime = true;
       return "@duck$cleanup." + type.record;
     }
+    if (arrayValue(type) && functions.needsCleanup(type)) {
+      // An element that is itself an array: a dynamic one frees its storage
+      // and elements, a fixed one cleans up each element in place.
+      std::string name = "@duck$cleanup.array.";
+      for (unsigned char c : typeName(type))
+        if (std::isalnum(c)) name += char(c);
+        else name += "_x" + std::to_string(int(c));
+      if (helpers.count(name)) return name;
+      helpers[name] = "";
+      usesCollectionRuntime = true;
+      std::string body = "define internal void " + name + "(ptr %slot) {\nentry:\n";
+      if (dynamicArray(type)) {
+        body += "  %c = load ptr, ptr %slot\n  call void @duck.seq$free(ptr %c, ptr " +
+                elementCleanup(*type.element) + ")\n";
+      } else {
+        const auto [leaf, count] = flatten(type);
+        body += "  call void @duck.array$each(ptr %slot, i64 " + std::to_string(count) + ", i64 " + sizeOf(leaf) +
+                ", ptr " + elementCleanup(leaf) + ")\n";
+      }
+      helpers[name] = body + "  ret void\n}\n";
+      return name;
+    }
     return "null";
+  }
+  // A fixed array's innermost non-fixed element type and how many of them
+  // it stores contiguously: int [5][10] is 50 ints.
+  static std::pair<Type, unsigned long long> flatten(Type type) {
+    unsigned long long count = 1;
+    while (fixedArray(type)) {
+      count *= type.extent;
+      type = *type.element;
+    }
+    return {type, count};
   }
   void freeArray(const std::string &value, const Type &type) {
     usesCollectionRuntime = true;
@@ -441,7 +476,7 @@ class Generator {
   // Gives each element of a zeroed fixed array its default when zero bits
   // are not one: empty text, a zero big, or a container's constant default.
   void fillDefaults(const std::string &address, const Type &type) {
-    const auto &element = *type.element;
+    const auto [element, count] = flatten(type);
     std::string source;
     if (managedValue(element)) {
       Value empty;
@@ -458,8 +493,213 @@ class Generator {
       source = "@duck$default." + element.record;
     else return;
     usesCollectionRuntime = true;
-    emit("call void @duck.array$fill(ptr " + address + ", i64 " + std::to_string(type.extent) + ", i64 " +
+    emit("call void @duck.array$fill(ptr " + address + ", i64 " + std::to_string(count) + ", i64 " +
          sizeOf(element) + ", ptr " + source + ")");
+  }
+  // Adds key : value to the pair whose handle is at holder. A new key is
+  // appended with its value; an existing key keeps its place and gets the
+  // new value, and the duplicate key is released.
+  // Adds key : value, or replaces the value of a present key; gives the entry.
+  std::string pairPut(const std::string &holder, const Type &type, const Value &key, const Value &value) {
+    usesCollectionRuntime = true;
+    const auto probe = keySlot(key);
+    auto c = fresh(), found = fresh(), missing = fresh();
+    emit(c + " = load ptr, ptr " + holder);
+    emit(found + " = call ptr @duck.pair$find(ptr " + c + ", ptr " + probe + ", ptr " + keyEquality(*type.key) + ")");
+    emit(missing + " = icmp eq ptr " + found + ", null");
+    auto add = label(), replace = label(), join = label();
+    emit("br i1 " + missing + ", label %" + add + ", label %" + replace);
+    startBlock(add);
+    auto added = fresh();
+    emit(added + " = call ptr @duck.pair$append(ptr " + holder + ", i64 " + sizeOf(*type.key) + ", i64 " +
+         sizeOf(*type.element) + ")");
+    emit("call void @duck.mem$copy(ptr " + added + ", ptr " + probe + ", i64 " + sizeOf(*type.key) + ")");
+    const auto addEnd = currentBlock;
+    emit("br label %" + join);
+    startBlock(replace);
+    release(key);
+    if (managedValue(*type.element)) {
+      auto previous = fresh(), old = fresh();
+      emit(previous + " = call ptr @duck.pair$value(ptr " + c + ", ptr " + found + ")");
+      emit(old + " = load ptr, ptr " + previous);
+      release({*type.element, old});
+    }
+    const auto replaceEnd = currentBlock;
+    emit("br label %" + join);
+    startBlock(join);
+    auto entry = fresh(), current = fresh(), slot = fresh();
+    emit(entry + " = phi ptr [" + added + ", %" + addEnd + "], [" + found + ", %" + replaceEnd + "]");
+    emit(current + " = load ptr, ptr " + holder);
+    emit(slot + " = call ptr @duck.pair$value(ptr " + current + ", ptr " + entry + ")");
+    emit("store " + irType(value.type) + " " + value.value + ", ptr " + slot);
+    return entry;
+  }
+  // The key p++ adds: 0 for an empty pair, else the last key added plus 1.
+  // Trap when that overflows or is already present.
+  Value nextKey(const std::string &holder, const Type &type) {
+    const auto &keyType = *type.key;
+    const auto key = irType(keyType);
+    auto c = fresh(), count = fresh(), empty = fresh();
+    emit(c + " = load ptr, ptr " + holder);
+    emit(count + " = call i64 @duck.pair$length(ptr " + c + ")");
+    emit(empty + " = icmp eq i64 " + count + ", 0");
+    auto first = label(), after = label(), join = label();
+    emit("br i1 " + empty + ", label %" + first + ", label %" + after);
+    startBlock(first);
+    emit("br label %" + join);
+    startBlock(after);
+    auto entry = fresh(), last = fresh(), next = fresh(), wrapped = fresh(), fits = fresh();
+    emit(entry + " = call ptr @duck.pair$last(ptr " + c + ")");
+    emit(last + " = load " + key + ", ptr " + entry);
+    emit(next + " = add " + key + " " + last + ", 1");
+    emit(wrapped + " = icmp " + (unsignedInteger(keyType) ? "ult " : "slt ") + key + " " + next + ", " + last);
+    emit(fits + " = xor i1 " + wrapped + ", true");
+    require(fits);
+    const auto afterEnd = currentBlock;
+    emit("br label %" + join);
+    startBlock(join);
+    auto chosen = fresh(), found = fresh(), fresh_ = fresh();
+    emit(chosen + " = phi " + key + " [0, %" + first + "], [" + next + ", %" + afterEnd + "]");
+    const Value result{keyType, chosen};
+    emit(found + " = call ptr @duck.pair$find(ptr " + c + ", ptr " + keySlot(result) + ", ptr null)");
+    emit(fresh_ + " = icmp eq ptr " + found + ", null");
+    require(fresh_);
+    return result;
+  }
+  // Lowers a collection mutation (see Analyzer::collectionMutation). With
+  // result, gives the inserted index for += and ++ or the removed element
+  // for -- and -= [i]; a removed element moves out instead of being released.
+  Value mutate(const Expr &target, const std::string &op, const Expr *operand, bool result) {
+    usesCollectionRuntime = true;
+    const auto type = analysis.expressionTypes.at(&target);
+    const auto &element = *type.element;
+    const bool pair = type.base == Type::Pair;
+    if (op == "+=" || op == "++") {
+      if (pair) {
+        Value key, value;
+        std::string holder;
+        if (op == "+=") {
+          key = expression(*operand->args[0]);
+          value = expression(*operand->args[1]);
+          holder = location(target).value;
+        } else {
+          holder = location(target).value;
+          key = nextKey(holder, type);
+          value = missingElement(element);
+        }
+        const auto entry = pairPut(holder, type, key, value);
+        if (!result) return {};
+        auto c = fresh(), index = fresh();
+        emit(c + " = load ptr, ptr " + holder);
+        emit(index + " = call i64 @duck.pair$position(ptr " + c + ", ptr " + entry + ")");
+        return {Type::Long, index};
+      }
+      // The value moves into the new last slot; growing moves the existing
+      // elements bytewise into the larger buffer.
+      const auto value = op == "+=" ? expression(*operand) : missingElement(element);
+      const auto holder = location(target).value;
+      auto c = fresh(), index = fresh(), slot = fresh();
+      emit(c + " = load ptr, ptr " + holder);
+      emit(index + " = call i64 @duck.seq$length(ptr " + c + ")");
+      emit(slot + " = call ptr @duck.seq$push(ptr " + holder + ", i64 " + sizeOf(element) + ")");
+      emit("store " + irType(value.type) + " " + value.value + ", ptr " + slot);
+      return {Type::Long, index};
+    }
+    // Releases or moves out the element in slot.
+    auto take = [&](const std::string &slot, const std::string &cleanup) -> Value {
+      if (result) {
+        auto v = fresh();
+        emit(v + " = load " + irType(element) + ", ptr " + slot);
+        return {element, v};
+      }
+      if (cleanup != "null") emit("call void " + cleanup + "(ptr " + slot + ")");
+      return {};
+    };
+    const auto holder = location(target).value;
+    if (op == "--") {
+      auto c = fresh(), slot = fresh();
+      emit(c + " = load ptr, ptr " + holder);
+      if (pair) {
+        auto entry = fresh();
+        emit(entry + " = call ptr @duck.pair$last(ptr " + c + ")");
+        emit(slot + " = call ptr @duck.pair$value(ptr " + c + ", ptr " + entry + ")");
+        const auto v = take(slot, slotRelease(element));
+        emit("call void @duck.pair$dropLast(ptr " + c + ", ptr " + slotRelease(*type.key) + ", ptr null)");
+        return v;
+      }
+      const std::string back = type.base == Type::Queue ? "0" : "1";
+      emit(slot + " = call ptr @duck.seq$at(ptr " + c + ", i1 " + back + ")");
+      const auto v = take(slot, dynamicArray(type) ? elementCleanup(element) : slotRelease(element));
+      emit("call void @duck.seq$drop(ptr " + c + ", i1 " + back + ", ptr null)");
+      return v;
+    }
+    // -= [i] or -= [key]: the element must exist.
+    const auto &which = *operand->args[0];
+    if (pair) {
+      std::vector<const Expr *> coordinates;
+      for (const auto &coordinate : operand->args) coordinates.push_back(coordinate.get());
+      const auto key = gridValue(type) ? gridKey(type, coordinates) : expression(which);
+      auto c = fresh(), entry = fresh(), found = fresh(), slot = fresh();
+      emit(c + " = load ptr, ptr " + holder);
+      emit(entry + " = call ptr @duck.pair$find(ptr " + c + ", ptr " + keySlot(key) + ", ptr " +
+           keyEquality(*type.key) + ")");
+      release(key);
+      emit(found + " = icmp ne ptr " + entry + ", null");
+      require(found);
+      if (const auto releaseKey = slotRelease(*type.key); releaseKey != "null")
+        emit("call void " + releaseKey + "(ptr " + entry + ")");
+      emit(slot + " = call ptr @duck.pair$value(ptr " + c + ", ptr " + entry + ")");
+      const auto v = take(slot, slotRelease(element));
+      emit("call void @duck.pair$remove(ptr " + c + ", ptr " + entry + ")");
+      return v;
+    }
+    const auto index = expression(which);
+    auto c = fresh(), slot = fresh();
+    emit(c + " = load ptr, ptr " + holder);
+    emit(slot + " = call ptr @duck.seq$index(ptr " + c + ", i64 " + index.value + ")");
+    const auto v = take(slot, elementCleanup(element));
+    emit("call void @duck.seq$removeAt(ptr " + c + ", i64 " + index.value + ")");
+    return v;
+  }
+  // A sequence or pair literal: a fixed array is built as an aggregate, and
+  // the others in a fresh handle, adding the entries in order.
+  Value literal(const Expr &e, const Type &type) {
+    if (fixedArray(type)) {
+      std::string value = "zeroinitializer";
+      for (size_t i = 0; i < e.args.size(); ++i) {
+        const auto element = expression(*e.args[i]);
+        auto next = fresh();
+        emit(next + " = insertvalue " + irType(type) + " " + value + ", " + irType(element.type) + " " +
+             element.value + ", " + std::to_string(i));
+        value = next;
+      }
+      return {type, value};
+    }
+    usesCollectionRuntime = true;
+    auto holder = fresh();
+    allocations << "  " << holder << " = alloca ptr\n";
+    emit("store ptr null, ptr " + holder);
+    for (const auto &entry : e.args) {
+      if (type.base != Type::Pair) {
+        const auto value = expression(*entry);
+        auto slot = fresh();
+        emit(slot + " = call ptr @duck.seq$push(ptr " + holder + ", i64 " + sizeOf(*type.element) + ")");
+        emit("store " + irType(value.type) + " " + value.value + ", ptr " + slot);
+        continue;
+      }
+      Value key;
+      if (entry->kind == "entry") key = expression(*entry->args[0]);
+      else if (*type.key == Type::Name) {
+        key = {Type::Name, "@str." + symbolPrefix + "." + std::to_string(strings++)};
+        globals << managedTextGlobal(key.value, entry->token, Type::Name);
+      } else
+        key = expression(*entry->args[1]);
+      const auto value = expression(*(entry->kind == "entry" ? entry->args[1] : entry->args[0]));
+      pairPut(holder, type, key, value);
+    }
+    auto result = fresh();
+    emit(result + " = load ptr, ptr " + holder);
+    return {type, result};
   }
   void freeCollection(const std::string &value, const Type &type) {
     usesCollectionRuntime = true;
@@ -1071,24 +1311,8 @@ class Generator {
     auto type = analysis.expressionTypes.at(&e);
     if (e.kind == "unary") return {type, dereference(*e.args[0]).value};
     if (e.kind == "index") {
-      // The array and the index are evaluated once; an index outside the
-      // array traps.
-      const auto array = analysis.expressionTypes.at(e.args[0].get());
-      const auto holder = location(*e.args[0]).value;
-      const auto index = expression(*e.args[1]);
-      auto slot = fresh();
-      if (array.extent) {
-        auto valid = fresh();
-        emit(valid + " = icmp ult i64 " + index.value + ", " + std::to_string(array.extent));
-        require(valid);
-        emit(slot + " = getelementptr " + irType(array) + ", ptr " + holder + ", i64 0, i64 " + index.value);
-      } else {
-        usesCollectionRuntime = true;
-        auto c = fresh();
-        emit(c + " = load ptr, ptr " + holder);
-        emit(slot + " = call ptr @duck.seq$index(ptr " + c + ", i64 " + index.value + ")");
-      }
-      return {type, slot};
+      if (auto found = guardedSlots.find(&e); found != guardedSlots.end()) return {type, found->second};
+      return {type, elementSlot(e, false)};
     }
     const auto &base = *e.args[0];
     auto record = analysis.expressionTypes.at(&base);
@@ -1103,8 +1327,160 @@ class Generator {
          ", i32 0" + indexList(analysis.fieldIndices.at(&e)));
     return {type, id};
   }
+  // The slot of a[i] or p[key]. The collection and the index or key are
+  // evaluated once. A missing element traps, or with guarded gives null.
+  std::string elementSlot(const Expr &e, bool guarded) {
+    if (std::vector<const Expr *> coordinates; const auto *grid = gridRoot(e, coordinates))
+      return gridSlot(*grid, coordinates, !guarded);
+    const auto holderType = analysis.expressionTypes.at(e.args[0].get());
+    const auto &base = *e.args[0];
+    if (guarded && base.kind == "index") {
+      // ?a[i][j]: a missing outer element skips the inner index.
+      const auto outer = elementSlot(base, true);
+      auto ok = fresh(), inside = label(), done = label(), slot = fresh();
+      emit(ok + " = icmp ne ptr " + outer + ", null");
+      const auto from = currentBlock;
+      emit("br i1 " + ok + ", label %" + inside + ", label %" + done);
+      startBlock(inside);
+      const auto inner = slotIn(e, holderType, outer, true);
+      const auto end = currentBlock;
+      emit("br label %" + done);
+      startBlock(done);
+      emit(slot + " = phi ptr [null, %" + from + "], [" + inner + ", %" + end + "]");
+      return slot;
+    }
+    return slotIn(e, holderType, location(base).value, guarded);
+  }
+  // The slot of e's element in the array or pair stored at holder.
+  std::string slotIn(const Expr &e, const Type &holderType, const std::string &holder, bool guarded) {
+    auto slot = fresh();
+    if (holderType.base == Type::Pair) {
+      usesCollectionRuntime = true;
+      auto c = fresh();
+      emit(c + " = load ptr, ptr " + holder);
+      const auto key = expression(*e.args[1]);
+      emit(slot + " = call ptr @duck.pair$lookup(ptr " + c + ", ptr " + keySlot(key) + ", ptr " +
+           keyEquality(*holderType.key) + ")");
+      release(key);
+      if (!guarded) {
+        auto found = fresh();
+        emit(found + " = icmp ne ptr " + slot + ", null");
+        require(found);
+      }
+      return slot;
+    }
+    const auto index = expression(*e.args[1]);
+    if (holderType.extent) {
+      auto valid = fresh(), address = guarded ? fresh() : slot;
+      emit(valid + " = icmp ult i64 " + index.value + ", " + std::to_string(holderType.extent));
+      if (!guarded) require(valid);
+      emit(address + " = getelementptr " + irType(holderType) + ", ptr " + holder + ", i64 0, i64 " + index.value);
+      if (guarded) emit(slot + " = select i1 " + valid + ", ptr " + address + ", ptr null");
+      return slot;
+    }
+    usesCollectionRuntime = true;
+    auto c = fresh();
+    emit(c + " = load ptr, ptr " + holder);
+    emit(slot + " = call ptr @duck.seq$" + (guarded ? "find" : "index") + "(ptr " + c + ", i64 " + index.value + ")");
+    return slot;
+  }
+  // The element at slot, or the element type's default when slot is null.
+  Value readOrDefault(const std::string &slot, const Type &type) {
+    auto result = fresh(), found = fresh(), hit = label(), miss = label(), done = label();
+    allocations << "  " << result << " = alloca " << irType(type) << '\n';
+    emit(found + " = icmp ne ptr " + slot + ", null");
+    emit("br i1 " + found + ", label %" + hit + ", label %" + miss);
+    startBlock(hit);
+    emit("store " + irType(type) + " " + loadSlot(slot, type).value + ", ptr " + result);
+    emit("br label %" + done);
+    startBlock(miss);
+    emit("store " + irType(type) + " " + missingElement(type).value + ", ptr " + result);
+    emit("br label %" + done);
+    startBlock(done);
+    auto value = fresh();
+    emit(value + " = load " + irType(type) + ", ptr " + result);
+    return {type, value};
+  }
+  // grid[x][y]: the stored grid it indexes and its coordinates, outermost
+  // first; null when e does not index into a grid.
+  const Expr *gridRoot(const Expr &e, std::vector<const Expr *> &coordinates) const {
+    std::vector<const Expr *> found;
+    const Expr *root = &e;
+    while (root->kind == "index") {
+      found.insert(found.begin(), root->args[1].get());
+      root = root->args[0].get();
+    }
+    const auto type = analysis.expressionTypes.find(root);
+    if (type == analysis.expressionTypes.end() || !gridValue(type->second)) return nullptr;
+    coordinates = std::move(found);
+    return root;
+  }
+  // The [N x int] key of a grid cell.
+  Value gridKey(const Type &grid, const std::vector<const Expr *> &coordinates) {
+    std::string value = "zeroinitializer";
+    for (size_t i = 0; i < coordinates.size(); ++i) {
+      const auto coordinate = expression(*coordinates[i]);
+      auto next = fresh();
+      emit(next + " = insertvalue " + irType(*grid.key) + " " + value + ", i32 " + coordinate.value + ", " +
+           std::to_string(i));
+      value = next;
+    }
+    return {*grid.key, value};
+  }
+  // The value slot of a grid cell. A missing cell gives null, or with
+  // insert is stored with the element default first.
+  std::string gridSlot(const Expr &root, const std::vector<const Expr *> &coordinates, bool insert) {
+    usesCollectionRuntime = true;
+    const auto type = analysis.expressionTypes.at(&root);
+    const auto holder = location(root).value;
+    const auto key = gridKey(type, coordinates);
+    auto c = fresh(), slot = fresh();
+    emit(c + " = load ptr, ptr " + holder);
+    emit(slot + " = call ptr @duck.pair$lookup(ptr " + c + ", ptr " + keySlot(key) + ", ptr null)");
+    if (!insert) return slot;
+    auto missing = fresh(), add = label(), done = label(), result = fresh();
+    emit(missing + " = icmp eq ptr " + slot + ", null");
+    const auto from = currentBlock;
+    emit("br i1 " + missing + ", label %" + add + ", label %" + done);
+    startBlock(add);
+    const auto entry = pairPut(holder, type, key, missingElement(*type.element));
+    auto current = fresh(), added = fresh();
+    emit(current + " = load ptr, ptr " + holder);
+    emit(added + " = call ptr @duck.pair$value(ptr " + current + ", ptr " + entry + ")");
+    const auto end = currentBlock;
+    emit("br label %" + done);
+    startBlock(done);
+    emit(result + " = phi ptr [" + slot + ", %" + from + "], [" + added + ", %" + end + "]");
+    return result;
+  }
+  // The value a guarded read gives for a missing element: zero, empty
+  // text, a zero big, or a container's default.
+  Value missingElement(const Type &type) {
+    if (recordValue(type)) return {type, defaultValue(type)};
+    if (fixedArray(type)) {
+      auto slot = fresh(), value = fresh();
+      allocations << "  " << slot << " = alloca " << irType(type) << '\n';
+      emit("store " + irType(type) + " zeroinitializer, ptr " + slot);
+      fillDefaults(slot, type);
+      emit(value + " = load " + irType(type) + ", ptr " + slot);
+      return {type, value};
+    }
+    if (bigInteger(type)) return bigLiteral("0", type);
+    if (managedText(type)) {
+      Value empty{type, "@str." + symbolPrefix + "." + std::to_string(strings++)};
+      globals << managedTextGlobal(empty.value, Token{}, type);
+      return empty;
+    }
+    return {type, "zeroinitializer"};
+  }
   Value lowerExpression(const Expr &e) {
     const auto &op = e.token.text;
+    if (e.kind == "mutation") return mutate(*e.args[0], op, e.args.size() > 1 ? e.args[1].get() : nullptr, true);
+    if (e.kind == "guard") return readOrDefault(elementSlot(*e.args[0], true), analysis.expressionTypes.at(&e));
+    // Reading an unwritten grid cell gives the default without storing it.
+    if (std::vector<const Expr *> coordinates; e.kind == "index")
+      if (const auto *grid = gridRoot(e, coordinates))
+        return readOrDefault(gridSlot(*grid, coordinates, false), analysis.expressionTypes.at(&e));
     auto integer = analysis.integerConstants.find(&e);
     if (integer != analysis.integerConstants.end())
     {
@@ -1116,6 +1492,8 @@ class Generator {
     if (decimal != analysis.decimalConstants.end())
       return {analysis.expressionTypes.at(&e),
               "{ i256 " + decimal->second.first + ", i32 " + decimal->second.second + " }"};
+    if (e.kind == "initializer" && !recordValue(analysis.expressionTypes.at(&e)))
+      return literal(e, analysis.expressionTypes.at(&e));
     if (e.kind == "initializer") {
       auto type = analysis.expressionTypes.at(&e);
       // Unnamed fields take their defaults; a named field's default is never
@@ -1174,9 +1552,10 @@ class Generator {
       usesCollectionRuntime = true;
       const auto type = analysis.expressionTypes.at(e.args[0].get());
       auto c = fresh();
-      if (!fixedArray(type)) emit(c + " = load ptr, ptr " + location(*e.args[0]).value);
-      const auto &name = member->second;
+      const auto holder = location(*e.args[0]).value;
       if (fixedArray(type)) return {Type::Long, std::to_string(type.extent)};
+      emit(c + " = load ptr, ptr " + holder);
+      const auto &name = member->second;
       if (name == "Len") {
         auto n = fresh();
         emit(n + " = call i64 @duck." + std::string(type.base == Type::Pair ? "pair" : "seq") + "$length(ptr " + c +
@@ -1195,18 +1574,7 @@ class Generator {
     }
     if (e.kind == "index" && analysis.expressionTypes.at(e.args[0].get()).base == Type::Pair &&
         !analysis.expressionTypes.at(e.args[0].get()).depth) {
-      usesCollectionRuntime = true;
-      const auto type = analysis.expressionTypes.at(e.args[0].get());
-      auto c = fresh(), entry = fresh(), found = fresh(), slot = fresh();
-      emit(c + " = load ptr, ptr " + location(*e.args[0]).value);
-      const auto key = expression(*e.args[1]);
-      emit(entry + " = call ptr @duck.pair$find(ptr " + c + ", ptr " + keySlot(key) + ", ptr " +
-           keyEquality(*type.key) + ")");
-      release(key);
-      emit(found + " = icmp ne ptr " + entry + ", null");
-      require(found);
-      emit(slot + " = call ptr @duck.pair$value(ptr " + c + ", ptr " + entry + ")");
-      return loadSlot(slot, *type.element);
+      return loadSlot(elementSlot(e, false), analysis.expressionTypes.at(&e));
     }
     if (e.addressable()) {
       auto v = location(e);
@@ -1221,6 +1589,18 @@ class Generator {
       return {v.type, id};
     }
     if (e.kind == "call") {
+      if (e.receiver && memberName(op) == "Clear")
+        if (const auto held = analysis.expressionTypes.find(e.receiver.get());
+            held != analysis.expressionTypes.end() &&
+            (dynamicArray(held->second) || collectionValue(held->second))) {
+          // Frees the elements and the storage; the collection is empty again.
+          const auto holder = location(*e.receiver).value;
+          auto c = fresh();
+          emit(c + " = load ptr, ptr " + holder);
+          release({held->second, c});
+          emit("store ptr null, ptr " + holder);
+          return {Type::Void, ""};
+        }
       if (auto constructed = analysis.constructions.find(&e); constructed != analysis.constructions.end()) {
         const auto type = analysis.expressionTypes.at(&e);
         if (functions.parts(type.record).empty()) return {type, defaultValue(type)};
@@ -1286,6 +1666,11 @@ class Generator {
         }
         release(text);
         return {op == "Length" ? Type::Long : Type::UInt32, id};
+      }
+      if (op == "IsValid" && !e.receiver) {
+        auto valid = fresh();
+        emit(valid + " = icmp ne ptr " + elementSlot(*e.args[0], true) + ", null");
+        return {Type::Bool, valid};
       }
       if (op == "Print") {
 
@@ -1781,80 +2166,9 @@ class Generator {
                s.kind == "/=" || s.kind == "%=" || s.kind == "&=" ||
                s.kind == "|=" || s.kind == "^=" ||
                s.kind == "<<=" || s.kind == ">>=") {
-      if (const auto type = analysis.expressionTypes.at(s.target.get()); dynamicArray(type) && s.kind != "assign") {
-        usesCollectionRuntime = true;
-        if (s.kind == "--") {
-          auto c = fresh();
-          emit(c + " = load ptr, ptr " + location(*s.target).value);
-          emit("call void @duck.seq$drop(ptr " + c + ", i1 1, ptr " + elementCleanup(*type.element) + ")");
-          return false;
-        }
-        // The value moves into the new last slot; growing moves the
-        // existing elements bytewise into the larger buffer.
-        const auto value = expression(*s.expr);
-        const auto holder = location(*s.target).value;
-        auto slot = fresh();
-        emit(slot + " = call ptr @duck.seq$push(ptr " + holder + ", i64 " + sizeOf(*type.element) + ")");
-        emit("store " + irType(value.type) + " " + value.value + ", ptr " + slot);
-        return false;
-      }
-      if (const auto type = analysis.expressionTypes.at(s.target.get()); collectionValue(type) && s.kind != "assign") {
-        usesCollectionRuntime = true;
-        if (s.kind == "--") {
-          auto c = fresh();
-          emit(c + " = load ptr, ptr " + location(*s.target).value);
-          if (type.base == Type::Pair)
-            emit("call void @duck.pair$dropLast(ptr " + c + ", ptr " + slotRelease(*type.key) + ", ptr " +
-                 slotRelease(*type.element) + ")");
-          else
-            emit("call void @duck.seq$drop(ptr " + c + ", i1 " + (type.base == Type::Stack ? "1" : "0") +
-                 ", ptr " + slotRelease(*type.element) + ")");
-          return false;
-        }
-        if (type.base != Type::Pair) {
-          const auto value = expression(*s.expr);
-          const auto holder = location(*s.target).value;
-          auto slot = fresh();
-          emit(slot + " = call ptr @duck.seq$push(ptr " + holder + ", i64 " + sizeOf(*type.element) + ")");
-          emit("store " + irType(value.type) + " " + value.value + ", ptr " + slot);
-          return false;
-        }
-        // A new key is appended with its value; an existing key keeps its
-        // place and gets the new value, and the duplicate key is released.
-        const auto key = expression(*s.expr->args[0]);
-        const auto value = expression(*s.expr->args[1]);
-        const auto holder = location(*s.target).value;
-        const auto probe = keySlot(key);
-        auto c = fresh(), found = fresh(), missing = fresh();
-        emit(c + " = load ptr, ptr " + holder);
-        emit(found + " = call ptr @duck.pair$find(ptr " + c + ", ptr " + probe + ", ptr " +
-             keyEquality(*type.key) + ")");
-        emit(missing + " = icmp eq ptr " + found + ", null");
-        auto add = label(), replace = label(), join = label();
-        emit("br i1 " + missing + ", label %" + add + ", label %" + replace);
-        startBlock(add);
-        auto added = fresh();
-        emit(added + " = call ptr @duck.pair$append(ptr " + holder + ", i64 " + sizeOf(*type.key) + ", i64 " +
-             sizeOf(*type.element) + ")");
-        emit("call void @duck.mem$copy(ptr " + added + ", ptr " + probe + ", i64 " + sizeOf(*type.key) + ")");
-        const auto addEnd = currentBlock;
-        emit("br label %" + join);
-        startBlock(replace);
-        release(key);
-        if (managedValue(*type.element)) {
-          auto previous = fresh(), old = fresh();
-          emit(previous + " = call ptr @duck.pair$value(ptr " + c + ", ptr " + found + ")");
-          emit(old + " = load ptr, ptr " + previous);
-          release({*type.element, old});
-        }
-        const auto replaceEnd = currentBlock;
-        emit("br label %" + join);
-        startBlock(join);
-        auto entry = fresh(), current = fresh(), slot = fresh();
-        emit(entry + " = phi ptr [" + added + ", %" + addEnd + "], [" + found + ", %" + replaceEnd + "]");
-        emit(current + " = load ptr, ptr " + holder);
-        emit(slot + " = call ptr @duck.pair$value(ptr " + current + ", ptr " + entry + ")");
-        emit("store " + irType(value.type) + " " + value.value + ", ptr " + slot);
+      if (const auto type = analysis.expressionTypes.at(s.target.get());
+          (dynamicArray(type) || collectionValue(type)) && s.kind != "assign") {
+        mutate(*s.target, s.kind, s.expr.get(), false);
         return false;
       }
       if (auto property = analysis.properties.find(s.target.get()); property != analysis.properties.end()) {
@@ -1873,7 +2187,20 @@ class Generator {
         release(v);
         return false;
       }
-      auto address = location(*s.target);
+      // `?a[i] op= v` finds the element first and skips the whole
+      // assignment, including evaluating v, when it is missing.
+      std::string skip;
+      const auto &target = s.target->kind == "guard" ? *s.target->args[0] : *s.target;
+      if (&target != s.target.get()) {
+        const auto slot = elementSlot(target, true);
+        auto found = fresh(), hit = label();
+        skip = label();
+        emit(found + " = icmp ne ptr " + slot + ", null");
+        emit("br i1 " + found + ", label %" + hit + ", label %" + skip);
+        startBlock(hit);
+        guardedSlots[&target] = slot;
+      }
+      auto address = location(target);
       if (address.type.role != Type::Raw) {
         auto word = aliasWord(*s.expr); // Retain first, including on self-assignment.
         releaseBinding(address);
@@ -1899,6 +2226,11 @@ class Generator {
       releaseBinding(address, !initializer);
       emit("store " + irType(v.type) + " " + v.value + ", ptr " +
            address.value);
+      if (!skip.empty()) {
+        guardedSlots.erase(&target);
+        emit("br label %" + skip);
+        startBlock(skip);
+      }
     } else
       release(expression(*s.expr));
     return false;
@@ -1959,7 +2291,7 @@ public:
     output << ") {\nentry:\n" << allocations.str() << code.str() << "}\n\n" << thunks.str();
     return {globals.str(), output.str(), usesTextRuntime, usesHeapRuntime, usesTaskRuntime,
             usesCalendarRuntime, usesWideRuntime, usesBigRuntime, usesDecimalRuntime, usesCollectionRuntime,
-            cleanups, destroys, tables};
+            cleanups, destroys, tables, helpers};
   }
 };
 } // namespace

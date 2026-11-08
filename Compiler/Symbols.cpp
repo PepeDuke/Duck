@@ -695,6 +695,10 @@ void validateLifetimes(const Symbols &symbols) {
         fail(field.name, "field '" + field.name.text + "' cannot hold " + typeName(field.type) +
                              " yet: its elements need defaults or cleanup; use a dynamic array (" +
                              typeName(*field.type.element) + " [])");
+      else if (dynamicArray(field.type) && arrayValue(*field.type.element))
+        fail(field.name, "field '" + field.name.text + "' cannot hold " + typeName(field.type) +
+                             " yet: a container field holds nested arrays only with fixed, plain "
+                             "dimensions, as in int [3][4]");
   for (const auto &[name, info] : symbols.statics)
     if (arrayValue(info.type))
       fail(info.declaration, "static field '" + name + "' cannot hold an array yet");

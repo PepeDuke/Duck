@@ -844,9 +844,12 @@ assignment, passed by reference (from a fixed array), and reached through
 (`points[1].X`). The array and the index are evaluated once, and an index
 outside `0 <= i < Len`, or `--` on an empty array, traps. Indexes are
 integers. Elements are numbers, `bool`, `char`, enums, `string`, `name`,
-`big`, `tiny`, dates and times, and containers; arrays of arrays and of
-collections, literals, and the other mutations (`-= [i]`, `++`, `Clear()`,
-`(a += x)` results), `IsValid`, and `?a[i]` are later items.
+`big`, `tiny`, dates and times, containers, and other arrays (see
+[Multidimensional arrays and grids](#multidimensional-arrays-and-grids));
+arrays of collections are a later item. See [Indexing and bounds
+checks](#indexing-and-bounds-checks) for `IsValid` and `?a[i]`, and
+[Collection mutations](#collection-mutations) for `++`, `-= [i]`,
+`Clear()`, and the results of `(a += x)` and `(a--)`.
 
 A fixed array is a value of `[N x T]`. Declared without an initializer, it
 starts zeroed and then copies each element's default into place: empty text,
@@ -869,6 +872,40 @@ releasing text and `big` values, and running a container's heap cleanup
 of a dynamic array cannot be passed by reference or have its address taken,
 because growing the array would move it. Dynamic arrays are move-only: pass
 them by reference and return locals to move them.
+
+## Collection literals
+
+```duck
+int [] values = {5, 1, 2}
+int [3] fixed = {7, 8, 9}             // exactly as many as the length
+int queue waiting = {2, 3, 4}         // 2 comes out first
+int stack pile = {2, 3, 4}            // 4 comes off first
+string, string pair town = {"name" : "Bob", "city" : "York"}
+string pair person = {name: "Bob", role: "admin"}   // bare words are name keys
+Point [] points = {{X: 1}, {X: 4, Y: 5}}
+values = {9}                          // replaces (and frees) the old contents
+
+guesses : {5, 1, 2}                   // int []
+mixed : {1, 2.5}                      // double []
+ages : {"Ada" : 36, "Alan" : 41}      // string, int pair
+```
+
+A `{ ... }` literal takes its meaning from the type it initializes, assigns,
+passes, or returns: `Name: value` entries initialize a container's fields,
+plain values fill an array, queue, or stack in order, and `key : value`
+entries fill a pair in order (a repeated key replaces its value in place).
+In a pair keyed by `name`, a bare word before `:` is the key itself, so
+`{name: "Bob"}` works even though `name` is a type; in other pairs it is a
+variable holding the key. A word followed by `:` is always read as such a
+key, so a variable used as a key in an untyped literal needs another form.
+
+Without an expected type, as in `x : { ... }`, plain values make a dynamic
+array and `key : value` entries a pair (bare-word keys are names), of the
+entries' common type: equal types, or numbers widened as arithmetic would
+widen them. Queues and stacks are never inferred. An empty literal, a mix of
+values and entries, and entries whose types have no common type are rejected;
+declare the type instead. Nested literals take their element type, so
+`{{X: 1}}` builds `Point` elements of a `Point []`.
 
 ## Queues, stacks, and pairs
 
@@ -919,8 +956,163 @@ head and a stack at the back. A pair keeps entries (key, then value at a
 16-byte-aligned offset) in insertion order and finds keys by a linear scan,
 comparing `string`, `name`, and `big` keys by value and other keys bytewise
 after zero-filling them. The runtime is emitted module-locally from
-`CollectionRuntime.cpp`. Literals, `++`, `-= [key]`, `Clear()`, writes
-through `p[key]`, and the results of `(q += x)` and `(q--)` are later items.
+`CollectionRuntime.cpp`.
+
+## Multidimensional arrays and grids
+
+```duck
+int [2][3] table          // 2 arrays of 3 ints, stored inline: table[1][2] is the last
+int [][] rows             // a dynamic array of dynamic arrays
+int [3][] buckets         // 3 dynamic arrays, inline
+string [][4] lines        // a dynamic array of string [4]
+int [-][-] grid           // a sparse grid indexed by any int coordinates
+
+table[1][2] += 10
+rows++                    // adds an empty row
+rows[0] += 7              // appends to row 0
+rows += {1, 2, 3}         // adds a row
+grid[-2][1] = 5           // stores the cell
+Print(grid[100][100])     // 0: an unwritten cell reads as the default
+nested : {{1}, {2, 3}}    // int [][]
+```
+
+Dimensions are written type-first, in index order: `T [5][10]` is 5
+arrays of `T [10]`. Each `[N]` dimension is fixed and each `[]` dynamic,
+and they mix freely. An array of arrays is an ordinary array whose element
+is an array, so everything above applies at every level. `a[i]` names a
+whole inner array: `a[i].Len`, `a[i] += x`, `a[i] -= [j]`, and passing a
+fixed `a[i]` by reference all work. Each index is checked against its own
+dimension before the next is applied, so a fixed `int [2][3]` traps on
+`a[0][3]` instead of reading `a[1][0]`. A fixed array of fixed arrays is
+one contiguous `[2 x [3 x i32]]`; its defaults and cleanup cover all six
+elements. A dynamic row is a pointer, so an array holding one is
+move-only. Freeing it frees each row and each row's elements, through a
+generated per-module `@duck$cleanup.array.*` helper.
+
+`?a[i][j]` and `IsValid(a[i][j])` cover the whole chain: a missing outer
+element gives a miss without evaluating the inner index. A container field
+may hold a nested array only when every dimension is fixed and its elements
+are plain, as in `int [3][4]`; other nested fields are a later item, as
+are arrays of collections.
+
+### Signed grids
+
+`T [-]`, `T [-][-]`, and so on are sparse grids. Every dimension must be
+`[-]`, coordinates are `int` values from `int.Min` to `int.Max`, and
+elements are the same plain values a queue or pair holds. A grid stores
+only the cells that were written, in a pair keyed by an `[N x int]`
+coordinate tuple compared bytewise, so lookups scan the stored cells
+linearly. A grid is a collection: it starts empty, is move-only, can be a
+container field, and is freed with its owner.
+
+- `g[x][y]` takes exactly as many coordinates as the grid has dimensions.
+  Reading an unwritten cell gives the element default without storing it.
+  Writing a cell, including `g[x][y] += 1`, stores it first with the
+  default if needed.
+- `IsValid(g[x][y])` tells whether a cell is stored. `?g[x][y] = v` writes
+  only a stored cell, and `?g[x][y]` reads like `g[x][y]`.
+- `g -= [x][y]` removes a stored cell (a missing one traps), and
+  `(g -= [x][y])` gives its value. `g.Len` counts the stored cells and
+  `g.Clear()` removes them all.
+- A cell cannot be passed by reference, because storing other cells can
+  move it. `+=`, `++`, `--`, literals, and pair members such as `LastKey`
+  do not apply to grids.
+
+## Collection mutations
+
+```duck
+int [] s = {1, 1}
+index : (s += 4)         // 2: the index the value was inserted at
+s++                      // appends a default element, 0 here
+s -= [0]                 // removes element 0; later elements shift down
+last : (s--)             // removes the last element and gives it
+s.Clear()                // frees every element; s is empty again
+
+string, int pair ages = {"Ada" : 36}
+ages -= ["Ada"]          // removes the entry for a present key
+int, string pair lines
+lines++                  // adds key 0 with a default value, then 1, ...
+```
+
+| Mutation | Array `T []` | Queue | Stack | Pair |
+| --- | --- | --- | --- | --- |
+| `+= x` | appends | adds at the back | adds on top | `+= key : value` adds, or replaces a present key's value in place |
+| `++` | appends a default | adds a default at the back | adds a default on top | adds the next integer key with a default value |
+| `--` | removes the last | removes the front | removes the top | removes the last key added |
+| `-= [i]` | removes element `i` | rejected | rejected | `-= [key]` removes that key |
+| `.Clear()` | empties | empties | empties | empties |
+
+Fixed arrays have a fixed length and reject all of these. A default element
+is what a guarded read gives for a missing one: zero, `false`, empty text, a
+zero `big`, or a container's default, built as a declared local would be.
+
+Inside parentheses a mutation gives a result. `(s += x)`, `(s++)`, and
+`(p += key : value)` give the inserted element's index as a `long`, the
+same index `s[i]` reads it back with; for a queue that is its position from
+the front, for a stack from the bottom, and for a pair the entry's position
+in insertion order, which a replaced key keeps. `(s--)` and `(s -= [i])`
+give the removed element (a pair gives the removed value). It moves out of
+the collection, so nothing is copied or released; a container's destructor
+runs once, when the result dies. Without parentheses the removed element is
+released or destroyed at once. `(x += 1)` on a number is rejected: only
+collection mutations give a result.
+
+`p++` needs an integer key type. It adds key 0 to an empty pair and
+otherwise the last key added plus 1; it traps when that key would overflow
+the key type or is already present, so it never overwrites an entry.
+
+`-= [i]` traps outside `0 <= i < Len`, `-= [key]` traps on a missing key,
+and `--` traps on an empty collection, as does its result form. Removing an
+element shifts the later ones down by one, keeping their order, so it costs
+time proportional to what follows it. `Clear()` releases every element in
+order and frees the storage; the collection is then empty and null, like a
+new one, so clearing an empty collection does nothing and the next `+=`
+gives index 0.
+
+## Indexing and bounds checks
+
+```duck
+int [3] f = {1, 2, 3}
+string, int pair ages = {"Ada" : 36}
+
+ages["Ada"] = 40         // writes the value of a present key
+ages["Ada"] += 1
+if IsValid(f[6])         // false: 6 is outside 0 <= i < 3
+    f[6] = 5
+?f[6] = 5                // skipped: the element is missing
+?ages["Zed"] = Count()   // skipped, and Count() is not called
+Print(?f[6])             // 0, the default of int
+Print(?ages["Ada"])      // 41
+```
+
+`a[i]` and `p[key]` both name storage: they can be read, assigned, and
+used with compound assignment. Writing `p[key]` replaces the value of a key
+that is already present (releasing the old value) and traps when the key is
+missing; add new keys with `p += key : value`. A pair value cannot be
+passed by reference or have its address taken, because adding entries can
+move it, just like an element of a dynamic array.
+
+`IsValid(a[i])` and `IsValid(p[key])` give a `bool`: whether the index is
+inside the array or the key is present. They do not read the element. The
+argument must be an indexed element.
+
+A leading `?` guards an index. The collection and the index or key are
+evaluated once, and that one lookup decides both the guard and the access:
+
+- **Guarded writes.** `?a[i] = v`, `?a[i] += v`, `?a[i]++`, and the other
+  assignments run only when the element exists. When it is missing, the
+  whole statement is skipped, so `v` is not evaluated.
+- **Guarded reads.** `?a[i]` has the element type. A missing element reads
+  as that type's default: zero, `false`, empty text, a zero `big`, or a
+  container's field defaults. Use `IsValid` to tell a stored default from
+  a missing element. A container whose default is built at run time
+  (constructors or computed defaults) cannot be read this way; check
+  `IsValid` first.
+
+`?` guards only a trailing index: `?points[0].X` and guarded call chains
+such as `?o.ex.Foo()` are later items. The runtime helpers
+`@duck.seq$find` and `@duck.pair$lookup` return the element's slot, or null
+when it is missing.
 
 ## Characters, dates, and times
 

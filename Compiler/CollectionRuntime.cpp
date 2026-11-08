@@ -243,6 +243,45 @@ found:
   ret ptr %slot
 }
 
+; The slot of element i, or null when i is outside the array.
+define internal ptr @duck.seq$find(ptr %c, i64 %i) {
+entry:
+  %null = icmp eq ptr %c, null
+  br i1 %null, label %missing, label %check
+check:
+  %countp = getelementptr %duck.seq, ptr %c, i32 0, i32 2
+  %count = load i64, ptr %countp
+  %inside = icmp ult i64 %i, %count
+  br i1 %inside, label %found, label %missing
+missing:
+  ret ptr null
+found:
+  %slot = call ptr @duck.seq$index(ptr %c, i64 %i)
+  ret ptr %slot
+}
+
+; Removes element i of a dynamic array, which the caller has already
+; released or moved out, shifting the later elements down.
+define internal void @duck.seq$removeAt(ptr %c, i64 %i) {
+entry:
+  %countp = getelementptr %duck.seq, ptr %c, i32 0, i32 2
+  %count = load i64, ptr %countp
+  %sizep = getelementptr %duck.seq, ptr %c, i32 0, i32 4
+  %size = load i64, ptr %sizep
+  %data = load ptr, ptr %c
+  %next = add i64 %i, 1
+  %rest = sub i64 %count, %next
+  %bytes = mul i64 %rest, %size
+  %toff = mul i64 %i, %size
+  %foff = mul i64 %next, %size
+  %to = getelementptr i8, ptr %data, i64 %toff
+  %from = getelementptr i8, ptr %data, i64 %foff
+  call void @duck.mem$copy(ptr %to, ptr %from, i64 %bytes)
+  %fewer = sub i64 %count, 1
+  store i64 %fewer, ptr %countp
+  ret void
+}
+
 ; Calls cleanup on each of count elements of a fixed array.
 define internal void @duck.array$each(ptr %data, i64 %count, i64 %size, ptr %cleanup) {
 entry:
@@ -327,6 +366,8 @@ exit:
   ret void
 }
 
+)IR" // MSVC caps each string literal piece at 16 KB.
+         R"IR(
 define internal ptr @duck.pair$find(ptr %c, ptr %key, ptr %equal) {
 entry:
   %null = icmp eq ptr %c, null
@@ -365,6 +406,19 @@ found:
   ret ptr %e
 missing:
   ret ptr null
+}
+
+; The value slot stored for key, or null when the key is missing.
+define internal ptr @duck.pair$lookup(ptr %c, ptr %key, ptr %equal) {
+entry:
+  %e = call ptr @duck.pair$find(ptr %c, ptr %key, ptr %equal)
+  %missing = icmp eq ptr %e, null
+  br i1 %missing, label %none, label %found
+none:
+  ret ptr null
+found:
+  %v = call ptr @duck.pair$value(ptr %c, ptr %e)
+  ret ptr %v
 }
 
 define internal ptr @duck.pair$append(ptr %holder, i64 %ksize, i64 %vsize) {
@@ -473,6 +527,36 @@ releaseV:
 remove:
   %countp = getelementptr %duck.pair, ptr %c, i32 0, i32 1
   %count = load i64, ptr %countp
+  %fewer = sub i64 %count, 1
+  store i64 %fewer, ptr %countp
+  ret void
+}
+
+; An entry's position in insertion order.
+define internal i64 @duck.pair$position(ptr %c, ptr %entry) {
+  %entries = load ptr, ptr %c
+  %stridep = getelementptr %duck.pair, ptr %c, i32 0, i32 4
+  %stride = load i64, ptr %stridep
+  %start = ptrtoint ptr %entries to i64
+  %at = ptrtoint ptr %entry to i64
+  %off = sub i64 %at, %start
+  %index = udiv i64 %off, %stride
+  ret i64 %index
+}
+
+; Removes an entry whose key and value the caller has already released or
+; moved out, shifting the later entries down so insertion order holds.
+define internal void @duck.pair$remove(ptr %c, ptr %entry) {
+  %countp = getelementptr %duck.pair, ptr %c, i32 0, i32 1
+  %count = load i64, ptr %countp
+  %stridep = getelementptr %duck.pair, ptr %c, i32 0, i32 4
+  %stride = load i64, ptr %stridep
+  %index = call i64 @duck.pair$position(ptr %c, ptr %entry)
+  %next = add i64 %index, 1
+  %rest = sub i64 %count, %next
+  %bytes = mul i64 %rest, %stride
+  %from = getelementptr i8, ptr %entry, i64 %stride
+  call void @duck.mem$copy(ptr %entry, ptr %from, i64 %bytes)
   %fewer = sub i64 %count, 1
   store i64 %fewer, ptr %countp
   ret void

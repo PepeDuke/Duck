@@ -13,8 +13,17 @@
 
 namespace duck {
 std::string typeName(Type type) {
-  if (arrayValue(type))
-    return typeName(*type.element) + " [" + (type.extent ? std::to_string(type.extent) : "") + "]";
+  if (arrayValue(type)) {
+    std::string dimensions;
+    for (; arrayValue(type); type = *type.element)
+      dimensions += "[" + (type.extent ? std::to_string(type.extent) : std::string()) + "]";
+    return typeName(type) + " " + dimensions;
+  }
+  if (gridValue(type)) {
+    std::string dimensions;
+    for (unsigned i = 0; i < type.extent; ++i) dimensions += "[-]";
+    return typeName(*type.element) + " " + dimensions;
+  }
   if (collectionValue(type)) {
     if (type.base == Type::Queue) return typeName(*type.element) + " queue";
     if (type.base == Type::Stack) return typeName(*type.element) + " stack";
@@ -276,6 +285,13 @@ class Analyzer {
                   "no common integer type can represent both ranges");
     return type;
   }
+  // How storage was written, for diagnostics: rows[...], box.Items.
+  static std::string storageText(const Expr &e) {
+    if (e.kind == "index") return storageText(*e.args[0]) + "[...]";
+    if (e.kind == ".") return storageText(*e.args[0]) + "." + e.token.text;
+    if (e.kind == "unary") return "*" + storageText(*e.args[0]);
+    return e.token.text;
+  }
   Type expression(const Expr &e, Type expected = Type::Void) {
     requireComplete(e);
     auto type = checkExpression(e, expected);
@@ -289,11 +305,11 @@ class Analyzer {
                                                            : "it has a destructor") +
                         "; pass it by reference (&), or return a local to move it");
     if (collectionValue(type) && e.addressable() && !analysis.properties.count(&e) && &e != movable)
-      fail(e.token, "cannot copy " + typeName(type) + " '" + e.token.text +
+      fail(e.token, "cannot copy " + typeName(type) + " '" + storageText(e) +
                         "': collections are move-only; pass it by reference (&), or return a local to move it");
     if (arrayValue(type) && symbols.moveOnly(type) && e.addressable() && !analysis.properties.count(&e) &&
         &e != movable)
-      fail(e.token, "cannot copy " + typeName(type) + " '" + e.token.text + "': " +
+      fail(e.token, "cannot copy " + typeName(type) + " '" + storageText(e) + "': " +
                         (dynamicArray(type) ? "dynamic arrays are move-only"
                                             : "its elements cannot be copied implicitly, so it is move-only") +
                         "; pass it by reference (&), or return a local to move it");
@@ -567,8 +583,8 @@ class Analyzer {
         auto local = location(argument);
         if (heapStorage(argument)) fail(argument.token, "cannot expose tracked heap storage by reference");
         if (growableElement(argument))
-          fail(argument.token, "cannot pass an element of a dynamic array by reference: adding elements can "
-                               "move it; copy it into a local first");
+          fail(argument.token, "cannot pass an element of a dynamic array by reference, nor a pair value: "
+                               "adding elements can move it; copy it into a local first");
         if (local.constant) fail(argument.token, "cannot pass a constant to a mutable reference");
         // A derived container passes its state for the parameter's parent.
         std::vector<size_t> path;
@@ -699,6 +715,8 @@ class Analyzer {
     }
     if (!collectionValue(type)) return Type::Void;
     const auto &member = e.token.text;
+    if (gridValue(type) && member != "Len")
+      fail(e.token, typeName(type) + " has no member '" + member + "'; a grid has Len, the number of stored cells");
     Type result = Type::Void;
     if (member == "Len") result = Type::Long;
     else if (type.base == Type::Queue && member == "Front") result = *type.element;
@@ -715,6 +733,167 @@ class Analyzer {
     analysis.expressionTypes[&e] = result;
     return result;
   }
+  // Checks a sequence or pair literal's entries against its type.
+  void checkLiteral(const Expr &e, const Type &type) {
+    if (gridValue(type))
+      fail(e.token, typeName(type) + " starts empty and has no literal; write cells as g[x][y] = v");
+    if (fixedArray(type) && e.args.size() != type.extent)
+      fail(e.token, "a literal of type " + typeName(type) + " needs exactly " + std::to_string(type.extent) +
+                        " element" + (type.extent == 1 ? "" : "s") + ", got " + std::to_string(e.args.size()));
+    for (const auto &entry : e.args) {
+      const bool keyed = entry->kind == "entry" || entry->kind == "fieldInitializer";
+      if (type.base != Type::Pair) {
+        if (keyed)
+          fail(entry->token, "a literal of type " + typeName(type) + " lists values, not key : value entries");
+        expression(*entry, *type.element);
+        continue;
+      }
+      if (!keyed) fail(entry->token, "a literal of type " + typeName(type) + " lists key : value entries");
+      if (entry->kind == "entry") {
+        expression(*entry->args[0], *type.key);
+        expression(*entry->args[1], *type.element);
+        continue;
+      }
+      // A bare name is the key itself in a name-keyed pair, and a variable
+      // holding the key otherwise.
+      if (*type.key != Type::Name) expression(*entry->args[1], *type.key);
+      expression(*entry->args[0], *type.element);
+    }
+  }
+  // The type of a literal with no expected type: values make a dynamic
+  // array of their common type, and key : value entries a pair of the
+  // keys' and values' common types; bare-name keys are names.
+  Type inferLiteral(const Expr &e) {
+    if (e.args.empty())
+      fail(e.token, "cannot infer the type of an empty literal {}; declare its type, as in int [] values = {}");
+    std::vector<Type> keys, values;
+    std::vector<const Expr *> keyAt, valueAt;
+    bool keyed = false, plain = false;
+    const auto savedAnalysis = analysis;
+    const auto savedScopes = scopes;
+    for (const auto &entry : e.args) {
+      if (entry->kind == "entry") {
+        keyed = true;
+        keys.push_back(expression(*entry->args[0]));
+        keyAt.push_back(entry->args[0].get());
+        values.push_back(expression(*entry->args[1]));
+        valueAt.push_back(entry->args[1].get());
+      } else if (entry->kind == "fieldInitializer") {
+        keyed = true;
+        keys.push_back(Type::Name);
+        keyAt.push_back(entry.get());
+        values.push_back(expression(*entry->args[0]));
+        valueAt.push_back(entry->args[0].get());
+      } else {
+        plain = true;
+        values.push_back(expression(*entry));
+        valueAt.push_back(entry.get());
+      }
+    }
+    analysis = savedAnalysis;
+    scopes = savedScopes;
+    if (keyed && plain) fail(e.token, "a literal cannot mix values and key : value entries");
+    auto unify = [&](const std::vector<Type> &types, const std::vector<const Expr *> &at, const std::string &what) {
+      Type common = types.front();
+      for (size_t i = 1; i < types.size(); ++i) {
+        const auto &next = types[i];
+        if (next == common) continue;
+        if (numeric(common) && numeric(next)) {
+          const auto widened = commonNumeric(common, next);
+          if (widened == Type::Void)
+            fail(at[i]->token, "the " + what + " of this literal mix signed and unsigned types (" +
+                                   typeName(common) + " and " + typeName(next) + "); declare its type");
+          common = widened;
+          continue;
+        }
+        fail(at[i]->token, "the " + what + " of this literal have incompatible types, " + typeName(common) +
+                               " and " + typeName(next) + "; declare its type");
+      }
+      return common;
+    };
+    const auto type = keyed ? Type::collection(Type::Pair, unify(values, valueAt, "values"),
+                                               unify(keys, keyAt, "keys"))
+                            : Type::array(unify(values, valueAt, "elements"), 0);
+    symbols.validateType(type, e.token);
+    return type;
+  }
+  // A mutation of a dynamic array, queue, stack, or pair. a += x appends,
+  // q += x adds at a queue's back or a stack's top, p += key : value adds
+  // or replaces an entry, and ++ adds a default element (a pair's next
+  // integer key). -- removes the last element, the queue's front, the
+  // stack's top, or the pair's last added entry; a -= [i] and p -= [key]
+  // remove one element. Gives the type of the parenthesized form's result:
+  // the inserted index for += and ++, the removed element otherwise.
+  Type collectionMutation(const Type &type, const std::string &op, const Expr *operand, const Token &token) {
+    if (fixedArray(type))
+      fail(token, typeName(type) + " has a fixed length; '" + op + "' needs a dynamic array (" +
+                      typeName(*type.element) + " [])");
+    const auto &element = *type.element;
+    if (gridValue(type)) {
+      if (op != "-=" || operand->kind != "removal")
+        fail(token, "'" + op + "' does not apply to " + typeName(type) +
+                        "; write cells as g[x][y] = v and remove them as g -= [x][y]");
+      if (operand->args.size() != type.extent)
+        fail(operand->token, typeName(type) + " removes a cell by its " + std::to_string(type.extent) +
+                                 " coordinate" + (type.extent == 1 ? "" : "s") + "; got " +
+                                 std::to_string(operand->args.size()));
+      std::vector<const Expr *> coordinates;
+      for (const auto &coordinate : operand->args) coordinates.push_back(coordinate.get());
+      gridCoordinates(coordinates);
+      return element;
+    }
+    if (op == "-=" && operand->kind == "removal" && operand->args.size() != 1)
+      fail(operand->token, "-= [i][j] removes a cell from a grid; remove from a nested array as a[i] -= [j]");
+    const bool pair = type.base == Type::Pair;
+    if (op == "+=") {
+      if (operand->kind == "entry" && !pair)
+        fail(operand->token, "key : value entries belong in a pair, not in " + typeName(type));
+      if (pair) {
+        if (operand->kind != "entry") fail(operand->token, "add to a pair as p += key : value");
+        expression(*operand->args[0], *type.key);
+        expression(*operand->args[1], element);
+      } else
+        expression(*operand, element);
+      return Type::Long;
+    }
+    if (op == "++") {
+      if (pair && !integral(*type.key))
+        fail(token, "p++ adds the next integer key, but " + typeName(type) + " is keyed by " +
+                        typeName(*type.key) + "; add entries as p += key : value");
+      return Type::Long;
+    }
+    if (op == "--") return element;
+    if (op == "-=") {
+      if (operand->kind != "removal")
+        fail(operand->token, pair ? std::string("remove from a pair as p -= [key]")
+                                  : "remove from " + typeName(type) + " with " +
+                                        (type.base == Type::Array ? "a -= [i] or a--" : "--"));
+      if (!pair && type.base != Type::Array)
+        fail(operand->token, typeName(type) + " removes only at its end with --; -= [i] needs an array or a pair");
+      if (pair) expression(*operand->args[0], *type.key);
+      else {
+        if (const auto index = expression(*operand->args[0]); !integral(index) && !enumValue(index))
+          fail(operand->args[0]->token, "an array index must be an integer, not " + typeName(index));
+        expression(*operand->args[0], Type::Long);
+      }
+      return element;
+    }
+    fail(token, "'" + op + "' is not supported on " + typeName(type) +
+                    "; collections support +=, ++, --, -= [i], and Clear()");
+  }
+  // A grid's coordinates are ints, from int.Min to int.Max.
+  void gridCoordinates(const std::vector<const Expr *> &coordinates) {
+    for (const auto *coordinate : coordinates) {
+      if (const auto type = expression(*coordinate); !integral(type) && !enumValue(type))
+        fail(coordinate->token, "a grid coordinate must be an integer, not " + typeName(type));
+      expression(*coordinate, Type::Int);
+    }
+  }
+  [[noreturn]] void constantTarget(const Expr &target, const Token &token) const {
+    const Expr *root = &target;
+    while ((root->kind == "." || root->kind == "index") && !root->args.empty()) root = root->args[0].get();
+    fail(token, "cannot modify constant '" + root->token.text + "'");
+  }
   // Existing storage: an addressable expression that is not a property.
   bool storage(const Expr &e) {
     std::string owner;
@@ -724,14 +903,30 @@ class Analyzer {
   bool pairIndex(const Expr &e) {
     const auto &base = *e.args[0];
     if (!storage(base)) return false;
-    const auto type = location(base).type;
-    return !type.depth && type.base == Type::Pair;
+    if (std::vector<const Expr *> coordinates; gridAccess(e, coordinates)) return false;
+    return pairValue(location(base).type);
   }
-  // Storage inside a dynamic array, which moves when the array grows, so
-  // it cannot be borrowed by reference or address.
+  // grid[x][y]: the stored grid it indexes, with one coordinate per index,
+  // outermost first; null when e does not index into a grid.
+  const Expr *gridAccess(const Expr &e, std::vector<const Expr *> &coordinates) {
+    std::vector<const Expr *> found;
+    const Expr *root = &e;
+    while (root->kind == "index") {
+      found.insert(found.begin(), root->args[1].get());
+      root = root->args[0].get();
+    }
+    if (!storage(*root) || !gridValue(location(*root).type)) return nullptr;
+    coordinates = std::move(found);
+    return root;
+  }
+  // Storage inside a dynamic array or a pair, which moves when the
+  // collection grows, so it cannot be borrowed by reference or address.
   bool growableElement(const Expr &e) const {
     for (const Expr *part = &e; part->kind == "." || part->kind == "index"; part = part->args[0].get())
-      if (part->kind == "index" && dynamicArray(analysis.expressionTypes.at(part->args[0].get()))) return true;
+      if (part->kind == "index") {
+        const auto &holder = analysis.expressionTypes.at(part->args[0].get());
+        if (dynamicArray(holder) || collectionValue(holder)) return true;
+      }
     return false;
   }
   [[noreturn]] void notStorage(const Expr &e) const {
@@ -816,16 +1011,39 @@ class Analyzer {
       if (local.receiver) analysis.receiverStorage.insert(&e);
       if (read) requireInitialized(e.token);
     } else if (e.kind == "index") {
-      // a[i] names an element; an index outside the array traps.
+      // grid[x][y] names a cell: reading an unwritten one gives the element
+      // default, and writing one stores it.
+      if (std::vector<const Expr *> coordinates; const auto *grid = gridAccess(e, coordinates)) {
+        local = location(*grid, read);
+        requireComplete(*grid);
+        const auto gridType = local.type;
+        if (coordinates.size() != gridType.extent)
+          fail(e.token, typeName(gridType) + " takes " + std::to_string(gridType.extent) + " coordinate" +
+                            (gridType.extent == 1 ? "" : "s") + ", as g" +
+                            (gridType.extent == 1 ? "[x]" : gridType.extent == 2 ? "[x][y]" : "[x][y][z]") +
+                            "; got " + std::to_string(coordinates.size()));
+        gridCoordinates(coordinates);
+        // The partial indexes in between stand for the grid itself.
+        for (const Expr *part = e.args[0].get(); part->kind == "index"; part = part->args[0].get())
+          analysis.expressionTypes[part] = gridType;
+        local.type = *gridType.element;
+        analysis.expressionTypes[&e] = local.type;
+        return local;
+      }
+      // a[i] names an element; an index outside the array traps. p[key]
+      // names the value stored for key, which must be present.
       const auto &base = *e.args[0];
       if (!storage(base)) fail(e.token, "index a stored array");
       local = location(base, read);
-      if (!arrayValue(local.type)) {
-        if (!local.type.depth && local.type.base == Type::Pair)
-          fail(e.token, "pair values are read-only so far; p[key] cannot be written or borrowed");
-        fail(e.token, "only arrays and pairs can be indexed; " + typeName(local.type) + " cannot");
-      }
       requireComplete(base);
+      if (!local.type.depth && local.type.base == Type::Pair) {
+        expression(*e.args[1], *local.type.key);
+        local.type = *local.type.element;
+        analysis.expressionTypes[&e] = local.type;
+        return local;
+      }
+      if (!arrayValue(local.type))
+        fail(e.token, "only arrays and pairs can be indexed; " + typeName(local.type) + " cannot");
       if (const auto index = expression(*e.args[1]); !integral(index) && !enumValue(index))
         fail(e.args[1]->token, "an array index must be an integer, not " + typeName(index));
       expression(*e.args[1], Type::Long);
@@ -871,8 +1089,19 @@ class Analyzer {
   }
   Type checkExpression(const Expr &e, Type expected) {
     const auto &op = e.token.text;
+    if (e.kind == "initializer" && !recordValue(expected)) {
+      Type type = expected;
+      if (expected == Type::Void) type = inferLiteral(e);
+      else if (!arrayValue(expected) && !collectionValue(expected))
+        fail(e.token, "a { ... } literal builds a container, array, queue, stack, or pair, not " +
+                          typeName(expected));
+      checkLiteral(e, type);
+      return type;
+    }
     if (e.kind == "initializer") {
-      if (!recordValue(expected)) fail(e.token, "named initialization requires a container value type");
+      for (const auto &field : e.args)
+        if (field->kind != "fieldInitializer")
+          fail(field->token, "a '" + expected.record + "' literal names its fields, as in {X: 1}");
       if (!symbols.constructors(expected.record).empty())
         fail(e.token, "'" + expected.record + "' has constructors; construct it with " + expected.record +
                           "(...) instead of a { field: value } initializer");
@@ -1078,6 +1307,16 @@ class Analyzer {
       type.record = e.args[0]->token.text;
       return type;
     }
+    if (e.kind == "guard") {
+      // ?a[i] and ?p[key] read the element, or the element type's default
+      // when the index is outside the array or the key is missing.
+      const auto type = expression(*e.args[0]);
+      if (recordValue(type) && symbols.runtimeDefaults(type.record))
+        fail(e.token, "?" + e.args[0]->args[0]->token.text + "[...] cannot read '" + type.record +
+                          "': its default is built at run time (constructors or computed defaults); "
+                          "check IsValid first");
+      return type;
+    }
     if (e.kind == "index" && pairIndex(e)) {
       // p[key] reads the value stored for key; a missing key traps.
       const auto &base = *e.args[0];
@@ -1093,6 +1332,20 @@ class Analyzer {
       return location(e).type;
     }
     if (e.kind == "entry") fail(e.token, "key : value entries can only be added to a pair, as p += key : value");
+    if (e.kind == "removal") fail(e.token, "-= [i] removes an element from an array or a pair");
+    if (e.kind == "mutation") {
+      // (s += x) gives the inserted index; (s--) and (s -= [i]) give the
+      // removed element.
+      const auto &target = *e.args[0];
+      if (!storage(target)) fail(e.token, "'" + op + "' needs a stored collection");
+      requireComplete(target);
+      const auto local = location(target);
+      if (!arrayValue(local.type) && !collectionValue(local.type))
+        fail(e.token, "only collection mutations give a result; '" + op + "' on " + typeName(local.type) +
+                          " is a statement");
+      if (local.constant) constantTarget(target, e.token);
+      return collectionMutation(local.type, op, e.args.size() > 1 ? e.args[1].get() : nullptr, e.token);
+    }
     if (e.kind == "unary" && op == "&") {
       const auto &arg = *e.args[0];
       requireComplete(arg);
@@ -1121,7 +1374,7 @@ class Analyzer {
       auto local = location(arg);
       if (heapStorage(arg)) fail(arg.token, "cannot expose the address of tracked heap storage");
       if (growableElement(arg))
-        fail(arg.token, "cannot take the address of a dynamic array element: adding elements can move it");
+        fail(arg.token, "cannot take the address of a dynamic array or pair element: adding elements can move it");
       if (local.constant || managedValue(local.type))
         fail(arg.token, "cannot take the address of constant or managed text storage");
       return local.type.pointerTo();
@@ -1154,6 +1407,13 @@ class Analyzer {
         if (op == "CodeUnitAt") expression(*e.args[1], Type::Long);
         return op == "Length" ? Type::Long : Type::UInt32;
       }
+      if (op == "IsValid" && !e.receiver) {
+        // IsValid(a[i]) checks the index without reading the element.
+        if (e.args.size() != 1 || e.args[0]->kind != "index")
+          fail(e.token, "IsValid expects one indexed element, as in IsValid(a[i])");
+        expression(*e.args[0]);
+        return Type::Bool;
+      }
       if (op == "Print") {
         if (e.args.size() != 1)
           fail(e.token, "Print expects one argument");
@@ -1161,6 +1421,8 @@ class Analyzer {
         if (printed == Type::Void)
           fail(e.token, "cannot print void");
         if (recordValue(printed)) fail(e.token, "cannot print a container");
+        if (arrayValue(printed) || collectionValue(printed))
+          fail(e.token, "cannot print " + typeName(printed) + " directly; print its elements");
         if (printed.depth)
           fail(e.token, "cannot print an opaque pointer; compare it with null instead");
         return Type::Void;
@@ -1195,6 +1457,17 @@ class Analyzer {
             stored = t.depth != 0;
           }
           if (t.depth) t = t.pointee();
+          if (stored && !t.depth && (arrayValue(t) || collectionValue(t))) {
+            // s.Clear() removes every element and frees the storage.
+            if (memberName(op) != "Clear")
+              fail(e.token, typeName(t) + " has no method '" + memberName(op) + "'; collections have Clear()");
+            if (!e.args.empty()) fail(e.token, "Clear takes no arguments");
+            if (fixedArray(t))
+              fail(e.token, typeName(t) + " has a fixed length; Clear() needs a dynamic array (" +
+                                typeName(*t.element) + " [])");
+            if (constant) constantTarget(base, e.token);
+            return Type::Void;
+          }
           if (!recordValue(t)) fail(base.token, "method receiver requires a container");
           MemberPath path;
           const auto name = op.substr(op.rfind('.') + 1);
@@ -1661,11 +1934,12 @@ class Analyzer {
       name.text = s.name;
       // A fixed array without an initializer gives each element its
       // default, which must not need running code.
-      if (fixedArray(type) && !s.expr && recordValue(*type.element) &&
-          symbols.runtimeDefaults(type.element->record))
-        fail(s.token, "'" + s.name + "' cannot default its elements: '" + type.element->record +
+      Type leaf = type;
+      while (fixedArray(leaf)) leaf = *leaf.element;
+      if (fixedArray(type) && !s.expr && recordValue(leaf) && symbols.runtimeDefaults(leaf.record))
+        fail(s.token, "'" + s.name + "' cannot default its elements: '" + leaf.record +
                           "' is built at run time (constructors or computed defaults); use a dynamic array (" +
-                          type.element->record + " []) and add elements to it");
+                          leaf.record + " []) and add elements to it");
       bind(name, {type, s.constant,
                   s.kind == "own" || s.expr != nullptr || recordValue(type) || collectionValue(type) ||
                       arrayValue(type)});
@@ -1675,15 +1949,14 @@ class Analyzer {
     } else if (s.kind == "expr")
       expression(*s.expr);
     else {
-      requireComplete(*s.target);
+      // `?a[i] = v` assigns only when the element exists.
+      const auto &target = s.target->kind == "guard" ? *s.target->args[0] : *s.target;
+      requireComplete(target);
       std::string owner;
-      auto local = propertyOf(*s.target, owner) ? Local{propertyWrite(*s.target, owner, s.kind != "assign"), false}
-                                                : location(*s.target, s.kind != "assign");
-      if (local.constant) {
-        const Expr *root = s.target.get();
-        while ((root->kind == "." || root->kind == "index") && !root->args.empty()) root = root->args[0].get();
-        fail(s.token, "cannot modify constant '" + root->token.text + "'");
-      }
+      auto local = propertyOf(target, owner) ? Local{propertyWrite(target, owner, s.kind != "assign"), false}
+                                             : location(target, s.kind != "assign");
+      if (&target != s.target.get()) analysis.expressionTypes[s.target.get()] = local.type;
+      if (local.constant) constantTarget(target, s.token);
       if (local.type.role != Type::Raw) {
         if (s.kind != "assign" || (s.expr->kind != "null" &&
             (local.type.role != Type::Alias || s.expr->kind != "name")))
@@ -1694,38 +1967,8 @@ class Analyzer {
           fail(s.token, "incompatible tracked alias source");
         return false;
       }
-      if (arrayValue(local.type) && s.kind != "assign") {
-        // a += x appends to a dynamic array and a-- removes its last element.
-        if (fixedArray(local.type))
-          fail(s.token, typeName(local.type) + " has a fixed length; '" + s.kind +
-                            "' needs a dynamic array (" + typeName(*local.type.element) + " [])");
-        if (s.kind == "+=") {
-          if (s.expr->kind == "entry")
-            fail(s.expr->token, "key : value entries belong in a pair, not in " + typeName(local.type));
-          expression(*s.expr, *local.type.element);
-        } else if (s.kind != "--")
-          fail(s.token, "'" + s.kind + "' is not supported on " + typeName(local.type) +
-                            " yet; dynamic arrays support += and --");
-        return false;
-      }
-      if (collectionValue(local.type) && s.kind != "assign") {
-        // q += x adds to a queue's back or a stack's top, p += key : value
-        // adds or replaces an entry, and x-- removes the queue's front, the
-        // stack's top, or the pair's last added entry.
-        if (s.kind == "+=") {
-          if (local.type.base == Type::Pair) {
-            if (s.expr->kind != "entry")
-              fail(s.expr->token, "add to a pair as p += key : value");
-            expression(*s.expr->args[0], *local.type.key);
-            expression(*s.expr->args[1], *local.type.element);
-          } else {
-            if (s.expr->kind == "entry")
-              fail(s.expr->token, "key : value entries belong in a pair, not in " + typeName(local.type));
-            expression(*s.expr, *local.type.element);
-          }
-        } else if (s.kind != "--")
-          fail(s.token, "'" + s.kind + "' is not supported on " + typeName(local.type) +
-                            " yet; collections support += and --");
+      if ((arrayValue(local.type) || collectionValue(local.type)) && s.kind != "assign") {
+        collectionMutation(local.type, s.kind, s.expr.get(), s.token);
         return false;
       }
       const bool bitwise = s.kind == "&=" || s.kind == "|=" || s.kind == "^=" ||
