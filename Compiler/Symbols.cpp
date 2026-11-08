@@ -431,6 +431,7 @@ bool Symbols::destructible(const std::string &record) const {
   if (count(destructorKey(record))) return true;
   for (const auto &field : records.at(record).fields)
     if (collectionValue(field.type) || dynamicArray(field.type) ||
+        (fixedArray(field.type) && needsCleanup(field.type)) ||
         (recordValue(field.type) && destructible(field.type.record)))
       return true;
   return false;
@@ -788,9 +789,14 @@ void validateLifetimes(const Symbols &symbols) {
                                      " has no zero-argument overload");
   // A fixed array field starts zeroed inside its container's constant
   // default, so its elements must be valid as zero bits.
+  // A null func is valid as zero bits, and its container releases it.
+  auto holdsFunc = [](Type type) {
+    while (fixedArray(type)) type = *type.element;
+    return funcValue(type);
+  };
   for (const auto &[name, record] : symbols.records)
     for (const auto &field : record.fields)
-      if (fixedArray(field.type) && !symbols.zeroDefault(*field.type.element))
+      if (fixedArray(field.type) && !holdsFunc(field.type) && !symbols.zeroDefault(*field.type.element))
         fail(field.name, "field '" + field.name.text + "' cannot hold " + typeName(field.type) +
                              " yet: its elements need defaults or cleanup; use a dynamic array (" +
                              typeName(*field.type.element) + " [])");

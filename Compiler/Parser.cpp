@@ -166,6 +166,7 @@ class Parser {
   }
   Type type() {
     Type t = plainType();
+    if (arraySuffix(pos)) requireFuncSignature(t, "an array of func");
     // `T [N]` is a fixed array of N elements and `T []` a dynamic array.
     // Further dimensions follow in index order: `T [5][10]` holds 5 arrays
     // of 10. `T [-][-]` is a sparse grid indexed by any int coordinates.

@@ -1457,7 +1457,8 @@ and the payload is destroyed with the last reference. A captured tracked pointer
 takes a `heap$alias` slot in the closure. `this` and reference parameters are
 stored as raw addresses, which is why those lambdas stay in a local of the frame.
 
-Arrays, collections, and static fields cannot hold `func` values yet.
+Fixed and dynamic arrays hold `func` values, releasing each closure with its
+element. Queues, stacks, pairs, and static fields cannot hold them yet.
 
 ### Owned heap locals
 

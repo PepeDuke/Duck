@@ -4220,4 +4220,108 @@ reject(attribute_on_constructor "[args]\nA : int #@{ X }\nC { [X] C() {} }\nMain
 reject(duck_non_container "Main() {\nint x = 1\nx..Foo()\n}" "duck call needs a container receiver")
 reject(duck_needs_arguments "C {}\nMain() {\nC c()\nc..Foo\n}" "needs an argument list")
 reject(duck_constant_receiver "C { Go() {} }\nMain() {\n#C c = {}\nc..Go()\n}" "mutable method on a constant")
+
+# Arrays of func values.
+run_example(func_arrays "Examples/Features/10_FuncArrays.dk" "49\n20\n3\n1\n7\n")
+run_program(func_array_release [=[
+Res {
+ int V = 1
+ ~Res() { Print("gone") }
+}
+func int() Hold() {
+ Res r
+ return @ int() { return r.V }
+}
+Main() {
+ func int() [] fs
+ fs += Hold()
+ Print(fs[0]())
+ fs--
+ Print("removed")
+ fs += Hold()
+ fs[0] = @ int() { return 2 }
+ Print("replaced")
+ Print(fs[0]())
+ fs += Hold()
+ fs.Clear()
+ Print("cleared")
+ {
+  func int() [] scoped = {Hold()}
+ }
+ Print("scope ended")
+ {
+  func int() [2] fixed
+  fixed[1] = Hold()
+  Print(fixed[0] == null)
+ }
+ Print("fixed ended")
+}
+]=] "1\ngone\nremoved\ngone\nreplaced\n2\ngone\ncleared\ngone\nscope ended\n1\ngone\nfixed ended\n")
+run_program(func_array_fields [=[
+Res {
+ int V = 1
+ ~Res() { Print("gone") }
+}
+func int() Hold() {
+ Res r
+ return @ int() { return r.V }
+}
+Bag { func int() [2] Slots }
+Pile {
+ func int() [] Items
+ int Run() {
+  int total = 0
+  for item : Items { total += item() }
+  return total
+ }
+}
+Main() {
+ {
+  Bag b
+  b.Slots[0] = Hold()
+  Print(b.Slots[1] == null)
+  Print(b.Slots[0]())
+ }
+ Print("bag ended")
+ Pile* p()
+ p.Items += Hold()
+ p.Items += @ int() { return 4 }
+ Print(p.Run())
+ p = null
+ Print("pile ended")
+}
+]=] "1\n1\ngone\nbag ended\n5\ngone\npile ended\n")
+run_program(func_array_moves_and_captures [=[
+func int() [] Make() {
+ func int() [] made
+ made += @ int() { return 8 }
+ return made
+}
+int Total(func int() [] & fs) {
+ int sum = 0
+ for f : fs { sum += f() }
+ return sum
+}
+func int() Keep() {
+ func int() [] kept = {@ int() { return 6 }}
+ return @ int() { return kept[0]() }
+}
+Main() {
+ made : Make()
+ Print(made[0]())
+ inferred : {@ int() { return 1 }, @ int() { return 2 }}
+ Print(Total(inferred))
+ func int() [2][2] grid
+ grid[1][1] = @ int() { return 9 }
+ Print(grid[1][1]())
+ Print(Keep()())
+}
+]=] "8\n3\n9\n6\n")
+trap_program(func_array_null_element "Main() {\nfunc int() [1] fs\nPrint(fs[0]())\n}")
+reject(func_array_needs_signature "Main() {\nfunc [] fs\n}" "array of func needs a signature")
+reject(func_array_element_mismatch "Main() {\nfunc int() [] fs\nfs += @ int(int x) { return x }\n}" "type mismatch")
+reject(func_array_literal_mismatch "Main() {\nfs : {@ int() { return 1 }, @ (){}}\n}" "incompatible types")
+reject(func_array_borrowing_lambda "T(int& x) {\nfunc () [] fs\nfs += @ () { x += 1 }\n}\nMain() {}" "cannot outlive the call")
+reject(func_array_copy "Main() {\nfunc int() [] a\nb : a\n}" "cannot copy")
+reject(func_in_queue "Main() {\nfunc int() queue q\n}" "a collection cannot hold")
 trap_program(expired_heap_alias "Main() { int* value = 5\nalias : value\nvalue = null\nPrint(*alias) }")

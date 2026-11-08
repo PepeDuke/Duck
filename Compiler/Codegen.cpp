@@ -3110,12 +3110,24 @@ std::string emitDestroys(const Symbols &symbols, std::set<std::string> container
         const auto part = "%field" + std::to_string(i), held = "%held" + std::to_string(i);
         const auto &element = *field.type.element;
         const std::string cleanup = managedValue(element) ? "@duck$slot.release"
+                                    : funcValue(element) ? "@duck$slot.func"
                                     : recordValue(element) && symbols.needsCleanup(element)
                                         ? "@duck$cleanup." + element.record
                                         : "null";
         ir += "  " + part + " = getelementptr %struct." + record + ", ptr %self, i32 0, i32 " +
               std::to_string(i) + "\n  " + held + " = load ptr, ptr " + part + "\n  call void @duck.seq$free(ptr " +
               held + ", ptr " + cleanup + ")\n  store ptr null, ptr " + part + "\n";
+        continue;
+      }
+      if (fixedArray(field.type) && symbols.needsCleanup(field.type)) {
+        // Only func elements reach here: validateLifetimes rejects the others.
+        const auto part = "%field" + std::to_string(i);
+        unsigned long long count = 1;
+        Type leaf = field.type;
+        for (; fixedArray(leaf); leaf = *leaf.element) count *= leaf.extent;
+        ir += "  " + part + " = getelementptr %struct." + record + ", ptr %self, i32 0, i32 " + std::to_string(i) +
+              "\n  call void @duck.array$each(ptr " + part + ", i64 " + std::to_string(count) +
+              ", i64 ptrtoint (ptr getelementptr (ptr, ptr null, i32 1) to i64), ptr @duck$slot.func)\n";
         continue;
       }
       if (collectionValue(field.type)) {

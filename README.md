@@ -1504,6 +1504,20 @@ if nothing == null
     Print("calling a null func is a runtime error")
 ```
 
+Arrays can hold `func` values. Every element has the array's signature, and an element is called like any other func. A fixed array starts with null elements.
+
+``` c++
+func int(int) [] steps = {Double, @ int(int x) { return x + 1 }}
+steps += @ int(int x) { return x * x }
+
+int value = 3
+for step : steps
+{
+    value = step(value)
+}
+Print(steps[0](10)) // calls the first element
+```
+
 Lambdas capture locals by reference and keep them alive, so a lambda can safely outlive the scope that created it.
 
 ``` c++

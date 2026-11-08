@@ -247,12 +247,12 @@ struct Symbols : std::map<std::string, Signature> {
     if (arrayValue(type)) {
       const auto &element = *type.element;
       const bool plain = !element.depth && (numeric(element) || element == Type::Bool || element == Type::Char ||
-                                            enumValue(element) || managedValue(element) ||
+                                            enumValue(element) || managedValue(element) || funcValue(element) ||
                                             decimalValue(element) || calendarValue(element));
       if (!plain && !recordValue(element) && !arrayValue(element))
         fail(token, "an array cannot hold " + typeName(element) +
                         "; elements are numbers, bool, char, enums, string, name, big, tiny, dates and times, "
-                        "containers, and arrays");
+                        "func, containers, and arrays");
       validateType(element, token);
       return;
     }

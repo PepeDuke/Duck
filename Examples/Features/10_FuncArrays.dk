@@ -1,0 +1,44 @@
+// EXPECT: 49, 20, 3, 1, 7.
+// PITFALL: every element shares the array's signature. An array of func owns
+// its closures, so like other dynamic arrays it moves rather than copies.
+int Double(int x)
+{
+    return x * 2
+}
+
+Pipeline
+{
+    func int(int) [] Steps
+
+    int Run(int value)
+    {
+        for step : Steps
+        {
+            value = step(value)
+        }
+        return value
+    }
+}
+
+Main()
+{
+    Pipeline p()
+    p.Steps += Double
+    p.Steps += @ int(int x) { return x + 1 }
+    p.Steps += @ int(int x) { return x * x }
+    Print(p.Run(3))
+    Print(p.Steps[0](10))
+
+    int calls = 0
+    func () [] counters = {@ () { calls += 1 }, @ () { calls += 2 }}
+    for counter : counters
+    {
+        counter()
+    }
+    Print(calls)
+
+    func int() [2] slots
+    Print(slots[0] == null)
+    slots[0] = @ int() { return 7 }
+    Print(slots[0]())
+}

@@ -168,8 +168,11 @@ std::string compileModule(const Program &program, const Program &imports,
     fragments.push_back(lowerFunction(function, symbols, analyzeFunction(function, symbols)));
   // A heap cleanup can release a func field in a function that never touches one.
   for (const auto &[name, record] : symbols.records)
-    for (const auto &field : record.fields)
-      if (funcValue(field.type) && !fragments.empty()) fragments.front().usesFuncRuntime = true;
+    for (const auto &field : record.fields) {
+      Type leaf = field.type;
+      while (arrayValue(leaf)) leaf = *leaf.element;
+      if (funcValue(leaf) && !fragments.empty()) fragments.front().usesFuncRuntime = true;
+    }
   std::set<std::string> cleanups, destroys;
   std::set<DispatchTable> tables;
   std::set<std::string> types;
