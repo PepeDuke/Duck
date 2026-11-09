@@ -1,5 +1,5 @@
 // EXPECT: 14, 28, 1.
-Math
+Calc
 #{
     int Twice(int value)
     {
@@ -20,7 +20,7 @@ Math
 
 Main()
 {
-    Print(Math.Twice(7))
-    Print(Math.FourTimes(7))
-    Print(Math.Positive(7))
+    Print(Calc.Twice(7))
+    Print(Calc.FourTimes(7))
+    Print(Calc.Positive(7))
 }

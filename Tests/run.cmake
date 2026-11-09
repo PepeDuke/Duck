@@ -708,12 +708,12 @@ Main() {
  Print(Numbers.Scale(1.25))
 }
 ]=] "1\n2.5\n")
-reject(container_duplicate "Math #{ F() {} }\nMath #{ F() {} }\nMain() {}" "duplicate or reserved function")
-reject(container_missing "Math #{ F() {} }\nMain() { Math.Missing() }" "unknown function")
-reject(container_no_global_entry "Math #{ Main() {} }" "program requires Main")
-reject(container_private_lookup "Math #{ F() {} }\nMain() { F() }" "unknown function")
-reject(container_instance "Math { int n = true }\nMain() {}" "type mismatch")
-reject(container_field "Math #{ #F() {} }\nMain() {}" "constant static field requires an explicit type")
+reject(container_duplicate "Calc #{ F() {} }\nCalc #{ F() {} }\nMain() {}" "duplicate or reserved function")
+reject(container_missing "Calc #{ F() {} }\nMain() { Calc.Missing() }" "unknown function")
+reject(container_no_global_entry "Calc #{ Main() {} }" "program requires Main")
+reject(container_private_lookup "Calc #{ F() {} }\nMain() { F() }" "unknown function")
+reject(container_instance "Calc { int n = true }\nMain() {}" "type mismatch")
+reject(container_field "Calc #{ #F() {} }\nMain() {}" "constant static field requires an explicit type")
 run_program(static_fields [=[
 Point
 {
@@ -967,8 +967,8 @@ reject(static_duplicate "Game #{ int A\nint A }\nMain() {}" "duplicate static fi
 reject(static_function_clash "Game #{ int A\nA() {} }\nMain() {}" "duplicate static field or member 'Game.A'")
 reject(static_void "Game #{ void A }\nMain() {}" "static field cannot have void type")
 reject(static_file_scope "int Count = 1\nMain() {}" "file-scope statement never runs")
-reject(container_separated_chain "Math #{}\n\n#{}\nMain() {}" "chained container bodies must be adjacent")
-reject(container_separated_instance "Math #{}\n\n{ int x }\nMain() {}" "chained container bodies must be adjacent")
+reject(container_separated_chain "Calc #{}\n\n#{}\nMain() {}" "chained container bodies must be adjacent")
+reject(container_separated_instance "Calc #{}\n\n{ int x }\nMain() {}" "chained container bodies must be adjacent")
 file(READ "${SOURCE}/Examples/Tutorial/04_ContainersAndStaticBlocks.dk" containers_tutorial)
 run_program(containers_tutorial "${containers_tutorial}" "7\n14\n")
 run_program(container_chain [=[
@@ -1475,8 +1475,8 @@ other :: h
 h() }")
 reject(reinit_no_match "P { P(int a) {} }\nMain() { P p(1)\np(true) }" "no constructor of 'P' accepts \\(bool\\)")
 run_program(chain_constant_after_nested "Outer #{\n Inner #{}\n #int Max = 1\n}\nMain() { Print(Outer.Max) }" "1\n")
-reject(container_unclosed "Math #{ F() {}" "expected '}'")
-reject(container_reference "Math #{ F(int& n) {} }\nMain() { Math.F(1) }" "must be a mutable variable")
+reject(container_unclosed "Calc #{ F() {}" "expected '}'")
+reject(container_reference "Calc #{ F(int& n) {} }\nMain() { Calc.F(1) }" "must be a mutable variable")
 run_program(protected_members [=[
 Account
 {

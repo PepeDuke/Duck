@@ -2603,6 +2603,8 @@ class Analyzer {
     // `Gun g(5)` and `Gun* p(5)` arrive with the constructed type resolved.
     if (recordValue(e.castType)) return construction(e, e.castType.record);
 
+    if (op.rfind("Math.", 0) == 0) return checkMathCall(e, expected);
+
     if (childrenCall(e))
       fail(e.token, "GetChildren() is a view of stored children; use its Len, index it, or loop over it");
 
@@ -2689,6 +2691,110 @@ class Analyzer {
 
     arguments(e, signature, offset);
     return signature.result;
+  }
+  static bool numberLiteral(const Expr &e) {
+    const auto &value = e.kind == "unary" && e.token.text == "-" ? *e.args[0] : e;
+    return value.kind == "int" || value.kind == "real";
+  }
+  // Math.Name(...): the compiler's own namespace. Every operand takes one
+  // type, and a function that needs a fraction turns integers into one.
+  Type checkMathCall(const Expr &e, const Type &expected) {
+    enum class Domain { Real, Number, Vector, Vector3 };
+    struct Entry {
+      size_t arguments;
+      Domain domain;
+    };
+    static const std::map<std::string, Entry> functions{
+        {"Sqrt", {1, Domain::Real}},    {"Cbrt", {1, Domain::Real}},     {"Exp", {1, Domain::Real}},
+        {"Exp2", {1, Domain::Real}},    {"Log", {1, Domain::Real}},      {"Log2", {1, Domain::Real}},
+        {"Log10", {1, Domain::Real}},   {"Sin", {1, Domain::Real}},      {"Cos", {1, Domain::Real}},
+        {"Tan", {1, Domain::Real}},     {"Asin", {1, Domain::Real}},     {"Acos", {1, Domain::Real}},
+        {"Atan", {1, Domain::Real}},    {"Sinh", {1, Domain::Real}},     {"Cosh", {1, Domain::Real}},
+        {"Tanh", {1, Domain::Real}},    {"Floor", {1, Domain::Real}},    {"Ceil", {1, Domain::Real}},
+        {"Round", {1, Domain::Real}},   {"Trunc", {1, Domain::Real}},    {"Pow", {2, Domain::Real}},
+        {"Atan2", {2, Domain::Real}},   {"Hypot", {2, Domain::Real}},    {"Mod", {2, Domain::Real}},
+        {"Lerp", {3, Domain::Real}},    {"Abs", {1, Domain::Number}},    {"Sign", {1, Domain::Number}},
+        {"Min", {2, Domain::Number}},   {"Max", {2, Domain::Number}},    {"Clamp", {3, Domain::Number}},
+        {"Dot", {2, Domain::Vector}},   {"Length", {1, Domain::Vector}}, {"Distance", {2, Domain::Vector}},
+        {"Normalize", {1, Domain::Vector}}, {"Cross", {2, Domain::Vector3}}};
+    const auto &op = e.token.text;
+    const auto found = functions.find(op.substr(5));
+
+    if (found == functions.end()) fail(e.token, "the Math namespace has no function '" + op.substr(5) + "'");
+    if (e.args.size() != found->second.arguments) fail(e.token, "wrong argument count for '" + op + "'");
+
+    analysis.mathCalls.insert(&e);
+    const auto domain = found->second.domain;
+
+    if (domain == Domain::Vector || domain == Domain::Vector3) return checkMathVectors(e, domain == Domain::Vector3);
+
+    // Named operands decide the type first, so a literal beside a double is
+    // parsed at double precision wherever it is written.
+    std::vector<Type> types(e.args.size());
+    Type target = Type::Void;
+    auto merge = [&](size_t i, Type type) {
+      if (!numeric(type)) fail(e.args[i]->token, op + " requires numbers, got " + typeName(type));
+
+      types[i] = type;
+      target = target == Type::Void ? type : common(target, type, e.token);
+    };
+
+    for (size_t i = 0; i < e.args.size(); ++i)
+      if (!numberLiteral(*e.args[i]))
+        merge(i, decay(*e.args[i], expression(*e.args[i], floating(expected) ? expected : Type(Type::Void))));
+
+    const Type wanted = target != Type::Void ? target : numeric(expected) ? expected : Type(Type::Void);
+
+    for (size_t i = 0; i < e.args.size(); ++i) {
+      if (!numberLiteral(*e.args[i])) continue;
+
+      const auto &literal = e.args[i]->kind == "unary" ? *e.args[i]->args[0] : *e.args[i];
+      const bool fits = literal.kind == "real" ? floating(wanted) : integral(wanted);
+      merge(i, expression(*e.args[i], fits ? wanted : Type(Type::Void)));
+    }
+
+    if (domain == Domain::Real && !floating(target)) target = floating(expected) ? expected : Type(Type::Double);
+
+    for (size_t i = 0; i < e.args.size(); ++i) convert(*e.args[i], types[i], target);
+
+    return target;
+  }
+  // Duck has no vector type: a vector is any container whose fields are
+  // exactly X, Y and optionally Z and W, all of one floating type.
+  Type checkMathVectors(const Expr &e, bool threeOnly) {
+    const auto &op = e.token.text;
+    static const std::vector<std::string> names{"X", "Y", "Z", "W"};
+    const auto first = expression(*e.args[0]);
+
+    if (!recordValue(first)) fail(e.args[0]->token, op + " requires a vector container, got " + typeName(first));
+
+    for (size_t i = 1; i < e.args.size(); ++i) {
+      const auto other = expression(*e.args[i]);
+
+      if (!(other == first))
+        fail(e.args[i]->token, op + " requires both vectors to be '" + typeName(first) + "', got " + typeName(other));
+    }
+
+    const auto &record = symbols.records.at(first.record);
+    const auto &fields = record.fields;
+    bool vector = record.parents.empty() && fields.size() >= 2 && fields.size() <= 4 && floating(fields[0].type);
+
+    for (size_t i = 0; vector && i < fields.size(); ++i)
+      vector = fields[i].name.text == names[i] && fields[i].type == fields[0].type;
+
+    if (!vector)
+      fail(e.args[0]->token, op + " requires a container with only the fields X, Y and optionally Z and W, "
+                                  "all float or all double; '" + first.record + "' does not qualify");
+
+    if (threeOnly && fields.size() != 3) fail(e.args[0]->token, op + " requires a container with the fields X, Y and Z");
+
+    for (const auto &field : fields) {
+      MemberPath path;
+      symbols.findField(first.record, field.name.text, path);
+      requireAccess(path.field->protectedAccess, path.declaring, field.name.text, e.token);
+    }
+
+    return memberName(op) == "Cross" || memberName(op) == "Normalize" ? first : fields[0].type;
   }
   std::optional<Type> checkLocalCallee(const Expr &e) {
     const auto &op = e.token.text;

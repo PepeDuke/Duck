@@ -1087,7 +1087,7 @@ Scenario() {
     def test_guard_rejections(self):
         for body, message in [
             ('Scenario() { Print(?Live()) }', "guards an index such as"),
-            ('Math #{ int F() { return 1 } }\nScenario() { Print(?Math.F()) }', 'no reference to check'),
+            ('Calc #{ int F() { return 1 } }\nScenario() { Print(?Calc.F()) }', 'no reference to check'),
             ('Scenario() { int [] a\n?a.Clear() }', 'no reference to check'),
             ('Built { int V = Live() }\nP { Built Make() { Built b\nreturn b } }\nScenario() { P* p()\nx : ?p.Make() }', 'built at run time'),
             ('Scenario() { Node* n()\nPrint(?n.Id) }', "guards an index such as"),

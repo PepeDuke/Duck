@@ -330,8 +330,9 @@ class Interpreter {
 
     if (a.integerConstants.count(&e) || a.floatingConstants.count(&e)) return;
 
-    if (e.kind == "call") validate(target(e, owner));
-    else if (e.kind != "int" && e.kind != "real" && e.kind != "bool" && e.kind != "name" &&
+    if (e.kind == "call") {
+      if (!a.mathCalls.count(&e)) validate(target(e, owner));
+    } else if (e.kind != "int" && e.kind != "real" && e.kind != "bool" && e.kind != "name" &&
              e.kind != "typeMember" && e.kind != "cast" && e.kind != "unary" && e.kind != "binary" &&
              e.kind != "conditional" && e.kind != "compileTime" && e.kind != "macroValue")
       reject("expression '" + e.kind + "' is not allowed");
@@ -383,6 +384,62 @@ class Interpreter {
 
     for (const auto &s : f.body) validateStatement(*s, index);
   }
+  // Mirrors the lowering in Codegen: floats compute at double and round once.
+  Value math(const Expr &e, size_t owner, Environment &env) {
+    using Function = double (*)(double, double);
+    static const std::map<std::string, Function> reals{
+        {"Sqrt", [](double a, double) { return std::sqrt(a); }},
+        {"Cbrt", [](double a, double) { return std::cbrt(a); }},
+        {"Exp", [](double a, double) { return std::exp(a); }},
+        {"Exp2", [](double a, double) { return std::exp2(a); }},
+        {"Log", [](double a, double) { return std::log(a); }},
+        {"Log2", [](double a, double) { return std::log2(a); }},
+        {"Log10", [](double a, double) { return std::log10(a); }},
+        {"Sin", [](double a, double) { return std::sin(a); }},
+        {"Cos", [](double a, double) { return std::cos(a); }},
+        {"Tan", [](double a, double) { return std::tan(a); }},
+        {"Asin", [](double a, double) { return std::asin(a); }},
+        {"Acos", [](double a, double) { return std::acos(a); }},
+        {"Atan", [](double a, double) { return std::atan(a); }},
+        {"Sinh", [](double a, double) { return std::sinh(a); }},
+        {"Cosh", [](double a, double) { return std::cosh(a); }},
+        {"Tanh", [](double a, double) { return std::tanh(a); }},
+        {"Floor", [](double a, double) { return std::floor(a); }},
+        {"Ceil", [](double a, double) { return std::ceil(a); }},
+        {"Round", [](double a, double) { return std::round(a); }},
+        {"Trunc", [](double a, double) { return std::trunc(a); }},
+        {"Pow", [](double a, double b) { return std::pow(a, b); }},
+        {"Atan2", [](double a, double b) { return std::atan2(a, b); }},
+        {"Hypot", [](double a, double b) { return std::hypot(a, b); }},
+        {"Mod", [](double a, double b) { return std::fmod(a, b); }},
+        {"Min", [](double a, double b) { return std::fmin(a, b); }},
+        {"Max", [](double a, double b) { return std::fmax(a, b); }},
+    };
+    const auto name = memberName(e.token.text);
+    std::vector<Value> v;
+
+    for (const auto &argument : e.args) v.push_back(expression(*argument, owner, env));
+
+    tick();
+    const auto &x = v[0];
+    const Type type = x.type;
+    auto less = [&](const Value &a, const Value &b) { return binary("<", a, b).truth(); };
+
+    if (name == "Clamp") return less(x, v[1]) ? v[1] : less(v[2], x) ? v[2] : x;
+    if (name == "Lerp") return binary("+", x, binary("*", binary("-", v[1], x), v[2]));
+
+    if (!floating(type)) {
+      if (name == "Abs") return x.negative() ? integer(type, x.bits.negate()) : x;
+      if (name == "Sign") return integer(type, x.negative() ? Bits(1).negate() : Bits(x.bits.zero() ? 0 : 1));
+      if (name == "Min") return less(v[1], x) ? v[1] : x;
+      if (name == "Max") return less(x, v[1]) ? v[1] : x;
+    }
+
+    if (name == "Abs") return real(type, std::fabs(x.real));
+    if (name == "Sign") return real(type, x.real > 0 ? 1.0 : x.real < 0 ? -1.0 : x.real);
+
+    return real(type, reals.at(name)(x.real, v.size() > 1 ? v[1].real : 0.0));
+  }
   Value expression(const Expr &e, size_t owner, Environment &env) {
     tick();
 
@@ -415,7 +472,8 @@ class Interpreter {
 
       result = expression(*e.args[0], owner, env);
       env.pop_back();
-    } else if (e.kind == "call") {
+    } else if (a.mathCalls.count(&e)) result = math(e, owner, env);
+    else if (e.kind == "call") {
       const size_t index = target(e, owner);
       validate(index);
 

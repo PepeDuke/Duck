@@ -1500,6 +1500,47 @@ uint x = 0x05
 x &= 0x03
 Print(x)  	// 00000001 
 ``` 
+## Math in Duck
+`Math` is a namespace built into the compiler, so it needs no import and no
+native library. Programs cannot declare their own container called `Math`.
+
+``` c++
+float root = Math.Sqrt(16.0)
+int biggest = Math.Max(3, 7)
+float limited = Math.Clamp(value, 0.0, 1.0)
+```
+
+| Takes | Functions |
+| --- | --- |
+| float or double | `Sqrt` `Cbrt` `Exp` `Exp2` `Log` `Log2` `Log10` `Sin` `Cos` `Tan` `Asin` `Acos` `Atan` `Sinh` `Cosh` `Tanh` `Floor` `Ceil` `Round` `Trunc` `Pow(a, b)` `Atan2(y, x)` `Hypot(a, b)` `Mod(a, b)` `Lerp(a, b, t)` |
+| any fixed-width number | `Abs` `Sign` `Min(a, b)` `Max(a, b)` `Clamp(value, low, high)` |
+| vector containers | `Dot(a, b)` `Cross(a, b)` `Length(v)` `Distance(a, b)` `Normalize(v)` |
+
+All operands take one common type and the result has that type, so
+`Math.Sqrt(f)` on a float is a float and on a double is a double. The functions
+that need a fraction turn integer operands into double, or into float when the
+result is assigned to a float. `Round` rounds halves away from zero, and integer
+`Abs` wraps on the most negative value like other integer arithmetic.
+
+Duck has no vector type. A vector is any container whose fields are exactly
+`X`, `Y` and optionally `Z` and `W`, all float or all double. `Cross` needs all
+three of `X`, `Y`, `Z`. `Cross` and `Normalize` return the same container, and
+`Normalize` leaves a zero vector at zero.
+
+``` c++
+Vec3
+{
+    float X
+    float Y
+    float Z
+}
+
+Vec3 up = Math.Cross(right, forward)
+float facing = Math.Dot(up, normal)
+```
+
+Number functions also work in compile-time expressions: `#Math.Pow(2.0, 8.0)`.
+
 ## Lambda functions in Duck
 Lambda functions are initialized by @ symbol before, indicating the start of the Lambda function. We can use func type to store function reference.
 ``` c++

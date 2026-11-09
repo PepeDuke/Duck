@@ -316,6 +316,9 @@ public:
     }
 
     void linkFlags(const Link& config, Strings& flags) const {
+#ifndef _WIN32
+        flags.push_back("-lm"); // Math.Sin and friends call the C library.
+#endif
         for (const auto& directory : config.directories) {
             auto path = fs::weakly_canonical(root / fs::u8path(directory));
             if (!fs::is_directory(path)) fail("library directory not found: " + path.u8string());

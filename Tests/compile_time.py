@@ -679,15 +679,15 @@ Main() {
         self.run_source('''
 Main() {
     #int n = 6
-    Print(#Math.Factorial(n))
+    Print(#Calc.Factorial(n))
     Print(#Odd(13))
     Print(#Loops(8))
     #Nothing()
     { #int n = 3
-      Print(#Math.Factorial(n)) }
-    Print(#Math.Factorial(n))
+      Print(#Calc.Factorial(n)) }
+    Print(#Calc.Factorial(n))
 }
-Math #{
+Calc #{
     int Factorial(int n) {
         if n <= 1 { return 1 }
         return n * Factorial(n - 1)

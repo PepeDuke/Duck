@@ -50,6 +50,14 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
       "declare double @llvm.floor.f64(double)\ndeclare void @llvm.trap()\n";
   bool needsText = false, needsBig = false, needsDecimal = false, needsCollections = mainArguments;
   bool needsFunc = false, needsMeta = false, needsMarkup = false, needsScope = false;
+  std::map<std::string, std::string> mathImports;
+
+  for (const auto &f : functions) mathImports.insert(f.mathImports.begin(), f.mathImports.end());
+
+  // The floor intrinsic is declared above, and a program may import a C math
+  // function itself.
+  for (const auto &[symbol, declaration] : mathImports)
+    if (symbol != "llvm.floor.f64" && !nativeSymbols.count(symbol)) module += declaration;
 
   for (const auto &f : functions) needsScope = needsScope || f.usesScopeRuntime;
 

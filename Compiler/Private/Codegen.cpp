@@ -237,6 +237,7 @@ class Generator {
   bool usesCalendarRuntime = false, usesWideRuntime = false;
   bool usesBigRuntime = false, usesDecimalRuntime = false, usesCollectionRuntime = false;
   bool usesFuncRuntime = false, usesMetaRuntime = false, usesMarkupRuntime = false, usesScopeRuntime = false;
+  std::map<std::string, std::string> mathImports;
   std::set<std::string> scopeNames;
   Type functionResult = Type::Void; // What a return from the function being lowered gives.
   bool guardScopedPlace = false;    // The scoped place lowered next may be absent.
@@ -276,8 +277,9 @@ class Generator {
         analysis.indirectCalls.count(&e))
       return true;
 
-    if (e.kind == "call" && (e.receiver || analysis.callTargets.count(&e) || analysis.constructions.count(&e) ||
-                             analysis.reinitializations.count(&e)))
+    if (e.kind == "call" && !analysis.mathCalls.count(&e) &&
+        (e.receiver || analysis.callTargets.count(&e) || analysis.constructions.count(&e) ||
+         analysis.reinitializations.count(&e)))
       return true;
 
     if (e.receiver && runsCode(*e.receiver)) return true;
@@ -2686,6 +2688,8 @@ class Generator {
       return {Type::Void, ""};
     }
 
+    if (analysis.mathCalls.count(&e)) return lowerMath(e);
+
     if (op == "Length" || op == "CodeUnitAt") return lowerTextQuery(e);
 
     if (op == "IsValid" && !e.receiver) {
@@ -2780,6 +2784,184 @@ class Generator {
     }
 
     return address;
+  }
+  std::string mathCall(const std::string &symbol, const Type &type, const std::vector<std::string> &operands) {
+    const auto ir = irType(type);
+    std::string parameters, arguments;
+
+    for (const auto &operand : operands) {
+      parameters += (parameters.empty() ? "" : ", ") + ir;
+      arguments += (arguments.empty() ? "" : ", ") + ir + " " + operand;
+    }
+
+    mathImports[symbol] = "declare " + ir + " @" + symbol + "(" + parameters + ")\n";
+    auto id = fresh();
+    emit(id + " = call " + ir + " @" + symbol + "(" + arguments + ")");
+    return id;
+  }
+  std::string mathInstruction(const std::string &opcode, const Type &type, const std::string &a, const std::string &b) {
+    auto id = fresh();
+    emit(id + " = " + opcode + " " + irType(type) + " " + a + ", " + b);
+    return id;
+  }
+  std::string mathLess(const Type &type, const std::string &a, const std::string &b) {
+    return mathInstruction(floating(type) ? "fcmp olt" : unsignedInteger(type) ? "icmp ult" : "icmp slt", type, a, b);
+  }
+  std::string mathSelect(const std::string &condition, const Type &type, const std::string &yes, const std::string &no) {
+    auto id = fresh();
+    emit(id + " = select i1 " + condition + ", " + irType(type) + " " + yes + ", " + irType(type) + " " + no);
+    return id;
+  }
+  // The address path of a vector container's field, as an extractvalue list.
+  std::string mathField(const Type &vector, const std::string &name) {
+    MemberPath path;
+    functions.findField(vector.record, name, path);
+    std::string list;
+
+    for (auto index : path.indices) list += ", " + std::to_string(index);
+
+    return list;
+  }
+  Value lowerMathVector(const std::string &name, const std::vector<Value> &operands) {
+    const auto vector = operands[0].type;
+    const auto &fields = functions.records.at(vector.record).fields;
+    const Type component = fields[0].type;
+    using Components = std::vector<std::string>;
+    auto read = [&](const Value &value) {
+      Components parts;
+
+      for (const auto &field : fields) {
+        auto id = fresh();
+        emit(id + " = extractvalue " + irType(vector) + " " + value.value + mathField(vector, field.name.text));
+        parts.push_back(id);
+      }
+
+      return parts;
+    };
+    // Starting from an operand keeps anything the layout holds besides fields.
+    auto build = [&](const Components &parts) {
+      auto result = operands[0].value;
+
+      for (size_t i = 0; i < fields.size(); ++i) {
+        auto id = fresh();
+        emit(id + " = insertvalue " + irType(vector) + " " + result + ", " + irType(component) + " " + parts[i] +
+             mathField(vector, fields[i].name.text));
+        result = id;
+      }
+
+      return Value{vector, result};
+    };
+    auto dot = [&](const Components &a, const Components &b) {
+      auto sum = mathInstruction("fmul", component, a[0], b[0]);
+
+      for (size_t i = 1; i < a.size(); ++i)
+        sum = mathInstruction("fadd", component, sum, mathInstruction("fmul", component, a[i], b[i]));
+
+      return sum;
+    };
+    const auto sqrt = "llvm.sqrt." + std::string(component == Type::Float ? "f32" : "f64");
+    const auto a = read(operands[0]);
+
+    if (name == "Length") return {component, mathCall(sqrt, component, {dot(a, a)})};
+
+    if (name == "Normalize") {
+      const auto length = mathCall(sqrt, component, {dot(a, a)});
+      const auto nonzero = mathInstruction("fcmp une", component, length, "0.0");
+      Components parts;
+
+      // A zero vector has no direction and stays zero instead of becoming NaN.
+      for (const auto &part : a)
+        parts.push_back(mathSelect(nonzero, component, mathInstruction("fdiv", component, part, length), "0.0"));
+
+      return build(parts);
+    }
+
+    const auto b = read(operands[1]);
+
+    if (name == "Dot") return {component, dot(a, b)};
+
+    if (name == "Distance") {
+      Components difference;
+
+      for (size_t i = 0; i < a.size(); ++i) difference.push_back(mathInstruction("fsub", component, a[i], b[i]));
+
+      return {component, mathCall(sqrt, component, {dot(difference, difference)})};
+    }
+
+    auto cross = [&](size_t i, size_t j) {
+      return mathInstruction("fsub", component, mathInstruction("fmul", component, a[i], b[j]),
+                             mathInstruction("fmul", component, a[j], b[i]));
+    };
+    const auto x = cross(1, 2), y = cross(2, 0), z = cross(0, 1);
+    return build({x, y, z});
+  }
+  Value lowerMath(const Expr &e) {
+    const auto name = memberName(e.token.text);
+    std::vector<Value> values;
+
+    for (const auto &argument : e.args) values.push_back(expression(*argument));
+
+    if (recordValue(values[0].type)) return lowerMathVector(name, values);
+
+    const auto type = analysis.expressionTypes.at(&e);
+    const std::string suffix = type == Type::Float ? ".f32" : ".f64";
+    const auto &a = values[0].value;
+    const auto zero = floating(type) ? std::string("0.0") : std::string("0");
+    const auto one = floating(type) ? std::string("1.0") : std::string("1");
+    const auto minusOne = "-" + one;
+
+    if (name == "Abs") {
+      if (floating(type)) return {type, mathCall("llvm.fabs" + suffix, type, {a})};
+      if (unsignedInteger(type)) return values[0];
+
+      return {type, mathSelect(mathLess(type, a, zero), type, mathInstruction("sub", type, zero, a), a)};
+    }
+
+    if (name == "Sign") {
+      const auto negative = mathSelect(mathLess(type, a, zero), type, unsignedInteger(type) ? zero : minusOne,
+                                       floating(type) ? a : zero); // NaN and signed zeros stay as they are.
+      return {type, mathSelect(mathLess(type, zero, a), type, one, negative)};
+    }
+
+    if (name == "Min" || name == "Max") {
+      const auto &b = values[1].value;
+
+      if (floating(type)) return {type, mathCall((name == "Min" ? "llvm.minnum" : "llvm.maxnum") + suffix, type, {a, b})};
+
+      return {type, name == "Min" ? mathSelect(mathLess(type, b, a), type, b, a)
+                                  : mathSelect(mathLess(type, a, b), type, b, a)};
+    }
+
+    if (name == "Clamp") {
+      const auto &low = values[1].value, &high = values[2].value;
+      const auto capped = mathSelect(mathLess(type, high, a), type, high, a);
+      return {type, mathSelect(mathLess(type, a, low), type, low, capped)};
+    }
+
+    if (name == "Lerp") {
+      const auto span = mathInstruction("fsub", type, values[1].value, a);
+      return {type, mathInstruction("fadd", type, a, mathInstruction("fmul", type, span, values[2].value))};
+    }
+
+    // Exact operations round the same at either width, so float stays float.
+    static const std::map<std::string, std::string> exact{
+        {"Sqrt", "llvm.sqrt"}, {"Floor", "llvm.floor"}, {"Ceil", "llvm.ceil"}, {"Round", "llvm.round"}, {"Trunc", "llvm.trunc"}};
+
+    if (auto intrinsic = exact.find(name); intrinsic != exact.end())
+      return {type, mathCall(intrinsic->second + suffix, type, {a})};
+
+    // The rest run at double and round once, the same result #-evaluation gets.
+    static const std::map<std::string, std::string> inDouble{
+        {"Sin", "llvm.sin.f64"},    {"Cos", "llvm.cos.f64"},     {"Exp", "llvm.exp.f64"},   {"Exp2", "llvm.exp2.f64"},
+        {"Log", "llvm.log.f64"},    {"Log2", "llvm.log2.f64"},   {"Log10", "llvm.log10.f64"}, {"Pow", "llvm.pow.f64"},
+        {"Tan", "tan"},             {"Asin", "asin"},            {"Acos", "acos"},          {"Atan", "atan"},
+        {"Sinh", "sinh"},           {"Cosh", "cosh"},            {"Tanh", "tanh"},          {"Cbrt", "cbrt"},
+        {"Atan2", "atan2"},         {"Hypot", "hypot"},          {"Mod", "fmod"}};
+    std::vector<std::string> operands;
+
+    for (const auto &value : values) operands.push_back(convert(value, Type::Double).value);
+
+    return convert({Type::Double, mathCall(inDouble.at(name), Type::Double, operands)}, type);
   }
   Value lowerTextQuery(const Expr &e) {
     const auto &op = e.token.text;
@@ -3236,6 +3418,7 @@ class Generator {
     usesScopeRuntime = usesScopeRuntime || inner.usesScopeRuntime;
     usesLockRuntime = usesLockRuntime || inner.usesLockRuntime;
     scopeNames.insert(inner.scopeNames.begin(), inner.scopeNames.end());
+    mathImports.insert(inner.mathImports.begin(), inner.mathImports.end());
     cleanups.insert(inner.cleanups.begin(), inner.cleanups.end());
     destroys.insert(inner.destroys.begin(), inner.destroys.end());
     tables.insert(inner.tables.begin(), inner.tables.end());
@@ -4597,7 +4780,7 @@ public:
     output << ") {\nentry:\n" << allocations.str() << code.str() << "}\n\n" << thunks.str();
     return {globals.str(), output.str(), usesTextRuntime, usesHeapRuntime, usesTaskRuntime, usesLockRuntime,
             usesCalendarRuntime, usesWideRuntime, usesBigRuntime, usesDecimalRuntime, usesCollectionRuntime,
-            usesFuncRuntime, usesMetaRuntime, usesMarkupRuntime, usesScopeRuntime, cleanups, destroys, tables, helpers, types, scopeNames};
+            usesFuncRuntime, usesMetaRuntime, usesMarkupRuntime, usesScopeRuntime, cleanups, destroys, tables, helpers, types, scopeNames, mathImports};
   }
 };
 } // namespace

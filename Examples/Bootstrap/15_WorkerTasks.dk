@@ -14,7 +14,7 @@ int Fib(int n)
     return left + right
 }
 
-Math
+Calc
 #{
     long Cube(int n)
     {
@@ -38,7 +38,7 @@ Main()
 {
     // Both calls start before either result is needed.
     long a = Fib(24)
-    b : Math.Cube(30)
+    b : Calc.Cube(30)
     even : Even(7)
     Print(a)
     Print(b)
@@ -48,7 +48,7 @@ Main()
     for int i = 0; i < 4; i++
     {
         // Each iteration joins its task before the body's scope ends.
-        square : Math.Cube(i)
+        square : Calc.Cube(i)
         twice : Fib(i + 10)
         total += square + twice
     }

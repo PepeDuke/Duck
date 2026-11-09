@@ -134,8 +134,16 @@ accept explicit files/options only and never reads project configuration.
     can relax when computed paths exist.
   - The compile-time table is `Symbols::scripts`, keyed by normalized path. It is
     the natural basis for a run-time table if computed paths are added.
-- Static container function groups, such as `Math #{ int Twice(int n) { return
-  n * 2 } }`, called as `Math.Twice(3)`. Groups may be nested, repeated across
+- The reserved `Math` namespace. `checkMathCall` types `Math.X(...)` and records
+  it in `FunctionAnalysis::mathCalls`; `Symbols` rejects any declaration inside a
+  namespace named `Math`. Exact operations (`Sqrt`, `Floor`, ...) lower to float
+  or double LLVM intrinsics. Transcendental ones run at double through an
+  intrinsic or the C library and round once for float, which is also how the
+  compile-time interpreter evaluates them. Calls are pure for task scheduling.
+  Vector functions read a container whose only fields are `X`, `Y` and
+  optionally `Z` and `W`.
+- Static container function groups, such as `Calc #{ int Twice(int n) { return
+  n * 2 } }`, called as `Calc.Twice(3)`. Groups may be nested, repeated across
   files, or extended by adjacent `#{ ... }` blocks. Chained blocks allow at most
   one newline between them. Qualified function names must be unique.
   Inside a group, relative function names resolve from the innermost container

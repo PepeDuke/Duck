@@ -421,6 +421,33 @@ static void declareStatics(Symbols &symbols, const Program &program) {
                            "void*, or container");
   }
 }
+// Whether a qualified name sits inside a namespace called Math.
+static bool insideMath(const std::string &qualified) {
+  size_t start = 0;
+
+  for (auto dot = qualified.find('.'); dot != std::string::npos; start = dot + 1, dot = qualified.find('.', start))
+    if (qualified.compare(start, dot - start, "Math") == 0) return true;
+
+  return false;
+}
+// Math is the compiler's namespace, so `Math.X` always means the built-in.
+static void rejectMathDeclarations(const Symbols &symbols, const Program &program) {
+  const auto reject = [](const Token &at) {
+    fail(at, "'Math' is a compiler namespace and cannot be declared; choose another container name");
+  };
+
+  for (const auto &f : program)
+    if (insideMath(f.name.text)) reject(f.name);
+
+  for (const auto &[name, record] : symbols.records)
+    if (insideMath(name + ".")) reject(record.name);
+
+  for (const auto &[name, info] : symbols.enums)
+    if (insideMath(name + ".")) reject(info.declaration);
+
+  for (const auto &[name, info] : symbols.statics)
+    if (insideMath(name)) reject(info.declaration);
+}
 static void validateEntryPoint(const Symbols &symbols, bool requireEntry) {
   auto main = symbols.find("Main");
 
@@ -466,6 +493,7 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
   }
 
   declareStatics(symbols, program);
+  rejectMathDeclarations(symbols, program);
 
   // A type and a function or static field must not share a qualified name,
   // or `Name.Space()` and `Name.Space` would be ambiguous.

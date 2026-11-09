@@ -295,6 +295,12 @@ class EffectWalker {
       return;
     }
 
+    if (a.mathCalls.count(&e)) { // Pure: it only reads its operands.
+      for (const auto &argument : e.args) expression(*argument);
+
+      return;
+    }
+
     if (op == "Print" || op == "$T.fail" || op == "$T.show") current.external = true;
     if (e.receiver && memberName(op) == "Clear" && !a.callTargets.count(&e)) return write(*e.receiver, true);
     if (op == "IsValid" && !e.receiver) return read(*e.args[0]);

@@ -218,12 +218,12 @@ class Projects(unittest.TestCase):
 
     def test_static_container_interface(self):
         (self.root / "core.dk").write_text(
-            "Math #{ int Add(int a, int b) { return a + b } }", encoding="utf-8")
+            "Calc #{ int Add(int a, int b) { return a + b } }", encoding="utf-8")
         (self.root / "app.dk").write_text(
-            "Main() { Print(Math.Add(20, 22)) }", encoding="utf-8")
+            "Main() { Print(Calc.Add(20, 22)) }", encoding="utf-8")
         self.invoke()
         output = self.root / ".duck/build/debug"
-        self.assertIn("declare i32 @duck.Math.Add", (output / "app.ll").read_text())
+        self.assertIn("declare i32 @duck.Calc.Add", (output / "app.ll").read_text())
         exe = output / ("Demo.exe" if os.name == "nt" else "Demo")
         self.assertEqual(subprocess.check_output([str(exe)], text=True).strip(), "42")
 

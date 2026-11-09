@@ -457,6 +457,7 @@ struct FunctionAnalysis {
   std::set<const Stmt *> moves;
   // Calls resolved to a calendar built-in such as Year or AddDays.
   std::set<const Expr *> calendarCalls;
+  std::set<const Expr *> mathCalls; // Calls to the compiler's Math namespace.
   std::map<const Stmt *, Type> localTypes;
   std::set<const Stmt *> scopedBorrows;
   std::set<const Expr *> receiverStorage;
@@ -656,6 +657,8 @@ struct FunctionIR {
   // Containers whose type descriptors this function reads.
   std::set<std::string> types;
   std::set<std::string> scopeNames; // Named scopes this function refers to.
+  // Declarations by symbol of the intrinsics and C math functions Math calls use.
+  std::map<std::string, std::string> mathImports;
 };
 FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
                          const FunctionAnalysis &analysis);
