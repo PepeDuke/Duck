@@ -130,9 +130,13 @@ for supported types and ABI limits. Linking alone does not infer declarations.
 
 This is build-time modularity. Enabling a module includes code but does not
 automatically register or execute it. Runtime plugin discovery, stable ABI,
-lifecycle hooks, and dynamic unloading need a separate design. Parallel jobs,
-incremental caching, package downloads, and distribution commands are not yet
-implemented; each invocation recompiles its selected modules.
+lifecycle hooks, and dynamic unloading need a separate design. Incremental
+caching, package downloads, and distribution commands are not yet implemented;
+each invocation recompiles its selected modules.
+
+`duck build` compiles modules concurrently, up to one per CPU, and links once
+they all succeed. Output still appears in build order and stops at the first
+failing module, as in a serial build. `duck test` builds modules one at a time.
 
 ## Running Duck tests
 

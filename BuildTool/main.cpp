@@ -1,18 +1,22 @@
 #include "Process.h"
 #include "vendor/tomlplusplus/toml.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <random>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
@@ -606,6 +610,74 @@ static int test(const Options& options, const fs::path& bin) {
     return 0;
 }
 
+struct ModuleStep { std::string command, output; };
+struct ModuleBuild {
+    std::vector<ModuleStep> steps;
+    std::string error;
+    bool finished = false;
+};
+
+// Compiles the modules concurrently, which is safe because a module's compile
+// reads only source files, never another module's output. Results are printed
+// in build order and stop at the first failure, so output matches a serial
+// build and an error in a dependency is not repeated by each of its dependents.
+static void compileModules(const Project& project, const Plan& sources, const std::string& compiler,
+                           const std::string& clang, const std::string& optimize, const fs::path& directory) {
+    std::vector<ModuleBuild> builds(sources.size());
+    std::mutex mutex;
+    std::condition_variable finished;
+    // Modules are claimed in order, so every module before a failed one has
+    // been claimed and will finish.
+    std::atomic<size_t> next{0};
+    std::atomic<bool> stop{false};
+    const auto worker = [&] {
+        while (!stop) {
+            const size_t index = next++;
+            if (index >= sources.size()) return;
+            auto& build = builds[index];
+            const auto step = [&](const Strings& command) {
+                build.steps.push_back({duckbuild::commandLine(command), {}});
+                run(command, build.steps.back().output);
+            };
+            const auto& id = sources[index].first;
+            const auto ir = directory / (id + ".ll"), object = directory / (id + ".o");
+            try {
+                step(compileCommand(project, sources, compiler, id, id != project.entry ? "--library" : "", ir));
+                step({clang, "-c", optimize, ir.u8string(), "-o", object.u8string()});
+            } catch (const std::exception& error) {
+                build.error = error.what();
+                stop = true;
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                build.finished = true;
+            }
+            finished.notify_all();
+        }
+    };
+    std::vector<std::thread> workers;
+    const size_t count = std::min<size_t>(sources.size(), std::max(1u, std::thread::hardware_concurrency()));
+    for (size_t i = 0; i < count; ++i) workers.emplace_back(worker);
+    std::string failure;
+    for (const auto& build : builds) {
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            finished.wait(lock, [&] { return build.finished; });
+        }
+        for (const auto& step : build.steps) {
+            std::cout << step.command << std::endl;
+            std::cerr << step.output << std::flush;
+        }
+        if (!build.error.empty()) {
+            failure = build.error;
+            break;
+        }
+    }
+    // Commands still running finish before the work directory is removed.
+    for (auto& thread : workers) thread.join();
+    if (!failure.empty()) fail(failure);
+}
+
 static void build(const Options& options, const fs::path& bin) {
     Project project(options);
     auto sources = project.plan(options.module);
@@ -618,13 +690,12 @@ static void build(const Options& options, const fs::path& bin) {
     }
     const auto destination = project.buildDir / options.profile;
     WorkDirectory work(destination);
+    compileModules(project, sources, compiler, clang, options.profile == "debug" ? "-O0" : "-O2", work.path);
     Paths artifacts;
     Strings objects;
     for (const auto& [id, files] : sources) {
         auto ir = work.path / (id + ".ll"), object = work.path / (id + ".o");
         (void)files;
-        run(compileCommand(project, sources, compiler, id, id != project.entry ? "--library" : "", ir));
-        run({clang, "-c", options.profile == "debug" ? "-O0" : "-O2", ir.u8string(), "-o", object.u8string()});
         objects.push_back(object.u8string());
         artifacts.insert(artifacts.end(), {ir, object});
     }

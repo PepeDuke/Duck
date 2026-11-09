@@ -1,6 +1,7 @@
 #include "Process.h"
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #ifdef _WIN32
 #define NOMINMAX
@@ -108,10 +109,17 @@ int execute(const std::vector<std::string>& arguments) {
     return static_cast<int>(status);
 }
 
-int capture(const std::vector<std::string>& arguments, std::string& output) {
+// Held from creating a pipe until the parent closes its write end. A child
+// started in that window would inherit the write end of another command's
+// pipe, and that command's reader would not see end of file until the
+// unrelated child exited.
+static std::mutex launching;
+
+int capture(const std::vector<std::string>& arguments, std::string& output, bool mergeErrors) {
     std::cout.flush();
     output.clear();
     char buffer[4096];
+    std::unique_lock<std::mutex> launch(launching);
 #ifdef _WIN32
     SECURITY_ATTRIBUTES inherit{};
     inherit.nLength = sizeof(inherit);
@@ -128,7 +136,7 @@ int capture(const std::vector<std::string>& arguments, std::string& output) {
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESTDHANDLES;
     startup.hStdOutput = writeEnd;
-    startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    startup.hStdError = mergeErrors ? writeEnd : GetStdHandle(STD_ERROR_HANDLE);
     startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     PROCESS_INFORMATION process{};
     const auto application = fs::u8path(arguments.front()).wstring();
@@ -139,6 +147,7 @@ int capture(const std::vector<std::string>& arguments, std::string& output) {
         throw std::runtime_error("cannot launch tool: " + arguments.front() + " (Windows error " + std::to_string(error) + ")");
     }
     CloseHandle(writeEnd);
+    launch.unlock();
     CloseHandle(process.hThread);
     DWORD count = 0;
     while (ReadFile(readEnd, buffer, sizeof(buffer), &count, nullptr) && count) output.append(buffer, count);
@@ -159,12 +168,14 @@ int capture(const std::vector<std::string>& arguments, std::string& output) {
     if (child < 0) throw std::runtime_error("cannot launch tool: " + std::string(std::strerror(errno)));
     if (child == 0) {
         dup2(ends[1], 1);
+        if (mergeErrors) dup2(ends[1], 2);
         close(ends[0]);
         close(ends[1]);
         execv(argv[0], argv.data());
         _exit(127);
     }
     close(ends[1]);
+    launch.unlock();
     for (ssize_t count; (count = read(ends[0], buffer, sizeof(buffer))) != 0;) {
         if (count < 0) {
             if (errno == EINTR) continue;
@@ -192,14 +203,31 @@ void setEnvironment(const std::string& name, const std::string& value) {
 #endif
 }
 
-void run(const std::vector<std::string>& arguments, bool echo) {
-    if (echo) {
-        for (const auto& argument : arguments) std::cout << '"' << argument << "\" ";
-        std::cout << std::endl;
-    }
-    const int status = execute(arguments);
+std::string commandLine(const std::vector<std::string>& arguments) {
+    std::string line;
+    for (const auto& argument : arguments) line += '"' + argument + "\" ";
+    return line;
+}
+
+static void requireSuccess(int status, const std::vector<std::string>& arguments) {
     if (status != 0) throw std::runtime_error("tool failed with exit code " +
         std::to_string(status) + ": " + arguments.front());
+}
+
+void run(const std::vector<std::string>& arguments, bool echo) {
+    if (echo) std::cout << commandLine(arguments) << std::endl;
+    requireSuccess(execute(arguments), arguments);
+}
+
+void run(const std::vector<std::string>& arguments, std::string& output) {
+    const int status = capture(arguments, output, true);
+    // Tools write CRLF into the pipe on Windows, and the stream this is
+    // replayed through would turn each LF into CRLF again.
+    size_t kept = 0;
+    for (size_t i = 0; i < output.size(); ++i)
+        if (output[i] != '\r' || i + 1 == output.size() || output[i + 1] != '\n') output[kept++] = output[i];
+    output.resize(kept);
+    requireSuccess(status, arguments);
 }
 
 void publish(const fs::path& source, const fs::path& destination) {

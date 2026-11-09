@@ -321,6 +321,17 @@ class Projects(unittest.TestCase):
         result = self.invoke("--module", "core", success=False)
         self.assertIn("library module cannot define Main", result.stderr)
 
+    def test_modules_report_in_build_order(self):
+        output = self.invoke().stdout
+        positions = [output.index(name) for name in ("core.ll", "core.o", "app.ll", "app.o", "Demo")]
+        self.assertEqual(positions, sorted(positions), output)
+
+    def test_broken_dependency_is_reported_once(self):
+        (self.root / "core.dk").write_text("int Add(int a, int b) {", encoding="utf-8")
+        result = self.invoke(success=False)
+        self.assertEqual(result.stderr.count("is still open"), 1, result.stderr)
+        self.assertNotIn("app.ll", result.stdout)
+
     def test_failure_does_not_publish(self):
         (self.root / "app.dk").write_text("Main() { Missing() }", encoding="utf-8")
         self.invoke(success=False)
