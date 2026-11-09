@@ -421,6 +421,33 @@ static void declareStatics(Symbols &symbols, const Program &program) {
                            "void*, or container");
   }
 }
+// vecN and friends are ordinary containers from here on, so copies, fields,
+// references, arrays and heap storage need no special handling. A matrix's
+// columns have no name: only indexing reaches them.
+static void addNativeMathTypes(Symbols &symbols) {
+  static const char *const stems[] = {"vec", "ivec", "dvec", "mat", "dmat"};
+  static const char *const axes[] = {"X", "Y", "Z", "W"};
+
+  for (const std::string stem : stems)
+    for (char size = '2'; size <= '4'; ++size) {
+      const auto name = stem + size;
+      const auto shape = nativeMath(name);
+
+      if (!shape) continue;
+
+      Record record;
+      record.name.text = name;
+
+      for (unsigned i = 0; i < std::max(shape.columns, shape.matrix() ? 0u : shape.rows); ++i) {
+        Parameter field;
+        field.name.text = shape.matrix() ? "$" + std::to_string(i) : std::string(axes[i]);
+        field.type = shape.element();
+        record.fields.push_back(field);
+      }
+
+      symbols.records.emplace(name, record);
+    }
+}
 // Whether a qualified name sits inside a namespace called Math.
 static bool insideMath(const std::string &qualified) {
   size_t start = 0;
@@ -472,6 +499,7 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
   // Declarations of one container merge in input order, so every module and
   // file order sees the same field layout. Each must repeat the parent list.
   mergeRecordFragments(symbols, program);
+  addNativeMathTypes(symbols);
   // Markup decides what its containers store: children under a tag, and a
   // `value` field typed by the literal written there.
   addMarkupFields(symbols, program);

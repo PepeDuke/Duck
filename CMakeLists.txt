@@ -52,6 +52,9 @@ if(BUILD_TESTING)
     add_test(NAME compiler.wide_integers COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/Tests/wide_integers.py
       --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
+    add_test(NAME compiler.vectors COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/Tests/vectors.py
+      --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
     add_test(NAME compiler.math COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/Tests/math.py
       --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})

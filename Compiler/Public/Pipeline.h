@@ -458,6 +458,8 @@ struct FunctionAnalysis {
   // Calls resolved to a calendar built-in such as Year or AddDays.
   std::set<const Expr *> calendarCalls;
   std::set<const Expr *> mathCalls; // Calls to the compiler's Math namespace.
+  std::set<const Expr *> nativeMethods; // v.Length() and vec3.Identity().
+  std::set<const Expr *> nativeInPlace; // The ones that also update stored receivers.
   std::map<const Stmt *, Type> localTypes;
   std::set<const Stmt *> scopedBorrows;
   std::set<const Expr *> receiverStorage;
@@ -692,6 +694,7 @@ std::string lockRuntimeIR(const std::set<std::string> &nativeSymbols);
 std::string testRunnerIR(const std::vector<std::pair<std::string, std::string>> &tests,
                          const std::set<std::string> &nativeSymbols);
 std::string emitRecords(const Symbols &symbols);
+std::string emitNativeMathTypes(const Symbols &symbols, const std::string &module);
 std::string emitEnums(const Symbols &symbols);
 std::string emitDeclarations(const Symbols &symbols);
 // Defines this module's static storage and declares imported storage.

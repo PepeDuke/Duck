@@ -461,11 +461,13 @@ std::string compileModule(const Program &program, const Program &imports,
   }
 
   const std::string runner = tests ? buildTestRunner(program, nativeSymbols) : std::string();
-  return emitRecords(symbols) + helperIR + emitEnums(symbols) + emitStatics(symbols) + emitCleanups(symbols, cleanups) +
-         emitDestroys(symbols, destroys) + emitTables(symbols, tables, types) +
-         emitDeclarations(declarations) +
-         assembleModule(fragments, entry, nativeSymbols,
-                        entry && !symbols.at("Main").parameters.empty()) +
-         runner;
+  const std::string module =
+      emitRecords(symbols) + helperIR + emitEnums(symbols) + emitStatics(symbols) + emitCleanups(symbols, cleanups) +
+      emitDestroys(symbols, destroys) + emitTables(symbols, tables, types) +
+      emitDeclarations(declarations) +
+      assembleModule(fragments, entry, nativeSymbols,
+                     entry && !symbols.at("Main").parameters.empty()) +
+      runner;
+  return emitNativeMathTypes(symbols, module) + module;
 }
 } // namespace duck

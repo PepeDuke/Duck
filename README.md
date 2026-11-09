@@ -337,6 +337,11 @@ i1-64   // example i8, 8 byte signed integer (i8 = long; i64 holds 512 bits)
 date     // civil date, proleptic Gregorian, 0001-01-01 .. 9999-12-31
 time     // time of day, 00:00:00 .. 23:59:59.999999999 (nanoseconds)
 datetime // date + time; none of the three carry a timezone
+vec2 vec3 vec4    // 2, 3 or 4 floats
+dvec2 dvec3 dvec4 // 2, 3 or 4 doubles
+ivec2 ivec3 ivec4 // 2, 3 or 4 ints
+mat3 mat4         // 3x3 or 4x4 floats, column-major
+dmat3 dmat4       // 3x3 or 4x4 doubles, column-major
 // special types are
 big   // <-- that holds arbitrary size of int number --- should be used only for working with very large numbers
 ubig  // nonnegative big; a subtraction that would go below zero traps
@@ -365,6 +370,117 @@ Integer literals may use decimal, hexadecimal (`0xFF`), or binary (`0b1010`)
 notation. Prefixes may also be uppercase. Their values use the same type
 inference and range checks regardless of base; `0xFF` means positive 255.
 Leading zeroes alone keep decimal notation (`012` means 12).
+
+### Comparing floats
+
+`==` and `!=` on `float` and `double` allow for rounding error, so
+`0.1 + 0.2 == 0.3` is true. Two values match when they differ by at most
+`0.00001` for float or `0.000000001` for double, scaled up by the larger value
+once it is above 1. Infinities equal themselves and NaN equals nothing. `<`,
+`>`, `<=` and `>=` stay exact.
+
+To set the tolerance yourself, put it in parentheses directly before the
+operator, with no space between `)` and `==`. It can be any number expression:
+
+``` c++
+if a (0.5)== b { }       // true when a and b differ by at most 0.5
+if a (0.5)!= b { }       // true when they differ by more
+if a (0.0)== b { }       // exact comparison
+if a (step * 2.0)== b { }
+```
+
+There must be a space before the `(`, because `f(0.5)== b` calls `f`.
+
+### Vectors and matrices
+
+The vector and matrix types are built into the compiler. They are value types:
+assigning or passing one copies it. Components are `X`, `Y`, `Z` and `W`, or an
+index. A matrix is indexed by column, so `m[column][row]`. A declared but
+unassigned vector or matrix is all zeros.
+
+``` c++
+vec3 position = vec3(1.0, 2.0, 3.0)
+position.Y += 1.0
+Print(position[1])            // 3
+Print(position)               // (1, 3, 3)
+
+mat4 transform = mat4(1.0)    // identity
+transform[3][0] = 5.0         // column 3, row 0
+Print(transform * vec4(1.0))  // (6, 1, 1, 1)
+```
+
+| Constructor | Result |
+| --- | --- |
+| `vec3()` | all zeros |
+| `vec3(x, y, z)` | the given components |
+| `vec3(s)` | every component set to `s` |
+| `vec4(v2, z, w)` | scalars and vectors in order, adding up to the size |
+| `vec3(v4)` | the leading components of a larger vector |
+| `dvec3(v)`, `ivec3(v)`, `vec3(d)` | a vector of another scalar type |
+| `mat3(s)` | `s` on the diagonal, zeros elsewhere |
+| `mat3(c0, c1, c2)` | the given column vectors |
+| `mat3(a, b, c, d, e, f, g, h, i)` | scalars in column order |
+| `mat3(m4)`, `mat4(m3)`, `dmat4(m)` | the overlap, with identity filling the rest |
+
+The operators are:
+
+| Expression | Meaning |
+| --- | --- |
+| `a + b`, `a - b`, `a * b`, `a / b` on two vectors | component by component |
+| vector with a scalar, on either side | applied to each component |
+| `m + n`, `m - n` | component by component |
+| `m * n`, `m * v` | matrix product, and matrix times column vector |
+| `m * s`, `s * m`, `m / s` | applied to each component |
+| `-a` | negates each component |
+| `a == b`, `a != b` | `==` is true only when every component matches, with the float tolerance above |
+| `a (0.5)== b` | every component within the given tolerance |
+| `+=`, `-=`, `*=`, `/=` | as above, when the result keeps the left side's type |
+
+Both operands must use the same scalar type; `vec3 + dvec3` is an error, so
+convert one with `dvec3(v)`. A lone scalar follows the usual implicit
+conversions, so `dvec3 * 2.0` works and `vec3 * someDouble` does not. An index
+outside the vector or matrix traps, as does dividing an `ivec` by zero.
+
+Vectors and matrices also have methods. `Normalize` changes the vector it is
+called on and also returns it. Every other method returns a new value and
+leaves the original unchanged, so ignoring its result is a compile error.
+`Math.Normalize(v)` returns a new vector and leaves `v` alone.
+
+``` c++
+target.Normalize()                      // target is now unit length
+vec3 direction = target.Normalize()     // also gives you the result
+float speed = velocity.Length()
+vec3 side = forward.Cross(up)
+mat4 view = camera.Inverse()
+```
+
+| Called on | Methods |
+| --- | --- |
+| `vecN`, `dvecN` | `Length()` `LengthSquared()` `Normalize()` `Dot(v)` `Distance(v)` `Lerp(v, t)` |
+| `vec3`, `dvec3` | `Cross(v)` |
+| every vector, including `ivecN` | `Abs()` `Min(v)` `Max(v)` |
+| `matN`, `dmatN` | `Transpose()` `Inverse()` `Determinant()` |
+
+`Normalize` leaves a zero vector at zero. `Min` and `Max` work component by
+component. `Inverse` of a singular matrix gives infinities or NaN, so check
+`Determinant()` first when a matrix might not be invertible.
+
+The types themselves provide starting values:
+
+| Function | Result |
+| --- | --- |
+| `mat4.Identity()` | ones on the diagonal, zeros elsewhere |
+| `vec3.Identity()`, `vec3.One()` | all ones, so `v * vec3.Identity() == v` |
+| `vec3.Zero()`, `mat4.Zero()` | all zeros |
+
+Vectors work directly with `Math.Dot`, `Math.Cross`, `Math.Length`,
+`Math.Distance` and `Math.Normalize`, except `ivec`, which has no fractional
+result to give.
+
+Components are tightly packed, so `vec3` is 12 bytes and `mat4` is 64 bytes
+laid out as sixteen floats. That matches GLSL `mat4` and vertex attributes. It
+does not match `vec3` or `mat3` inside a `std140` or `std430` block, where
+GLSL pads each three-component column to 16 bytes.
 
 ## Explicit type casts in Duck
 

@@ -273,6 +273,21 @@ class EffectWalker {
       return;
     }
 
+    if (a.nativeInPlace.count(&e)) {
+      // The target of a pointer receiver is not known here.
+      if (a.expressionTypes.at(e.receiver.get()).depth) current.unknown = true;
+      else write(*e.receiver, true);
+
+      return;
+    }
+
+    if (nativeMath(e.castType) || a.nativeMethods.count(&e)) { // Pure: it only reads its operands.
+      if (e.receiver) expression(*e.receiver);
+      for (const auto &argument : e.args) expression(*argument);
+
+      return;
+    }
+
     if (auto built = a.constructions.find(&e); built != a.constructions.end() || recordValue(e.castType)) {
       const auto type = a.expressionTypes.at(&e);
 

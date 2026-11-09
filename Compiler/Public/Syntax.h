@@ -147,6 +147,43 @@ inline bool trackedAlias(const Type &t) { return t.depth == 1 && t.role == Type:
 // A func value is one word: a reference-counted closure, or null.
 inline bool funcValue(const Type &t) { return !t.depth && t.base == Type::Func; }
 inline bool recordValue(const Type &t) { return !t.depth && t.base == Type::Record; }
+// The compiler's own vecN, ivecN, dvecN, matN and dmatN value types. They are
+// containers the compiler registers, packed like an array of their scalars;
+// the type words are reserved, so no program can declare one of these names.
+struct NativeMath {
+  Type::Kind scalar = Type::Void;
+  unsigned columns = 0, rows = 0; // A vector has one column.
+  explicit operator bool() const { return rows != 0; }
+  bool matrix() const { return columns > 1; }
+  // What indexing gives: a vector's scalar, or a matrix's column vector.
+  Type element() const {
+    if (!matrix()) return scalar;
+
+    Type column(Type::Record);
+    column.record = (scalar == Type::Double ? "dvec" : "vec") + std::to_string(rows);
+    return column;
+  }
+};
+inline NativeMath nativeMath(const std::string &name) {
+  if (name.size() < 4 || name.size() > 5) return {};
+
+  const unsigned size = unsigned(name.back() - '0');
+  const auto stem = name.substr(0, name.size() - 1);
+
+  if (size >= 2 && size <= 4) {
+    if (stem == "vec") return {Type::Float, 1, size};
+    if (stem == "ivec") return {Type::Int, 1, size};
+    if (stem == "dvec") return {Type::Double, 1, size};
+  }
+
+  if (size >= 3 && size <= 4) {
+    if (stem == "mat") return {Type::Float, size, size};
+    if (stem == "dmat") return {Type::Double, size, size};
+  }
+
+  return {};
+}
+inline NativeMath nativeMath(const Type &t) { return recordValue(t) ? nativeMath(t.record) : NativeMath{}; }
 // `T [N]` stores N elements inline; `T []` is a handle to growable heap
 // storage, null while empty.
 inline bool arrayValue(const Type &t) { return !t.depth && t.base == Type::Array; }
@@ -218,6 +255,8 @@ inline bool numeric(const Type &t) { return integral(t) || floating(t); }
 inline bool heapValue(const Type &t) { return numeric(t) || t == Type::Bool || recordValue(t); }
 // Whether Print accepts a value of this type.
 inline bool printable(const Type &t) {
+  if (nativeMath(t)) return true;
+
   return t != Type::Void && !t.depth && !recordValue(t) && !arrayValue(t) && !collectionValue(t) && !funcValue(t);
 }
 inline int integerLiteralBase(const std::string &text) {

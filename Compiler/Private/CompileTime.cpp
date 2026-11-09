@@ -225,6 +225,19 @@ class Interpreter {
 
     return integer(target, bits);
   }
+  // Mirrors floatEquality in Codegen.
+  static bool floatsMatch(const Value &a, const Value &b, const Value *tolerance) {
+    if (a.real == b.real) return true;
+
+    const double gap = std::fabs(real(a.type, a.real - b.real).real);
+
+    if (!std::isfinite(gap)) return false;
+    if (tolerance) return gap <= tolerance->real;
+
+    const double epsilon = a.type == Type::Float ? double(1e-5f) : 1e-9;
+    const double larger = real(a.type, std::fmax(std::fabs(a.real), std::fabs(b.real))).real;
+    return gap <= real(a.type, epsilon * std::fmax(larger, 1.0)).real;
+  }
   Value binary(const std::string &op, Value a, Value b) {
     tick();
     const bool comparison = op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=";
@@ -233,8 +246,8 @@ class Interpreter {
       bool result = false;
 
       if (floating(a.type)) {
-        if (op == "==") result = a.real == b.real;
-        if (op == "!=") result = a.real != b.real;
+        if (op == "==") result = floatsMatch(a, b, nullptr);
+        if (op == "!=") result = !floatsMatch(a, b, nullptr);
         if (op == "<") result = a.real < b.real;
         if (op == ">") result = a.real > b.real;
         if (op == "<=") result = a.real <= b.real;
@@ -510,7 +523,13 @@ class Interpreter {
         result = skip ? left : expression(*e.args[1], owner, env);
       } else {
         auto right = expression(*e.args[1], owner, env);
-        result = binary(e.token.text, left, right);
+
+        if (e.args.size() == 3) {
+          const auto tolerance = expression(*e.args[2], owner, env);
+          const bool same = floatsMatch(left, right, &tolerance);
+          result = integer(Type::Bool, Bits(e.token.text == "==" ? same : !same));
+        } else
+          result = binary(e.token.text, left, right);
       }
     } else reject("expression '" + e.kind + "' is not a constant argument");
 

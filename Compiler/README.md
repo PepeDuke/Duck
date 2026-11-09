@@ -134,6 +134,12 @@ accept explicit files/options only and never reads project configuration.
     can relax when computed paths exist.
   - The compile-time table is `Symbols::scripts`, keyed by normalized path. It is
     the natural basis for a run-time table if computed paths are added.
+- Native `vecN`, `ivecN`, `dvecN`, `matN` and `dmatN`. `nativeMath` in `Syntax.h`
+  describes a type's shape from its reserved name. `addNativeMathTypes` registers
+  each as an ordinary container, so storage, copies and references use the
+  container paths, with `X`..`W` fields or unnameable column fields. Constructors,
+  operators, `Print` and indexing are native: `slotIn` indexes the packed storage
+  as a fixed array. They are not available in `#` compile-time evaluation.
 - The reserved `Math` namespace. `checkMathCall` types `Math.X(...)` and records
   it in `FunctionAnalysis::mathCalls`; `Symbols` rejects any declaration inside a
   namespace named `Math`. Exact operations (`Sqrt`, `Floor`, ...) lower to float
@@ -297,7 +303,10 @@ a double initializer, assignment, argument, or return is parsed at double
 precision, including unary negation and ternary branches. Other arithmetic
 subexpressions determine their type from their operands before destination
 conversion; assigning a float calculation to double does not recover precision.
-Floating-point operations preserve IEEE behavior without fast-math assumptions:
+Floating-point `==` and `!=` are tolerant rather than bitwise (see
+`floatEquality` in Codegen, mirrored by `floatsMatch` in the compile-time
+interpreter); `a (t)== b` parses to a binary node with `t` as a third operand.
+Other floating-point operations preserve IEEE behavior without fast-math assumptions:
 NaN compares unequal, ordered comparisons with NaN are false, and division by
 zero may produce infinities or NaN. Out-of-range literal overflow is rejected;
 very small literals may round to zero. The older conversion examples still need

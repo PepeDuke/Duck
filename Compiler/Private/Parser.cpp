@@ -586,7 +586,11 @@ class Parser {
            at("float") || at("double") || at("bool") || at("void") || at("cstring") ||
            at("string") || at("name") || at("char") || at("date") ||
            at("time") || at("datetime") || at("big") || at("ubig") || at("tiny") ||
-           at("utiny") || at("func") || markupKeyword();
+           at("utiny") || at("func") || nativeMathType() || markupKeyword();
+  }
+  bool nativeMathType() const {
+    const auto &token = tokens.at(pos);
+    return !token.string && !token.character && nativeMath(token.text);
   }
   // `markup` is a type only where one can be: it is still a usable name.
   bool markupKeyword() const {
@@ -599,7 +603,7 @@ class Parser {
   // char(...), date(...), time(...), and datetime(...) construct validated values.
   bool constructorType() const {
     const auto &next = tokens.at(pos + 1);
-    return (at("char") || at("date") || at("time") || at("datetime")) &&
+    return (at("char") || at("date") || at("time") || at("datetime") || nativeMathType()) &&
            !next.string && next.text == "(";
   }
   Type type() {
@@ -746,6 +750,12 @@ class Parser {
 
       for (size_t k = 1; k < length; ++k) pop();
 
+      return t;
+    }
+
+    if (nativeMathType()) {
+      Type t(Type::Record);
+      t.record = pop().text;
       return t;
     }
 
@@ -1153,6 +1163,14 @@ class Parser {
       e->castType = baseType();
       expect(".");
       e->token = identifier();
+
+      // vec3.Identity(): a function of the type rather than a limit like int.Max.
+      if (nativeMath(e->castType) && accept("(")) {
+        e->kind = "call";
+        e->token.text = e->castType.record + "." + e->token.text;
+        e->castType = Type();
+        e->args = callArguments();
+      }
     } else if (constructorType()) {
       e->kind = "construct";
       e->castType = baseType();
@@ -1201,10 +1219,37 @@ class Parser {
     expect("]");
     e = std::move(index);
   }
+  // The closing parenthesis of `a (0.5)== b`, or 0 if none is ahead. The
+  // operator touches the `)`, and a space before the `(` tells it from the
+  // call in `f(0.5)== b`.
+  size_t toleranceClose() const {
+    if (pos == 0 || !at("(")) return 0;
+
+    const auto &before = tokens[pos - 1], &open = tokens[pos];
+
+    if (before.line == open.line && before.column + int(before.text.size()) == open.column) return 0;
+
+    int depth = 0;
+
+    for (size_t k = pos; k + 1 < tokens.size(); ++k) {
+      const auto &token = tokens[k];
+
+      if (token.string) continue;
+      if (token.text == "(") ++depth;
+
+      if (token.text == ")" && --depth == 0) {
+        const auto &next = tokens[k + 1];
+        const bool comparison = !next.string && (next.text == "==" || next.text == "!=");
+        return comparison && next.line == token.line && next.column == token.column + 1 ? k : 0;
+      }
+    }
+
+    return 0;
+  }
   void postfixChain(std::unique_ptr<Expr> &e) {
     std::string path = e->kind == "name" ? e->token.text : "";
 
-    while (at(".") || at("(") || at("[") || at("..")) {
+    while (at(".") || (at("(") && !toleranceClose()) || at("[") || at("..")) {
       if (accept("..")) {
         duckCallSuffix(e);
         path.clear();
@@ -1272,7 +1317,21 @@ class Parser {
 
     // In a conditional's true arm, the first unparenthesized pipe is
     // its separator. Parentheses and call arguments start fresh expressions.
-    while (precedence(peek()) >= minimum && !(stopAtPipe && at("|"))) {
+    for (;;) {
+      if (const auto close = toleranceClose(); close && precedence(tokens[close + 1]) >= minimum) {
+        expect("(");
+        auto tolerance = expression();
+        expect(")");
+        auto parent = operatorNode("binary", std::move(e));
+        int p = precedence(parent->token);
+        parent->args.push_back(expression(p + 1, stopAtPipe));
+        parent->args.push_back(std::move(tolerance)); // A third operand marks a tolerance.
+        e = std::move(parent);
+        continue;
+      }
+
+      if (precedence(peek()) < minimum || (stopAtPipe && at("|"))) break;
+
       auto parent = operatorNode("binary", std::move(e));
       int p = precedence(parent->token);
       parent->args.push_back(expression(p + 1, stopAtPipe));

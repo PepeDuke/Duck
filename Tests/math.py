@@ -64,7 +64,7 @@ Main() {
   float f = Math.Sqrt(2.0)
   double d = Math.Sqrt(0.01)
   double tenth = 0.1
-  Print(d == tenth)
+  Print(d (0.0)== tenth)
   double wide = 2.0
   double root = Math.Sqrt(wide)
   Print(root * root > 2.0 - 0.000000001)
@@ -73,7 +73,7 @@ Main() {
   float fromInteger = Math.Sqrt(16)
   Print((int)fromInteger)
   double near = Math.Max(wide, 0.1)
-  Print(near == wide)
+  Print(near (0.0)== wide)
 }
 ''', ['1', '1', '1', '4', '4', '1'])
 

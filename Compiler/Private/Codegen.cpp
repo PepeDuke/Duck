@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstring>
+#include <iomanip>
 #include <optional>
 #include <sstream>
 #include <utility>
@@ -238,6 +240,7 @@ class Generator {
   bool usesBigRuntime = false, usesDecimalRuntime = false, usesCollectionRuntime = false;
   bool usesFuncRuntime = false, usesMetaRuntime = false, usesMarkupRuntime = false, usesScopeRuntime = false;
   std::map<std::string, std::string> mathImports;
+  std::optional<std::string> tolerance; // The (t)== being lowered, if any.
   std::set<std::string> scopeNames;
   Type functionResult = Type::Void; // What a return from the function being lowered gives.
   bool guardScopedPlace = false;    // The scoped place lowered next may be absent.
@@ -277,7 +280,7 @@ class Generator {
         analysis.indirectCalls.count(&e))
       return true;
 
-    if (e.kind == "call" && !analysis.mathCalls.count(&e) &&
+    if (e.kind == "call" && !analysis.mathCalls.count(&e) && !analysis.nativeMethods.count(&e) &&
         (e.receiver || analysis.callTargets.count(&e) || analysis.constructions.count(&e) ||
          analysis.reinitializations.count(&e)))
       return true;
@@ -1907,6 +1910,9 @@ class Generator {
     return instruction;
   }
   Value binary(const std::string &op, Value a, Value b) {
+    if (nativeMath(a.type) || nativeMath(b.type)) return nativeBinary(op, a, b);
+    if (floating(a.type) && (op == "==" || op == "!=")) return floatEquality(op, a, b);
+
     if (funcValue(a.type)) {
       auto compared = fresh();
       emit(compared + " = icmp " + (op == "==" ? "eq" : "ne") + " ptr " + a.value + ", null");
@@ -2458,6 +2464,10 @@ class Generator {
   }
   // The slot of e's element in the array or pair stored at holder.
   std::string slotIn(const Expr &e, const Type &holderType, const std::string &holder, bool guarded) {
+    // Packed scalars or columns, so the storage indexes as a plain array.
+    if (const auto shape = nativeMath(holderType))
+      return slotIn(e, Type::array(shape.element(), shape.matrix() ? shape.columns : shape.rows), holder, guarded);
+
     auto slot = fresh();
 
     if (holderType.base == Type::Pair) {
@@ -2688,6 +2698,8 @@ class Generator {
       return {Type::Void, ""};
     }
 
+    if (nativeMath(e.castType)) return lowerNativeConstruct(e);
+    if (analysis.nativeMethods.count(&e)) return lowerNativeMethod(e);
     if (analysis.mathCalls.count(&e)) return lowerMath(e);
 
     if (op == "Length" || op == "CodeUnitAt") return lowerTextQuery(e);
@@ -2785,6 +2797,280 @@ class Generator {
 
     return address;
   }
+  // A vector's or matrix's scalars, column by column.
+  std::vector<std::string> nativeParts(const Value &value) {
+    const auto shape = nativeMath(value.type);
+    std::vector<std::string> parts;
+
+    for (unsigned column = 0; column < shape.columns; ++column)
+      for (unsigned row = 0; row < shape.rows; ++row) {
+        auto id = fresh();
+        emit(id + " = extractvalue " + irType(value.type) + " " + value.value +
+             (shape.matrix() ? ", " + std::to_string(column) : "") + ", " + std::to_string(row));
+        parts.push_back(id);
+      }
+
+    return parts;
+  }
+  Value nativeBuild(const Type &type, const std::vector<std::string> &parts) {
+    const auto shape = nativeMath(type);
+    const Type scalar = shape.scalar;
+    std::string result = "poison";
+
+    for (unsigned column = 0; column < shape.columns; ++column)
+      for (unsigned row = 0; row < shape.rows; ++row) {
+        auto id = fresh();
+        emit(id + " = insertvalue " + irType(type) + " " + result + ", " + irType(scalar) + " " +
+             parts[column * shape.rows + row] + (shape.matrix() ? ", " + std::to_string(column) : "") + ", " +
+             std::to_string(row));
+        result = id;
+      }
+
+    return {type, result};
+  }
+  Value lowerNativeConstruct(const Expr &e) {
+    const auto type = e.castType;
+    const auto shape = nativeMath(type);
+    const Type scalar = shape.scalar;
+    const auto total = shape.columns * shape.rows;
+
+    if (e.args.empty()) return {type, "zeroinitializer"};
+
+    const std::string zero = floating(scalar) ? "0.0" : "0", one = floating(scalar) ? "1.0" : "1";
+    std::vector<Value> values;
+
+    for (const auto &argument : e.args) values.push_back(expression(*argument));
+
+    std::vector<std::string> parts(total, zero);
+    const auto from = nativeMath(values[0].type);
+
+    if (values.size() == 1 && !from) { // Fill a vector, or a matrix's diagonal.
+      for (unsigned i = 0; i < total; ++i)
+        if (!shape.matrix() || i % (shape.rows + 1) == 0) parts[i] = values[0].value;
+    } else if (from.matrix()) { // The overlap is copied, and the rest is identity.
+      const auto source = nativeParts(values[0]);
+
+      for (unsigned column = 0; column < shape.columns; ++column)
+        for (unsigned row = 0; row < shape.rows; ++row)
+          parts[column * shape.rows + row] =
+              column < from.columns && row < from.rows
+                  ? convert({Type(from.scalar), source[column * from.rows + row]}, scalar).value
+              : column == row ? one : zero;
+    } else {
+      unsigned next_part = 0;
+
+      for (const auto &value : values) {
+        const auto source = nativeMath(value.type);
+
+        if (!source) {
+          parts[next_part++] = value.value;
+          continue;
+        }
+
+        for (const auto &part : nativeParts(value))
+          if (next_part < total) parts[next_part++] = convert({Type(source.scalar), part}, scalar).value;
+      }
+    }
+
+    return nativeBuild(type, parts);
+  }
+  Value nativeBinary(const std::string &op, const Value &a, const Value &b) {
+    const auto left = nativeMath(a.type), right = nativeMath(b.type);
+    const auto &shape = left ? left : right;
+    const Type scalar = shape.scalar;
+    const auto x = left ? nativeParts(a) : std::vector<std::string>(), y = right ? nativeParts(b) : std::vector<std::string>();
+    auto apply = [&](const char *code, const std::string &p, const std::string &q) {
+      return binary(code, {scalar, p}, {scalar, q}).value;
+    };
+
+    if (op == "==" || op == "!=") { // Equal only if every component is.
+      auto same = std::string("true");
+
+      for (size_t i = 0; i < x.size(); ++i) same = mathInstruction("and", Type::Bool, same, apply("==", x[i], y[i]));
+
+      return {Type::Bool, op == "==" ? same : mathInstruction("xor", Type::Bool, same, "true")};
+    }
+
+    if (op == "*" && left.matrix() && right) { // Linear algebra, not componentwise.
+      const auto n = left.rows;
+      const auto columns = right.columns;
+      std::vector<std::string> result;
+
+      for (unsigned column = 0; column < columns; ++column)
+        for (unsigned row = 0; row < n; ++row) {
+          auto sum = apply("*", x[row], y[column * n]);
+
+          for (unsigned k = 1; k < n; ++k) sum = apply("+", sum, apply("*", x[k * n + row], y[column * n + k]));
+
+          result.push_back(sum);
+        }
+
+      return nativeBuild(b.type, result);
+    }
+
+    std::vector<std::string> result;
+    const auto count = shape.columns * shape.rows;
+
+    for (unsigned i = 0; i < count; ++i)
+      result.push_back(apply(op.c_str(), left ? x[i] : a.value, right ? y[i] : b.value));
+
+    return nativeBuild(left ? a.type : b.type, result);
+  }
+  // The determinant of an n by n matrix of scalars in column order.
+  std::string nativeDeterminant(const Type &scalar, const std::vector<std::string> &m, unsigned n) {
+    auto times = [&](const std::string &a, const std::string &b) { return mathInstruction("fmul", scalar, a, b); };
+
+    if (n == 2) return mathInstruction("fsub", scalar, times(m[0], m[3]), times(m[2], m[1]));
+
+    std::string sum;
+
+    for (unsigned row = 0; row < n; ++row) {
+      const auto term = times(m[row], nativeDeterminant(scalar, nativeMinor(m, n, 0, row), n - 1));
+
+      if (sum.empty()) sum = term;
+      else sum = mathInstruction(row % 2 ? "fsub" : "fadd", scalar, sum, term);
+    }
+
+    return sum;
+  }
+  static std::vector<std::string> nativeMinor(const std::vector<std::string> &m, unsigned n, unsigned column, unsigned row) {
+    std::vector<std::string> minor;
+
+    for (unsigned c = 0; c < n; ++c)
+      for (unsigned r = 0; r < n; ++r)
+        if (c != column && r != row) minor.push_back(m[c * n + r]);
+
+    return minor;
+  }
+  // The adjugate over the determinant; a singular matrix gives infinities or
+  // NaN, as any other floating division by zero does.
+  Value nativeInverse(const Value &value) {
+    const auto shape = nativeMath(value.type);
+    const Type scalar = shape.scalar;
+    const auto n = shape.rows;
+    const auto m = nativeParts(value);
+    std::vector<std::string> cofactors(n * n);
+
+    for (unsigned column = 0; column < n; ++column)
+      for (unsigned row = 0; row < n; ++row) {
+        auto cofactor = nativeDeterminant(scalar, nativeMinor(m, n, column, row), n - 1);
+
+        if ((column + row) % 2) {
+          auto negated = fresh();
+          emit(negated + " = fneg " + irType(scalar) + " " + cofactor);
+          cofactor = negated;
+        }
+
+        cofactors[column * n + row] = cofactor;
+      }
+
+    auto determinant = mathInstruction("fmul", scalar, m[0], cofactors[0]);
+
+    for (unsigned row = 1; row < n; ++row)
+      determinant = mathInstruction("fadd", scalar, determinant, mathInstruction("fmul", scalar, m[row], cofactors[row]));
+
+    std::vector<std::string> result(n * n);
+
+    for (unsigned column = 0; column < n; ++column)
+      for (unsigned row = 0; row < n; ++row)
+        result[column * n + row] = mathInstruction("fdiv", scalar, cofactors[row * n + column], determinant);
+
+    return nativeBuild(value.type, result);
+  }
+  Value lowerNativeMethod(const Expr &e) {
+    const auto name = memberName(e.token.text);
+
+    if (!e.receiver) { // vec3.Identity(), mat4.Zero() and the like.
+      const auto type = analysis.expressionTypes.at(&e);
+      const auto shape = nativeMath(type);
+      const std::string zero = floating(shape.scalar) ? "0.0" : "0", one = floating(shape.scalar) ? "1.0" : "1";
+      std::vector<std::string> parts(shape.columns * shape.rows, name == "Zero" ? zero : one);
+
+      if (name == "Identity" && shape.matrix())
+        for (unsigned i = 0; i < parts.size(); ++i)
+          if (i % (shape.rows + 1)) parts[i] = zero;
+
+      return nativeBuild(type, parts);
+    }
+
+    const auto held = analysis.expressionTypes.at(e.receiver.get());
+    const bool inPlace = analysis.nativeInPlace.count(&e) != 0;
+    std::string address;
+    Value self;
+
+    if (held.depth || inPlace) { // Taken once, so an index in the receiver runs once.
+      const Type stored = held.depth ? held.pointee() : held;
+      address = held.depth ? dereference(*e.receiver).value : location(*e.receiver).value;
+      auto loaded = fresh();
+      emit(loaded + " = load " + irType(stored) + ", ptr " + address);
+      self = {stored, loaded};
+    } else
+      self = expression(*e.receiver);
+
+    const auto shape = nativeMath(self.type);
+    const Type scalar = shape.scalar;
+    std::vector<Value> values{self};
+
+    for (const auto &argument : e.args) values.push_back(expression(*argument));
+
+    if (name == "Inverse") return nativeInverse(self);
+    if (name == "Determinant") return {scalar, nativeDeterminant(scalar, nativeParts(self), shape.rows)};
+
+    if (name == "Transpose") {
+      const auto parts = nativeParts(self);
+      std::vector<std::string> flipped(parts.size());
+
+      for (unsigned column = 0; column < shape.columns; ++column)
+        for (unsigned row = 0; row < shape.rows; ++row) flipped[column * shape.rows + row] = parts[row * shape.rows + column];
+
+      return nativeBuild(self.type, flipped);
+    }
+
+    if (name == "Abs" || name == "Min" || name == "Max") {
+      auto parts = nativeParts(self);
+      const auto other = name == "Abs" ? std::vector<std::string>() : nativeParts(values[1]);
+
+      for (size_t i = 0; i < parts.size(); ++i) {
+        std::vector<Value> operands{{scalar, parts[i]}};
+
+        if (!other.empty()) operands.push_back({scalar, other[i]});
+
+        parts[i] = mathScalar(name, scalar, operands).value;
+      }
+
+      return nativeBuild(self.type, parts);
+    }
+
+    if (name == "Lerp") return binary("+", self, binary("*", binary("-", values[1], self), values[2]));
+
+    const auto result = lowerMathVector(name, values);
+
+    if (inPlace) emit("store " + irType(result.type) + " " + result.value + ", ptr " + address);
+
+    return result;
+  }
+  Value printNative(const Value &value) {
+    const auto shape = nativeMath(value.type);
+    const auto parts = nativeParts(value);
+    const std::string spec = floating(shape.scalar) ? "%g" : "%d";
+    std::string format = shape.matrix() ? "[" : "", arguments;
+
+    for (unsigned column = 0; column < shape.columns; ++column) {
+      format += column ? ", (" : "(";
+
+      for (unsigned row = 0; row < shape.rows; ++row) {
+        format += (row ? ", " : "") + spec;
+        const auto part = convert({Type(shape.scalar), parts[column * shape.rows + row]},
+                                  floating(shape.scalar) ? Type(Type::Double) : Type(Type::Int));
+        arguments += ", " + irType(part.type) + " " + part.value;
+      }
+
+      format += ")";
+    }
+
+    emit("call i32 (ptr, ...) @printf(ptr " + textConstant(format + (shape.matrix() ? "]\n" : "\n")) + arguments + ")");
+    return {Type::Void, ""};
+  }
   std::string mathCall(const std::string &symbol, const Type &type, const std::vector<std::string> &operands) {
     const auto ir = irType(type);
     std::string parameters, arguments;
@@ -2863,6 +3149,7 @@ class Generator {
     const auto a = read(operands[0]);
 
     if (name == "Length") return {component, mathCall(sqrt, component, {dot(a, a)})};
+    if (name == "LengthSquared") return {component, dot(a, a)};
 
     if (name == "Normalize") {
       const auto length = mathCall(sqrt, component, {dot(a, a)});
@@ -2903,7 +3190,9 @@ class Generator {
 
     if (recordValue(values[0].type)) return lowerMathVector(name, values);
 
-    const auto type = analysis.expressionTypes.at(&e);
+    return mathScalar(name, analysis.expressionTypes.at(&e), values);
+  }
+  Value mathScalar(const std::string &name, const Type &type, const std::vector<Value> &values) {
     const std::string suffix = type == Type::Float ? ".f32" : ".f64";
     const auto &a = values[0].value;
     const auto zero = floating(type) ? std::string("0.0") : std::string("0");
@@ -2982,6 +3271,8 @@ class Generator {
   }
   Value lowerPrint(const Expr &e) {
     auto v = expression(*e.args[0]);
+
+    if (nativeMath(v.type)) return printNative(v);
 
     if (bigInteger(v.type)) {
       usesBigRuntime = true;
@@ -3096,6 +3387,8 @@ class Generator {
 
     if (e.kind == "char")
       return Value{Type::Char, std::to_string(decodeUTF8(e.token).front())};
+
+    if (e.kind == "construct" && nativeMath(e.castType)) return lowerNativeConstruct(e);
 
     if (e.kind == "construct")
       return construct(e);
@@ -3316,6 +3609,20 @@ class Generator {
       return {a.type, id};
     }
 
+    if (e.kind == "unary" && nativeMath(a.type)) {
+      const Type scalar = nativeMath(a.type).scalar;
+      auto parts = nativeParts(a);
+
+      for (auto &part : parts) {
+        auto negated = fresh();
+        emit(negated + (floating(scalar) ? " = fneg " + irType(scalar) + " " + part
+                                         : " = sub " + irType(scalar) + " 0, " + part));
+        part = negated;
+      }
+
+      return nativeBuild(a.type, parts);
+    }
+
     if (e.kind == "unary") {
       if (floating(a.type)) {
         emit(id + " = fneg " + irType(a.type) + " " + a.value);
@@ -3329,7 +3636,45 @@ class Generator {
     }
 
     auto b = expression(*e.args[1]);
+
+    if (e.args.size() == 3) {
+      const auto outer = tolerance;
+      tolerance = expression(*e.args[2]).value;
+      const auto result = binary(op, a, b);
+      tolerance = outer;
+      return result;
+    }
+
     return binary(op, a, b);
+  }
+  // Within the written tolerance, or by default within a small margin that
+  // grows with the operands' size. Equal infinities match; NaN never does.
+  Value floatEquality(const std::string &op, const Value &a, const Value &b) {
+    const auto &type = a.type;
+    const std::string suffix = type == Type::Float ? ".f32" : ".f64";
+    const auto fabs = "llvm.fabs" + suffix, maxnum = "llvm.maxnum" + suffix;
+    const auto exact = mathInstruction("fcmp oeq", type, a.value, b.value);
+    const auto gap = mathCall(fabs, type, {mathInstruction("fsub", type, a.value, b.value)});
+    std::string limit;
+
+    if (tolerance) limit = *tolerance;
+    else {
+      const auto larger = mathCall(maxnum, type, {mathCall(fabs, type, {a.value}), mathCall(fabs, type, {b.value})});
+      limit = mathInstruction("fmul", type, floatEpsilon(type), mathCall(maxnum, type, {larger, "1.0"}));
+    }
+
+    const auto close = mathInstruction("fcmp ole", type, gap, limit);
+    const auto finite = mathInstruction("fcmp one", type, gap, "0x7FF0000000000000");
+    const auto equal = mathInstruction("or", Type::Bool, exact, mathInstruction("and", Type::Bool, close, finite));
+    return {Type::Bool, op == "==" ? equal : mathInstruction("xor", Type::Bool, equal, "true")};
+  }
+  static std::string floatEpsilon(const Type &type) {
+    const double value = type == Type::Float ? double(1e-5f) : 1e-9;
+    uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    std::ostringstream text;
+    text << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(16) << bits;
+    return text.str();
   }
   // The word capture `index` occupies in the closure at `base`.
   std::string captureSlot(const std::string &base, size_t index) {
@@ -4790,10 +5135,34 @@ FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
 
   return Generator(symbols, analysis, function.name.text).generate(function);
 }
+// The definitions of the native vector and matrix types a module mentions.
+// Matrices go first because defining one mentions its column vector.
+std::string emitNativeMathTypes(const Symbols &symbols, const std::string &module) {
+  std::string ir;
+
+  for (const bool matrices : {true, false})
+    for (const auto &[name, record] : symbols.records) {
+      const auto shape = nativeMath(name);
+      const auto symbol = "%struct." + name;
+
+      if (!shape || shape.matrix() != matrices) continue;
+      if (module.find(symbol) == std::string::npos && ir.find(symbol) == std::string::npos) continue;
+
+      ir += symbol + " = type { ";
+
+      for (size_t i = 0; i < record.fields.size(); ++i) ir += (i ? ", " : "") + irType(record.fields[i].type);
+
+      ir += " }\n";
+    }
+
+  return ir;
+}
 std::string emitRecords(const Symbols &symbols) {
   std::string ir;
 
   for (const auto &[name, record] : symbols.records) {
+    if (nativeMath(name)) continue; // emitNativeMathTypes adds the ones in use.
+
     ir += "%struct." + name + " = type { ";
 
     if (record.fields.empty()) ir += "i8"; // Give empty instances an addressable byte.

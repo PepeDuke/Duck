@@ -1751,14 +1751,16 @@ class Analyzer {
       return true;
     }
 
-    if (!arrayValue(local.type))
+    const auto shape = nativeMath(local.type);
+
+    if (!arrayValue(local.type) && !shape)
       fail(e.token, "only arrays and pairs can be indexed; " + typeName(local.type) + " cannot");
 
     if (const auto index = expression(*e.args[1]); !integral(index) && !enumValue(index))
       fail(e.args[1]->token, "an array index must be an integer, not " + typeName(index));
 
     expression(*e.args[1], Type::Long);
-    local.type = *local.type.element;
+    local.type = shape ? shape.element() : *local.type.element;
     return false;
   }
   bool memberLocation(const Expr &e, bool read, Local &local) {
@@ -2601,7 +2603,11 @@ class Analyzer {
     const auto &op = e.token.text;
 
     // `Gun g(5)` and `Gun* p(5)` arrive with the constructed type resolved.
+    if (nativeMath(e.castType)) return checkNativeConstruct(e);
     if (recordValue(e.castType)) return construction(e, e.castType.record);
+
+    if (const auto dot = op.find('.'); dot != std::string::npos && !e.receiver && nativeMath(op.substr(0, dot)))
+      return checkNativeStatic(e, op.substr(0, dot), op.substr(dot + 1));
 
     if (op.rfind("Math.", 0) == 0) return checkMathCall(e, expected);
 
@@ -2695,6 +2701,138 @@ class Analyzer {
   static bool numberLiteral(const Expr &e) {
     const auto &value = e.kind == "unary" && e.token.text == "-" ? *e.args[0] : e;
     return value.kind == "int" || value.kind == "real";
+  }
+  // The scalar a literal should be parsed as beside a native vector or matrix.
+  static Type nativeLiteralHint(const Expr &e, const NativeMath &shape) {
+    if (!numberLiteral(e)) return Type::Void;
+
+    const auto &literal = e.kind == "unary" ? *e.args[0] : e;
+    const Type scalar = shape.scalar;
+    return (literal.kind == "real" ? floating(scalar) : integral(scalar)) ? scalar : Type(Type::Void);
+  }
+  // vec3(x, y, z), vec3(s), vec4(v, w), vec3(other), mat3(s), mat3(a, b, c),
+  // mat3(nine scalars) and mat3(other). A constructor is the explicit way to
+  // change a vector's scalar type; lone scalars still convert only implicitly.
+  Type checkNativeConstruct(const Expr &e) {
+    const auto type = e.castType;
+    const auto shape = nativeMath(type);
+    const auto total = shape.columns * shape.rows;
+    const Type scalar = shape.scalar;
+    const bool single = e.args.size() == 1;
+    unsigned supplied = 0;
+    bool whole = e.args.empty();
+
+    for (const auto &argument : e.args) {
+      const auto given = decay(*argument, expression(*argument, nativeLiteralHint(*argument, shape)));
+      const auto source = nativeMath(given);
+
+      if (!source) {
+        if (!numeric(given)) fail(argument->token, typeName(type) + " requires numbers or vectors, got " + typeName(given));
+
+        convert(*argument, given, scalar);
+        supplied += 1;
+        whole = whole || single;
+      } else if (source.matrix()) {
+        if (!single || !shape.matrix()) fail(argument->token, "a matrix can only be passed alone to a matrix constructor");
+
+        whole = true;
+      } else {
+        if (shape.matrix() && source.rows != shape.rows)
+          fail(argument->token, typeName(type) + " takes columns of " + std::to_string(shape.rows) + " components, got " + typeName(given));
+
+        supplied += source.rows;
+        whole = whole || (single && !shape.matrix() && source.rows >= shape.rows);
+      }
+    }
+
+    if (!whole && supplied != total)
+      fail(e.token, typeName(type) + " needs " + std::to_string(total) + " components, got " + std::to_string(supplied));
+
+    return type;
+  }
+  // vec3.Identity(), vec3.Zero(), vec3.One(), mat4.Identity() and mat4.Zero().
+  Type checkNativeStatic(const Expr &e, const std::string &record, const std::string &name) {
+    Type type(Type::Record);
+    type.record = record;
+
+    if (name != "Identity" && name != "Zero" && (name != "One" || nativeMath(record).matrix()))
+      fail(e.token, record + " has no function '" + name + "'");
+
+    if (!e.args.empty()) fail(e.token, "wrong argument count for '" + e.token.text + "'");
+
+    analysis.nativeMethods.insert(&e);
+    return type;
+  }
+  // Every method returns its result; only Normalize also changes the receiver.
+  Type checkNativeMethod(const Expr &e, const Type &type) {
+    const auto shape = nativeMath(type);
+    const auto name = memberName(e.token.text);
+    const Type scalar = shape.scalar;
+    const bool fractional = floating(scalar);
+    Type result = Type::Void;
+    size_t count = 0;
+
+    if (shape.matrix()) {
+      if (name == "Transpose" || name == "Inverse") result = type;
+      else if (name == "Determinant") result = scalar;
+    } else if (name == "Abs") result = type;
+    else if (name == "Min" || name == "Max") { result = type; count = 1; }
+    else if (fractional) {
+      if (name == "Length" || name == "LengthSquared") result = scalar;
+      else if (name == "Normalize") result = type;
+      else if (name == "Dot" || name == "Distance") { result = scalar; count = 1; }
+      else if (name == "Cross" && shape.rows == 3) { result = type; count = 1; }
+      else if (name == "Lerp") { result = type; count = 2; }
+    }
+
+    if (result == Type::Void) fail(e.token, typeName(type) + " has no method '" + name + "'");
+    if (e.args.size() != count) fail(e.token, "wrong argument count for '" + name + "'");
+
+    analysis.nativeMethods.insert(&e);
+
+    if (count) {
+      const auto other = expression(*e.args[0]);
+
+      if (other != type) fail(e.args[0]->token, name + " requires " + typeName(type) + ", got " + typeName(other));
+    }
+
+    if (count == 2) {
+      const auto amount = decay(*e.args[1], expression(*e.args[1], nativeLiteralHint(*e.args[1], shape)));
+
+      if (!numeric(amount)) fail(e.args[1]->token, name + " requires a number, got " + typeName(amount));
+
+      convert(*e.args[1], amount, scalar);
+    }
+
+    return result;
+  }
+  Type nativeOperation(const std::string &op, const Token &token, const Type &first, const Type &second,
+                       const Expr *left, const Expr &right) {
+    const auto a = nativeMath(first), b = nativeMath(second);
+    auto refuse = [&]() { fail(token, "operator '" + op + "' does not apply to " + typeName(first) + " and " + typeName(second)); };
+    const bool equality = op == "==" || op == "!=";
+
+    if (!equality && op != "+" && op != "-" && op != "*" && op != "/") refuse();
+
+    if (a && b) {
+      if (first == second) {
+        if (a.matrix() && op == "/") refuse();
+
+        return equality ? Type(Type::Bool) : first;
+      }
+
+      if (op == "*" && a.matrix() && !b.matrix() && a.scalar == b.scalar && a.rows == b.rows) return second;
+
+      refuse();
+    }
+
+    const auto &shape = a ? a : b;
+
+    if (equality || !numeric(a ? second : first) || (shape.matrix() && (op == "+" || op == "-" || (!a && op == "/"))))
+      refuse();
+
+    convert(a ? right : *left, a ? second : first, shape.scalar);
+    return a ? first : second;
   }
   // Math.Name(...): the compiler's own namespace. Every operand takes one
   // type, and a function that needs a fraction turns integers into one.
@@ -2887,7 +3025,7 @@ class Analyzer {
       if (printed == Type::Void)
         fail(e.token, "cannot print void");
 
-      if (recordValue(printed)) fail(e.token, "cannot print a container");
+      if (recordValue(printed) && !nativeMath(printed)) fail(e.token, "cannot print a container");
 
       if (arrayValue(printed) || collectionValue(printed))
         fail(e.token, "cannot print " + typeName(printed) + " directly; print its elements");
@@ -2919,6 +3057,19 @@ class Analyzer {
     }
 
     if (t.depth) t = t.pointee();
+    if (nativeMath(t)) {
+      const auto result = checkNativeMethod(e, t);
+
+      // Normalize updates what it was called on and also returns it. A
+      // temporary has nothing to update, so it only gives the result.
+      if (memberName(op) == "Normalize" && stored) {
+        if (constant) fail(base.token, "cannot call a mutable method on a constant");
+
+        analysis.nativeInPlace.insert(&e);
+      }
+
+      return result;
+    }
     if (stored && !t.depth && (arrayValue(t) || collectionValue(t))) return checkCollectionClear(e, base, t, constant);
     if (!recordValue(t)) fail(base.token, "method receiver requires a container");
 
@@ -3027,6 +3178,11 @@ class Analyzer {
     const Type hint = binaryOperandHint(e, expected, first);
     auto second = decay(*e.args[1], expression(*e.args[1], hint));
 
+    if (e.args.size() == 3) checkTolerance(e, first, second);
+
+    if (nativeMath(first) || nativeMath(second))
+      return nativeOperation(op, e.token, first, second, e.args[0].get(), *e.args[1]);
+
     // Literals adopt the other operand's text type; named values never change encoding implicitly.
     if (e.args[0]->kind == "text" && textType(second) && textType(first)) {
       first = second;
@@ -3086,9 +3242,27 @@ class Analyzer {
 
     return isOrdering(op) ? Type::Bool : first;
   }
+  // `a (0.5)== b`: the tolerance takes the scalar type being compared.
+  void checkTolerance(const Expr &e, const Type &first, const Type &second) {
+    const auto shape = nativeMath(first) ? nativeMath(first) : nativeMath(second);
+    const Type scalar = shape ? Type(shape.scalar)
+                        : numeric(first) && numeric(second) ? commonNumeric(first, second) : Type(Type::Void);
+
+    if (!floating(scalar))
+      fail(e.token, "a comparison tolerance needs float or double operands, got " + typeName(first) + " and " + typeName(second));
+
+    const auto &tolerance = *e.args[2];
+    const auto given = decay(tolerance, expression(tolerance, nativeLiteralHint(tolerance, {scalar.base, 1, 1})));
+
+    if (!numeric(given)) fail(tolerance.token, "a comparison tolerance must be a number, got " + typeName(given));
+
+    convert(tolerance, given, scalar);
+  }
   Type binaryOperandHint(const Expr &e, const Type &expected, const Type &first) {
     const auto &op = e.token.text;
     Type hint = Type::Void;
+
+    if (const auto shape = nativeMath(first)) return nativeLiteralHint(*e.args[1], shape);
 
     if (op == "+" && managedText(expected)) hint = expected;
     // Only beyond 64 bits can a literal need its operand's width to be representable.
@@ -3189,6 +3363,7 @@ class Analyzer {
       return Type::Char;
 
     if (e.kind == "typeMember") return typeLimit(e);
+    if (e.kind == "construct" && nativeMath(e.castType)) return checkNativeConstruct(e);
     if (e.kind == "construct") return checkConstruct(e);
     if (e.kind == "cast") return checkCast(e);
     if (e.kind == "real" && decimalValue(expected)) return checkDecimalLiteral(e, expected);
@@ -3264,7 +3439,8 @@ class Analyzer {
                             (e.kind == "binary" && op == "+" && managedText(expected)) ||
                             leftLiteralAdopts(e, expected)
                                 ? expected
-                                : Type::Void);
+                                : e.kind == "binary" ? nativeLiteralHint(*e.args[0], nativeMath(expected))
+                                                     : Type(Type::Void));
 
     // Both conditional branches keep their enum type.
     if (e.kind != "conditional") first = decay(*e.args[0], first);
@@ -3284,6 +3460,12 @@ class Analyzer {
 
       if (first == Type::UBig || first == Type::UTiny)
         fail(e.token, "cannot negate unsigned " + typeName(first));
+
+      return first;
+    }
+
+    if (e.kind == "unary" && nativeMath(first)) {
+      if (op != "-") fail(e.token, "operator '" + op + "' does not apply to " + typeName(first));
 
       return first;
     }
@@ -3944,11 +4126,21 @@ class Analyzer {
         (s.kind == "+=" || s.kind == "-=" || s.kind == "*=" || s.kind == "/=" ||
          s.kind == "++" || s.kind == "--" || (s.kind == "%=" && bigInteger(local.type)));
 
-    if (s.kind != "assign" && !(s.kind == "+=" && managedText(local.type)) && !arbitraryArithmetic &&
-        (!numeric(local.type) || (s.kind == "%=" && !integral(local.type))))
+    const bool nativeCompound = s.kind != "assign" && nativeMath(local.type);
+
+    if (nativeCompound) {
+      if (s.kind != "+=" && s.kind != "-=" && s.kind != "*=" && s.kind != "/=")
+        fail(s.token, "'" + s.kind + "' does not apply to " + typeName(local.type));
+
+      const auto right = decay(*s.expr, expression(*s.expr, nativeLiteralHint(*s.expr, nativeMath(local.type))));
+
+      if (nativeOperation(s.kind.substr(0, 1), s.token, local.type, right, nullptr, *s.expr) != local.type)
+        fail(s.token, "'" + s.kind + "' must leave " + typeName(local.type) + " the same type");
+    } else if (s.kind != "assign" && !(s.kind == "+=" && managedText(local.type)) && !arbitraryArithmetic &&
+               (!numeric(local.type) || (s.kind == "%=" && !integral(local.type))))
       require(local.type, Type::Int, s.token);
 
-    if (s.expr) {
+    if (s.expr && !nativeCompound) {
       if (s.kind == "<<=" || s.kind == ">>=") {
         if (!integral(expression(*s.expr)))
           fail(s.expr->token, "bitwise operators require integer operands");
@@ -4030,8 +4222,12 @@ class Analyzer {
 
     if (s.kind == "let" || s.kind == "own") {
       checkLocalDeclaration(s);
-    } else if (s.kind == "expr")
+    } else if (s.kind == "expr") {
       expression(*s.expr);
+
+      if (analysis.nativeMethods.count(s.expr.get()) && !analysis.nativeInPlace.count(s.expr.get()))
+        fail(s.expr->token, "'" + s.expr->token.text + "()' returns a new value and changes nothing; use its result");
+    }
     else {
       return checkAssignment(s);
     }
