@@ -1234,7 +1234,7 @@ for -loop : loops {      // <-- reverse for each loop in loops  -- preferred if 
    loops -= loop        // <-- removes this element
 }
 ```
-Duck omits type as for each value must be the same type, Duck allows for sequence declaration with .. operator as it is the most used way to use loops
+Duck omits type as for each value must be the same type, Duck allows for sequence declaration with ... operator as it is the most used way to use loops
 ``` c++
 for i : 0...5 // <-- form  0 to 5 Inclusively, it executes loop body 6 times in total
 { 
@@ -1243,11 +1243,11 @@ for i : 5...0 // <-- form  5 to 0 inclusively
 {
 }
 ```
-sequence declaration with .. operator can be used outside of loops
+sequence declaration with ... operator can be used outside of loops
 ``` c++
 n : 0...5  // this will be interpreted as int [] n = {0,1,2,3,4,5}
 ```
-in .. operator we can also use variables to achieve the standard loop pattern "int i = 0; i < loops.Len;  i++"
+in ... operator we can also use variables to achieve the standard loop pattern "int i = 0; i < loops.Len;  i++"
 
 ``` c++
 for i : 0...loops.Len-1 
@@ -1687,7 +1687,7 @@ that need a fraction turn integer operands into double, or into float when the
 result is assigned to a float. `Round` rounds halves away from zero, and integer
 `Abs` wraps on the most negative value like other integer arithmetic.
 
-Duck has no vector type. A vector is any container whose fields are exactly
+A vector is any container whose fields are exactly
 `X`, `Y` and optionally `Z` and `W`, all float or all double. `Cross` needs all
 three of `X`, `Y`, `Z`. `Cross` and `Normalize` return the same container, and
 `Normalize` leaves a zero vector at zero.
