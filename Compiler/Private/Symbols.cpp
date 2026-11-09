@@ -487,11 +487,22 @@ static void rejectMathDeclarations(const Symbols &symbols, const Program &progra
   for (const auto &[name, info] : symbols.statics)
     if (insideMath(name)) reject(info.declaration);
 }
-static void validateEntryPoint(const Symbols &symbols, bool requireEntry) {
+static void validateEntryPoint(const Symbols &symbols, bool requireEntry, const Program &program) {
   auto main = symbols.find("Main");
 
-  if (requireEntry && main == symbols.end())
-    fail({"", 1, 1}, "program requires Main()");
+  if (requireEntry && main == symbols.end()) {
+    std::vector<std::string> names;
+
+    for (const auto &[name, signature] : symbols) {
+      (void)signature;
+      names.push_back(name);
+    }
+
+    const auto close = closestName("Main", names);
+    fail({"", 1, 1, false, program.sources.empty() ? "" : program.sources.front()},
+         "program requires Main(); " +
+             (close.empty() ? "add Main() { ... }, or compile with --library" : "found '" + close + "', but names are case-sensitive and the entry point must be exactly Main"));
+  }
 
   if (main != symbols.end()) {
     // The parser marks `string [] args` as a reference: see entryParameter.
@@ -527,7 +538,8 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
 
     if (f.name.text == "Print" || f.name.text == "Length" || f.name.text == "CodeUnitAt" || f.name.text == "Exec" ||
         !symbols.emplace(f.name.text, Signature{f.result, f.params, f.nativeSymbol, f.name, {}, f.method, f.protectedAccess, f.inferred, f.tags}).second)
-      fail(f.name, "duplicate or reserved function '" + f.name.text + "'");
+      fail(f.name, "duplicate or reserved function '" + f.name.text + "'" +
+                       (symbols.count(f.name.text) ? "; it is already declared at " + where(symbols.at(f.name.text).declaration) : ""));
 
     if (f.nativeSymbol.empty()) recordNonescapingParameters(symbols, f);
   }
@@ -546,7 +558,7 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
            "'" + name + "' is already declared as a container at " + where(record.name));
   }
 
-  validateEntryPoint(symbols, requireEntry);
+  validateEntryPoint(symbols, requireEntry, program);
   validateNativeSymbols(symbols);
   return symbols;
 }

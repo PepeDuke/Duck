@@ -256,6 +256,11 @@ accept explicit files/options only and never reads project configuration.
 - Line and block comments, newline statement terminators,
   and termination before `}`. Call arguments and parameter lists may span lines.
 - Source-file, line, and column diagnostics. Invalid programs do not write IR.
+  `duckc` prints the source line and a caret under each error's first line, so
+  tools can keep matching `file:line:column: error: message`. Bad names get a
+  "did you mean" suggestion (`closestName` in `Syntax.h`). Syntax errors stop at
+  the first one; function bodies are checked independently, so each function
+  reports its first error, up to 20 per run.
 
 Integer addition, subtraction, multiplication, and negation wrap at their
 respective 8-bit, 16-bit, 32-bit, or 64-bit width.

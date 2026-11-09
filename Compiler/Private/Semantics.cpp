@@ -383,7 +383,74 @@ class Analyzer {
         symbols.findField(container, token.text, path))
       fail(token, "initializers cannot read fields; '" + token.text + "' is a field of '" + container + "'");
 
-    fail(token, "unknown variable '" + token.text + "'");
+    fail(token, "unknown variable '" + token.text + "'" + didYouMean(token.text, visibleNames()));
+  }
+  // Every name a bare identifier could have meant here, nearest scope first.
+  std::vector<std::string> visibleNames() const {
+    std::vector<std::string> names;
+    auto add = [&](const Scopes &all) {
+      for (auto scope = all.rbegin(); scope != all.rend(); ++scope)
+        for (const auto &[name, local] : *scope) {
+          (void)local;
+          names.push_back(name);
+        }
+    };
+    add(scopes);
+
+    for (auto frame = frames.rbegin(); frame != frames.rend(); ++frame) add(frame->scopes);
+
+    const auto prefix = container + ".";
+
+    for (const auto &[key, info] : symbols.statics) {
+      (void)info;
+
+      if (key.rfind(prefix, 0) == 0) names.push_back(key.substr(prefix.size()));
+    }
+
+    for (const auto &[record, info] : symbols.records) {
+      (void)info;
+      names.push_back(record);
+    }
+
+    return names;
+  }
+  // Fields and readable properties of a container, inherited ones included.
+  std::vector<std::string> fieldNames(const std::string &record) const {
+    std::vector<std::string> names;
+
+    for (const auto &path : symbols.visibleFields(record))
+      if (!path.field->parentView) names.push_back(path.field->name.text);
+
+    for (const auto &member : symbols.dispatchNames(record))
+      if (member.rfind("get-", 0) == 0) names.push_back(member.substr(4));
+
+    return names;
+  }
+  // The likely target of a misspelled call, written as the call would be.
+  std::string functionSuggestion(const std::string &op) const {
+    const auto dot = op.rfind('.');
+    const auto qualifier = dot == std::string::npos ? std::string() : op.substr(0, dot + 1);
+    const auto scope = qualifier.empty() && !container.empty() ? container + "." : qualifier;
+    std::vector<std::string> names;
+
+    if (qualifier.empty()) names = {"Print", "Length", "CodeUnitAt", "Exec", "IsValid"};
+
+    for (const auto &[key, signature] : symbols) {
+      (void)signature;
+
+      if (qualifier.empty() && key.find('.') == std::string::npos) names.push_back(key);
+      else if (!scope.empty() && key.rfind(scope, 0) == 0 && key.find('.', scope.size()) == std::string::npos)
+        names.push_back(memberName(key));
+    }
+
+    if (qualifier.empty())
+      for (const auto &[record, info] : symbols.records) {
+        (void)info;
+        names.push_back(record);
+      }
+
+    const auto match = closestName(op.substr(qualifier.size()), names);
+    return match.empty() ? "" : "; did you mean '" + qualifier + match + "'?";
   }
   void requireInitialized(const Token &token) {
     if (!lookup(token).initialized)
@@ -431,8 +498,13 @@ class Analyzer {
 
     if (local.declaration.text.empty()) local.declaration = token;
 
-    if (!scopes.back().emplace(token.text, local).second)
-      fail(token, "duplicate variable '" + token.text + "'");
+    const auto [existing, added] = scopes.back().emplace(token.text, local);
+
+    if (!added)
+      fail(token, "duplicate variable '" + token.text + "'" +
+                      (existing->second.declaration.text.empty()
+                           ? ""
+                           : "; it is already declared at " + where(existing->second.declaration)));
   }
   // An enum operand decays to its underlying value; Print alone keeps the name.
   Type decay(const Expr &e, Type type) {
@@ -578,6 +650,10 @@ class Analyzer {
       analysis.conversions[&e] = to;
       return;
     }
+
+    if (numeric(from) && numeric(to))
+      fail(e.token, "type mismatch: expected " + typeName(to) + ", got " + typeName(from) +
+                        "; this conversion can lose data, so write an explicit cast: (" + typeName(to) + ")value");
 
     require(from, to, e.token);
   }
@@ -1064,6 +1140,39 @@ class Analyzer {
 
     path = root->token.text + path;
     return qualify(path, e.token, [&](const std::string &n) { return symbols.statics.count(n) != 0; });
+  }
+  // `Game.Scor` where Game is a container and no local: name the missing
+  // field rather than calling the container an unknown variable.
+  void rejectUnknownStatic(const Expr &e) {
+    std::string path;
+    const Expr *root = dottedRoot(*e.args[0], path);
+
+    if (root->kind != "name" || findLocal(root->token) || !staticPath(e).empty()) return;
+
+    if (std::string owner; propertyOf(*root, owner)) return;
+
+    // A static-only container has no record: its members are what show it exists.
+    const auto record = qualify(root->token.text + path, root->token, [&](const std::string &n) {
+      auto holds = [&](const auto &table) {
+        const auto member = table.lower_bound(n + ".");
+        return member != table.end() && member->first.rfind(n + ".", 0) == 0;
+      };
+      return symbols.records.count(n) != 0 || holds(symbols.statics) || holds(symbols);
+    });
+
+    if (record.empty()) return;
+
+    std::vector<std::string> names;
+
+    for (const auto &[key, info] : symbols.statics) {
+      (void)info;
+
+      if (key.rfind(record + ".", 0) == 0 && key.find('.', record.size() + 1) == std::string::npos)
+        names.push_back(memberName(key));
+    }
+
+    fail(e.token, "container '" + record + "' has no static field '" + e.token.text + "'" +
+                      didYouMean(e.token.text, names));
   }
   // True when e, or a dotted prefix of it, is static storage.
   bool staticStorage(const Expr &e) {
@@ -1772,6 +1881,8 @@ class Analyzer {
 
     if (std::string owner; propertyOf(e, owner)) notStorage(e);
 
+    rejectUnknownStatic(e);
+
     if (storage(base)) local = location(base);
     else {
       local.type = expression(base);
@@ -1803,7 +1914,8 @@ class Analyzer {
         return true;
       }
 
-      fail(e.token, "unknown container field '" + e.token.text + "'");
+      fail(e.token, "unknown container field '" + e.token.text + "'" +
+                        didYouMean(e.token.text, fieldNames(local.type.record)));
     }
 
     requireAccess(path.field->protectedAccess, path.declaring, e.token.text, e.token);
@@ -2278,7 +2390,8 @@ class Analyzer {
       MemberPath path;
 
       if (!symbols.findField(expected.record, field->token.text, path))
-        fail(field->token, "unknown container field");
+        fail(field->token, "unknown container field '" + field->token.text + "'" +
+                               didYouMean(field->token.text, fieldNames(expected.record)));
 
       requireAccess(path.field->protectedAccess, path.declaring, field->token.text, field->token);
 
@@ -2677,7 +2790,7 @@ class Analyzer {
           symbols.count(methodKey(owner, op.substr(dot == std::string::npos ? 0 : dot + 1))))
         fail(e.token, "'" + op + "' is an instance method; call it on a '" + owner + "' object");
 
-      fail(e.token, "unknown function '" + op + "'");
+      fail(e.token, "unknown function '" + op + "'" + functionSuggestion(op));
     }
 
     requireAccess(found, e.token);
@@ -2693,7 +2806,13 @@ class Analyzer {
     const size_t offset = signature.method ? 1 : 0;
 
     if (signature.parameters.size() != e.args.size() + offset)
-      fail(e.token, "wrong argument count for '" + op + "'");
+      fail(e.token, "wrong argument count for '" + op + "': expected " +
+                        std::to_string(signature.parameters.size() - offset) + ", got " +
+                        std::to_string(e.args.size()) +
+                        (signature.declaration.text.empty()
+                             ? ""
+                             : "; declared at " + where(signature.declaration) + " as " +
+                                   signatureText(signature.result, signature.parameters, offset)));
 
     arguments(e, signature, offset);
     return signature.result;
@@ -3199,7 +3318,8 @@ class Analyzer {
       return reinitialization(e, path.field->type.record, t.record, path.indices);
     }
 
-    if (found == symbols.end()) fail(e.token, "unknown instance method '" + op + "'");
+    if (found == symbols.end())
+      fail(e.token, "unknown instance method '" + op + "'" + didYouMean(name, symbols.dispatchNames(t.record)));
     if (constant) fail(base.token, "cannot call a mutable method on a constant");
     if (!path.indices.empty()) analysis.receiverPaths[&e] = {t.record, path.indices};
 
@@ -3328,8 +3448,13 @@ class Analyzer {
       convert(*e.args[0], first, type);
       convert(*e.args[1], second, type);
       first = type;
-    } else
+    } else {
+      if (first != second)
+        fail(e.token, "type mismatch: operator '" + op + "' cannot combine " + typeName(first) + " and " +
+                          typeName(second));
+
       require(second, first, e.token);
+    }
 
     if (op == "==" || op == "!=") {
       if (!numeric(first) && first != Type::Bool && first != Type::Pointer)
@@ -3489,8 +3614,14 @@ class Analyzer {
     if (auto info = enumOf(e)) {
       const auto index = info->find(e.token.text);
 
-      if (index == info->members.size())
-        fail(e.token, "unknown member '" + e.token.text + "' in enum '" + e.args[0]->token.text + "'");
+      if (index == info->members.size()) {
+        std::vector<std::string> members;
+
+        for (const auto &member : info->members) members.push_back(member.text);
+
+        fail(e.token, "unknown member '" + e.token.text + "' in enum '" + e.args[0]->token.text + "'" +
+                          didYouMean(e.token.text, members));
+      }
 
       analysis.enumMembers[&e] = index;
       Type type = Type::Enum;
@@ -3514,6 +3645,8 @@ class Analyzer {
 
     if (e.kind == "name" || e.kind == ".")
       if (const auto function = functionValue(e); function != Type::Void) return function;
+
+    if (e.kind == ".") rejectUnknownStatic(e);
 
     if (e.addressable()) {
       if (std::string owner; propertyOf(e, owner)) return propertyRead(e, owner);
@@ -4177,6 +4310,9 @@ class Analyzer {
   bool checkAssignment(const Stmt &s) {
     // `?a[i] = v` assigns only when the element exists.
     const auto &target = s.target->kind == "guard" ? *s.target->args[0] : *s.target;
+
+    if (target.kind == ".") rejectUnknownStatic(target);
+
     requireComplete(target);
     std::string owner;
     auto local = propertyOf(target, owner) ? Local{propertyWrite(target, owner, s.kind != "assign"), false}

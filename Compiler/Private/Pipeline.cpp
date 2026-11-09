@@ -390,9 +390,18 @@ std::string compileModule(const Program &program, const Program &imports,
 
   const auto generated = generateInitializers(symbols, declarations);
   std::vector<FunctionAnalysis> analyses;
+  // Signatures are settled and each body is checked on its own, so an error
+  // in one function cannot cause a false one in another: report them all.
+  std::vector<CompileError> errors;
+  auto analyze = [&](const Function &function) {
+    try {
+      analyses.push_back(analyzeFunction(function, symbols));
+    } catch (const CompileError &error) {
+      errors.push_back(error);
+    }
+  };
 
-  for (const auto &function : program)
-    analyses.push_back(analyzeFunction(function, symbols));
+  for (const auto &function : program) analyze(function);
 
   std::vector<const Function *> evaluatedFunctions;
 
@@ -400,8 +409,10 @@ std::string compileModule(const Program &program, const Program &imports,
 
   for (const auto &function : generated) {
     evaluatedFunctions.push_back(&function);
-    analyses.push_back(analyzeFunction(function, symbols));
+    analyze(function);
   }
+
+  if (!errors.empty()) throw CompileErrors(std::move(errors));
 
   evaluateCompileTimeCalls(evaluatedFunctions, analyses);
   markUnwinders(analyses, evaluatedFunctions, imports);

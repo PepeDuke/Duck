@@ -1,4 +1,6 @@
 #pragma once
+#include <algorithm>
+#include <cctype>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -29,6 +31,24 @@ inline std::string where(const Token &t) {
   return (t.source.empty() ? "<input>" : t.source) + ":" + std::to_string(t.line) + ":" +
          std::to_string(t.column);
 }
+// A rejected program. what() is the complete plain text; the token lets the
+// driver show the offending source line under the first line of that text.
+struct CompileError : std::runtime_error {
+  Token token;
+  CompileError(const std::string &text, Token at) : std::runtime_error(text), token(std::move(at)) {}
+};
+// Independent failures found in one pass, in source order.
+struct CompileErrors : std::runtime_error {
+  std::vector<CompileError> errors;
+  static std::string joined(const std::vector<CompileError> &errors) {
+    std::string text;
+
+    for (const auto &error : errors) text += (text.empty() ? "" : "\n") + std::string(error.what());
+
+    return text;
+  }
+  explicit CompileErrors(std::vector<CompileError> found) : std::runtime_error(joined(found)), errors(std::move(found)) {}
+};
 // A failure inside macro output names every expansion that produced the token.
 [[noreturn]] inline void fail(const Token &t, const std::string &message) {
   std::string text = where(t) + ": error: " + message;
@@ -37,7 +57,55 @@ inline std::string where(const Token &t) {
     text += "\n  note: in expansion of macro '" + e->macro + "' defined at " + where(e->definition) +
             ", called at " + where(e->call);
 
-  throw std::runtime_error(text);
+  throw CompileError(text, t);
+}
+// Case-insensitive optimal string alignment distance: edits, with an adjacent
+// swap counted as one, so `coutn` is one edit from `count`.
+inline size_t editDistance(std::string a, std::string b) {
+  auto lower = [](std::string &s) {
+    for (auto &c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+  };
+  lower(a);
+  lower(b);
+  std::vector<std::vector<size_t>> d(a.size() + 1, std::vector<size_t>(b.size() + 1));
+
+  for (size_t i = 0; i <= a.size(); ++i) d[i][0] = i;
+  for (size_t j = 0; j <= b.size(); ++j) d[0][j] = j;
+
+  for (size_t i = 1; i <= a.size(); ++i)
+    for (size_t j = 1; j <= b.size(); ++j) {
+      d[i][j] = std::min({d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] != b[j - 1])});
+
+      if (i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1])
+        d[i][j] = std::min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+
+  return d[a.size()][b.size()];
+}
+// The candidate a misspelled name most likely meant, or empty when none is
+// close. Compiler-generated names, which hold $, - or #, are never offered.
+inline std::string closestName(const std::string &name, const std::vector<std::string> &candidates) {
+  const size_t limit = std::min<size_t>(3, (name.size() + 1) / 3);
+  std::string best;
+  size_t bestDistance = limit + 1;
+
+  for (const auto &candidate : candidates) {
+    if (candidate == name || candidate.find_first_of("$-#") != std::string::npos) continue;
+
+    const auto distance = editDistance(name, candidate);
+
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+
+  return best;
+}
+// "; did you mean 'x'?" to append to a message, or nothing.
+inline std::string didYouMean(const std::string &name, const std::vector<std::string> &candidates) {
+  const auto match = closestName(name, candidates);
+  return match.empty() ? "" : "; did you mean '" + match + "'?";
 }
 struct FuncSignature;
 bool sameSignature(const FuncSignature *a, const FuncSignature *b);

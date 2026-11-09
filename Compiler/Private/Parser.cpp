@@ -44,11 +44,62 @@ class Parser {
     pop();
     return true;
   }
+  static std::string describe(const Token &t) {
+    if (t.string) return t.character ? "a character literal" : "a string literal";
+    if (t.text == "<eof>") return "end of file";
+    if (t.text == "\n") return "end of line";
+
+    return "'" + t.text + "'";
+  }
+  // For a missing closer, where the opener it would match is.
+  std::string stillOpen(const std::string &closer) const {
+    const char opener = closer == ")" ? '(' : closer == "]" ? '[' : closer == "}" ? '{' : '\0';
+
+    if (!opener) return "";
+
+    int depth = 0;
+
+    for (size_t k = pos; k-- > 0;) {
+      const auto &t = tokens[k];
+
+      if (t.string || t.text.empty()) continue;
+
+      if (t.text == closer) ++depth;
+      else if (t.text.back() == opener && depth-- == 0)
+        return " (the '" + t.text + "' at " + where(t) + " is still open)";
+    }
+
+    return "";
+  }
+  [[noreturn]] void expected(const std::string &s) const {
+    fail(peek(), "expected '" + s + "', found " + describe(peek()) + stillOpen(s));
+  }
   Token expect(const std::string &s) {
-    if (!at(s))
-      fail(peek(), "expected '" + s + "'");
+    if (!at(s)) expected(s);
 
     return pop();
+  }
+  [[noreturn]] void badStatementEnd(const std::string &suffix = "") const {
+    if (at(";")) fail(peek(), "expected newline after statement, found ';'; Duck statements end at a newline, so remove it");
+
+    fail(peek(), "expected newline or '}' after statement, found " + describe(peek()) + suffix);
+  }
+  std::vector<std::string> knownTypes() const {
+    std::vector<std::string> names{"int", "long", "short", "byte", "uint", "int8", "int16", "int32", "int64",
+                                   "uint8", "uint16", "uint32", "uint64", "float", "double", "bool", "void",
+                                   "string", "name", "cstring", "char", "date", "time", "datetime", "big",
+                                   "ubig", "tiny", "utiny", "func", "vec2", "vec3", "vec4", "mat3", "mat4",
+                                   "quat", "rot"};
+    names.insert(names.end(), containerNames.begin(), containerNames.end());
+    return names;
+  }
+  [[noreturn]] void unknownType(const Token &t) const {
+    fail(t, "unknown type '" + t.text + "'" + didYouMean(t.text, knownTypes()));
+  }
+  // Where a type is required: reports a misspelled one, when it is clear
+  // what was meant, instead of the position's general message.
+  void rejectMisspelledType(const Token &t) const {
+    if (isWord(t) && !closestName(t.text, knownTypes()).empty()) unknownType(t);
   }
   void lines() {
     while (accept("\n")) {
@@ -58,7 +109,7 @@ class Parser {
     auto t = peek();
 
     if (!isWord(t))
-      fail(t, "expected identifier");
+      fail(t, "expected identifier, found " + describe(t));
 
     if (isType() || t.text == "true" || t.text == "false" ||
         t.text == "return" || t.text == "if" || t.text == "else" ||
@@ -408,7 +459,7 @@ class Parser {
     hygiene.emplace_back();
 
     while (!at("}")) {
-      if (at("<eof>")) fail(peek(), "expected '}'");
+      if (at("<eof>")) expected("}");
 
       if (auto use = macroUse(tokens, pos)) {
         expandCaseMacro(*s, *use);
@@ -425,7 +476,7 @@ class Parser {
       hygiene.emplace_back();
 
       while (!at("}") && !atSectionLabel()) {
-        if (at("<eof>")) fail(peek(), "expected '}'");
+        if (at("<eof>")) expected("}");
         if (auto use = macroUse(tokens, pos); use && opensSection(*use)) break;
 
         section->body.push_back(statement());
@@ -904,6 +955,8 @@ class Parser {
       do {
         lines();
 
+        if (!declarationType()) rejectMisspelledType(peek());
+
         if (!declarationType())
           fail(peek(),
                "parameter requires a supported explicit type (int8, short, "
@@ -1364,8 +1417,7 @@ class Parser {
     std::vector<std::unique_ptr<Stmt>> result;
 
     while (!at("}")) {
-      if (at("<eof>"))
-        fail(peek(), "expected '}'");
+      if (at("<eof>")) expected("}");
 
       result.push_back(statement());
 
@@ -1835,7 +1887,7 @@ class Parser {
 
     s->name = identifier().text;
 
-    if (!at("\n") && !at("}")) fail(peek(), "expected newline or '}' after statement");
+    if (!at("\n") && !at("}")) badStatementEnd();
 
     return s;
   }
@@ -1928,7 +1980,7 @@ class Parser {
     if (assertionAhead()) {
       auto check = assertion();
 
-      if (!at("\n") && !at("}")) fail(peek(), "expected newline or '}' after statement");
+      if (!at("\n") && !at("}")) badStatementEnd();
 
       return check;
     }
@@ -1974,12 +2026,18 @@ class Parser {
         expectMarkup = returnsMarkup;
         s->expr = expression();
       }
-    } else
+    } else {
+      const auto start = pos;
       s = simpleStatement();
 
-    if (!at("\n") && !at("}"))
-      fail(peek(), "expected newline or '}' after statement (syntax may "
-                   "not be supported yet)");
+      // Two words in a row: `itn a = 1` or `Foo f()` with an unknown first word.
+      if (pos == start + 1 && isWord(tokens[start]) && !tokens[start].string && isWord(peek())) {
+        rejectMisspelledType(tokens[start]);
+        fail(tokens[start], "unknown type '" + tokens[start].text + "' (syntax may not be supported yet)");
+      }
+    }
+
+    if (!at("\n") && !at("}")) badStatementEnd(" (syntax may not be supported yet)");
 
     return s;
   }
@@ -2369,6 +2427,8 @@ class Parser {
     program.push_back(std::move(constructor));
   }
   void containerField(Record &record, const Token &name, Type t, bool typed, bool isProtected, std::vector<Tag> tags, const std::optional<Token> &scoped) {
+    if (!typed && isWord(peek())) rejectMisspelledType(name);
+
     if (!typed || t == Type::Void)
       fail(name, "container fields require a known value type");
 
@@ -3006,7 +3066,14 @@ class Parser {
 
       bool typed = declarationType();
       Type result = typed ? type() : Type::Void;
+
+      if (at("}") && !nested) fail(peek(), "unmatched '}': no block is open here");
+
       Token name = identifier();
+
+      // `itn F() { ... }`: the word before the function name is not a type.
+      if (!typed && !external && isWord(peek()) && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == "(")
+        unknownType(name);
 
       if (nested && !external && typed && !at("(")) {
         staticField(functions, name, result, prefix, constant, isProtected, scoped);
