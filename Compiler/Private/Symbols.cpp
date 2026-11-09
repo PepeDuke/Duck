@@ -427,26 +427,38 @@ static void declareStatics(Symbols &symbols, const Program &program) {
 static void addNativeMathTypes(Symbols &symbols) {
   static const char *const stems[] = {"vec", "ivec", "dvec", "mat", "dmat"};
   static const char *const axes[] = {"X", "Y", "Z", "W"};
+  static const char *const angles[] = {"Pitch", "Yaw", "Roll"};
+  std::vector<std::string> names{"quat", "rot"};
 
   for (const std::string stem : stems)
-    for (char size = '2'; size <= '4'; ++size) {
-      const auto name = stem + size;
-      const auto shape = nativeMath(name);
+    for (char size = '2'; size <= '4'; ++size) names.push_back(stem + size);
 
-      if (!shape) continue;
+  for (const auto &name : names) {
+    const auto shape = nativeMath(name);
 
-      Record record;
-      record.name.text = name;
+    if (!shape) continue;
 
-      for (unsigned i = 0; i < std::max(shape.columns, shape.matrix() ? 0u : shape.rows); ++i) {
-        Parameter field;
-        field.name.text = shape.matrix() ? "$" + std::to_string(i) : std::string(axes[i]);
-        field.type = shape.element();
-        record.fields.push_back(field);
+    Record record;
+    record.name.text = name;
+
+    for (unsigned i = 0; i < std::max(shape.columns, shape.matrix() ? 0u : shape.rows); ++i) {
+      Parameter field;
+      field.name.text = shape.matrix() ? "$" + std::to_string(i) : std::string(shape.euler ? angles[i] : axes[i]);
+      field.type = shape.element();
+
+      // An unassigned quat means no rotation, not the invalid all-zero value.
+      if (shape.quaternion && i == 3) {
+        field.initializer = std::make_shared<Expr>();
+        field.initializer->kind = "real";
+        field.initializer->token.text = "1.0";
+        field.initialValue = "1.0";
       }
 
-      symbols.records.emplace(name, record);
+      record.fields.push_back(field);
     }
+
+    symbols.records.emplace(name, record);
+  }
 }
 // Whether a qualified name sits inside a namespace called Math.
 static bool insideMath(const std::string &qualified) {

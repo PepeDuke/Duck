@@ -134,6 +134,9 @@ accept explicit files/options only and never reads project configuration.
     can relax when computed paths exist.
   - The compile-time table is `Symbols::scripts`, keyed by normalized path. It is
     the natural basis for a run-time table if computed paths are added.
+- Native `quat` and `rot` share the vector storage and paths, flagged on
+  `NativeMath`; their own operators and methods are in `nativeOperation`,
+  `checkRotationMethod` and `lowerRotationMethod`.
 - Native `vecN`, `ivecN`, `dvecN`, `matN` and `dmatN`. `nativeMath` in `Syntax.h`
   describes a type's shape from its reserved name. `addNativeMathTypes` registers
   each as an ordinary container, so storage, copies and references use the

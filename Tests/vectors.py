@@ -547,6 +547,235 @@ Main() {
         self.reject('Main() { Print(1.0 (true)== 1.0) }', 'a comparison tolerance must be a number')
         self.reject('Main() { double d = 0.5\n float f = 1.0\n Print(f (d)== f) }', 'mismatch')
 
+    # Half a turn and a quarter turn, in radians.
+    PI = '3.14159265'
+    QUARTER = '1.57079633'
+
+    def test_quat_basics(self):
+        self.run_source(f'''
+Main() {{
+  quat q = quat.Identity()
+  Print(q)
+  Print(q.X + q.W)
+  Print(q[3])
+  Print(q.Rotate(vec3(1.0, 2.0, 3.0)))
+  Print(q * vec3(1.0, 2.0, 3.0))
+  Print(q * q == q)
+  quat manual = quat(0.0, 0.0, 0.0, 2.0)
+  Print(manual.Length())
+  Print(manual.LengthSquared())
+  manual.Normalize()
+  Print(manual)
+  Print(q.Dot(manual))
+  quat unassigned
+  Print(unassigned)
+  Print(quat())
+  quat [2] several
+  Print(several[1])
+  rot angles = rot(1.0, 2.0, 3.0)
+  Print(angles.Pitch + angles.Yaw + angles.Roll)
+  Print(angles)
+  Print(rot.Identity())
+  Print(rot.Zero())
+  Print(angles + angles)
+  Print(angles - angles)
+  Print(angles * 2.0)
+  Print(2.0 * angles)
+  Print(angles / 2.0)
+  Print(-angles)
+  Print(angles == rot(1.0, 2.0, 3.0))
+  Print(angles (0.5)== rot(1.4, 2.0, 3.0))
+}}
+''', ['(0, 0, 0, 1)', '1', '1', '(1, 2, 3)', '(1, 2, 3)', '1', '2', '4', '(0, 0, 0, 1)', '1', '(0, 0, 0, 1)',
+      '(0, 0, 0, 1)', '(0, 0, 0, 1)', '6', '(1, 2, 3)', '(0, 0, 0)', '(0, 0, 0)', '(2, 4, 6)', '(0, 0, 0)', '(2, 4, 6)', '(2, 4, 6)',
+      '(0.5, 1, 1.5)', '(-1, -2, -3)', '1', '1'])
+
+    def test_rotation_directions(self):
+        q = self.QUARTER
+        near = '(0.001)=='
+        self.run_source(f'''
+Check(vec3 got, vec3 want) {{ Print(got {near} want) }}
+Main() {{
+  vec3 x = vec3(1.0, 0.0, 0.0)
+  vec3 y = vec3(0.0, 1.0, 0.0)
+  vec3 z = vec3(0.0, 0.0, 1.0)
+  quat aboutY = quat.FromAxisAngle(y, {q})
+  Check(aboutY.Rotate(z), x)
+  Check(aboutY.Rotate(x), -z)
+  Check(aboutY.Rotate(y), y)
+  quat aboutX = quat.FromAxisAngle(x, {q})
+  Check(aboutX.Rotate(y), z)
+  quat aboutZ = quat.FromAxisAngle(z, {q})
+  Check(aboutZ.Rotate(x), y)
+  quat stretched = quat.FromAxisAngle(vec3(0.0, 9.0, 0.0), {q})
+  Check(stretched.Rotate(z), x)
+}}
+''', ['1'] * 6)
+
+    def test_from_euler(self):
+        q = self.QUARTER
+        near = '(0.001)=='
+        self.run_source(f'''
+Same(quat a, quat b) {{ Print(a {near} b) }}
+Main() {{
+  vec3 x = vec3(1.0, 0.0, 0.0)
+  vec3 y = vec3(0.0, 1.0, 0.0)
+  vec3 z = vec3(0.0, 0.0, 1.0)
+  Same(quat.FromEuler({q}, 0.0, 0.0), quat.FromAxisAngle(x, {q}))
+  Same(quat.FromEuler(0.0, {q}, 0.0), quat.FromAxisAngle(y, {q}))
+  Same(quat.FromEuler(0.0, 0.0, {q}), quat.FromAxisAngle(z, {q}))
+  Same(quat.FromEuler(rot(0.0, {q}, 0.0)), quat.FromAxisAngle(y, {q}))
+  float p = 0.3
+  float h = 0.7
+  float r = 1.1
+  quat ordered = quat.FromAxisAngle(y, h) * quat.FromAxisAngle(x, p) * quat.FromAxisAngle(z, r)
+  Same(quat.FromEuler(p, h, r), ordered)
+  quat held = quat.Identity()
+  held.FromEuler(0.0, {q}, 0.0)
+  Same(held, quat.FromAxisAngle(y, {q}))
+  quat second = held.FromAxisAngle(x, {q})
+  Same(second, held)
+  Same(held, quat.FromAxisAngle(x, {q}))
+  Same(rot(0.0, {q}, 0.0).ToQuat(), quat.FromAxisAngle(y, {q}))
+  Print(rot(0.0, {q}, 0.0).Rotate(z) {near} x)
+}}
+''', ['1'] * 10)
+
+    def test_to_euler(self):
+        q = self.QUARTER
+        near = '(0.001)=='
+        self.run_source(f'''
+Back(float p, float h, float r) {{
+  rot angles = rot(p, h, r)
+  Print(angles.ToQuat().ToEuler() {near} angles)
+}}
+Rotates(float p, float h, float r) {{
+  quat q = quat.FromEuler(p, h, r)
+  quat again = q.ToEuler().ToQuat()
+  vec3 v = vec3(0.3, -0.5, 0.8)
+  Print(q.Rotate(v) (0.01)== again.Rotate(v))
+}}
+Main() {{
+  Back(0.3, 0.7, 1.1)
+  Back(-0.4, 2.5, -2.0)
+  Back(0.0, 0.0, 0.0)
+  Rotates(0.3, 0.7, 1.1)
+  Rotates({q}, 0.7, 0.2)
+  Rotates(-{q}, 0.7, 0.2)
+  rot locked = quat.FromEuler({q}, 0.5, 0.0).ToEuler()
+  Print(locked.Roll)
+}}
+''', ['1', '1', '1', '1', '1', '1', '0'])
+
+    def test_quat_composition_and_inverse(self):
+        q = self.QUARTER
+        near = '(0.001)=='
+        self.run_source(f'''
+Main() {{
+  vec3 v = vec3(1.0, 2.0, 3.0)
+  quat a = quat.FromEuler(0.3, 0.7, 1.1)
+  quat b = quat.FromEuler(-0.4, 1.2, 0.2)
+  Print((a * b).Rotate(v) {near} a.Rotate(b.Rotate(v)))
+  Print(a * v {near} a.Rotate(v))
+  Print(a.Inverse().Rotate(a.Rotate(v)) {near} v)
+  Print(a * a.Inverse() {near} quat.Identity())
+  Print(a.Conjugate() {near} a.Inverse())
+  quat scaled = quat(0.0, 0.0, 0.0, 2.0)
+  Print(scaled * scaled.Inverse() {near} quat.Identity())
+  quat c = a
+  c *= b
+  Print(c {near} a * b)
+}}
+''', ['1'] * 7)
+
+    def test_matrix_conversion(self):
+        near = '(0.001)=='
+        self.run_source(f'''
+Main() {{
+  vec3 v = vec3(1.0, 2.0, 3.0)
+  quat q = quat.FromEuler(0.3, 0.7, 1.1)
+  Print(q.ToMat3() * v {near} q.Rotate(v))
+  vec4 moved = q.ToMat4() * vec4(v, 1.0)
+  Print(vec3(moved) {near} q.Rotate(v))
+  Print(moved.W)
+  rot angles = rot(0.3, 0.7, 1.1)
+  Print(angles.ToMat3() * v {near} q.Rotate(v))
+  vec4 viaRot = angles.ToMat4() * vec4(v, 1.0)
+  Print(vec3(viaRot) {near} q.Rotate(v))
+  Print(quat.Identity().ToMat4() == mat4.Identity())
+  Print(q.ToMat3() * q.ToMat3().Transpose() {near} mat3.Identity())
+}}
+''', ['1', '1', '1', '1', '1', '1', '1'])
+
+    def test_slerp(self):
+        q = self.QUARTER
+        near = '(0.001)=='
+        self.run_source(f'''
+Main() {{
+  vec3 y = vec3(0.0, 1.0, 0.0)
+  quat from = quat.Identity()
+  quat to = quat.FromAxisAngle(y, {q})
+  Print(from.Slerp(to, 0.0) {near} from)
+  Print(from.Slerp(to, 1.0) {near} to)
+  Print(from.Slerp(to, 0.5) {near} quat.FromAxisAngle(y, {q} * 0.5))
+  quat flipped = quat(-to.X, -to.Y, -to.Z, -to.W)
+  Print(from.Slerp(flipped, 0.5) {near} quat.FromAxisAngle(y, {q} * 0.5))
+  Print(to.Slerp(to, 0.5) {near} to)
+  quat close = quat.FromAxisAngle(y, 0.001)
+  Print(from.Slerp(close, 0.5).Length() {near} 1.0)
+}}
+''', ['1'] * 6)
+
+    def test_rotation_in_tasks(self):
+        self.run_source('''
+int Build(quat& q, rot e) {
+  q.FromEuler(e)
+  return 1
+}
+int Read(quat& q) { return (int)(q.Length() * 10.0) }
+Main() {
+  quat q
+  first : Build(q, rot(0.1, 0.2, 0.3))
+  second : Read(q)
+  Print(first)
+  Print(second)
+}
+''', ['1', '10'])
+
+    def test_rejected_rotations(self):
+        unused = 'returns a new value and changes nothing'
+        wrong = 'does not apply'
+        self.reject('quat { float X }\nMain() {}', 'reserved keyword')
+        self.reject('Main() { int rot = 1 }', 'reserved keyword')
+        self.reject('Main() { quat q\n Print(q + q) }', wrong)
+        self.reject('Main() { quat q\n Print(q * 2.0) }', wrong)
+        self.reject('Main() { quat q\n Print(q * vec4(1.0)) }', wrong)
+        self.reject('Main() { quat q\n Print(vec3(1.0) * q) }', wrong)
+        self.reject('Main() { quat q\n vec3 v\n q *= v }', 'must leave')
+        self.reject('Main() { rot a\n Print(a * a) }', wrong)
+        self.reject('Main() { rot a\n Print(a + vec3(1.0)) }', wrong)
+        self.reject('Main() { rot a\n Print(mat3(1.0) * a) }', wrong)
+        self.reject('Main() { quat q\n q.Rotate(vec3(1.0)) }', unused)
+        self.reject('Main() { quat q\n q.ToMat4() }', unused)
+        self.reject('Main() { rot r\n r.ToQuat() }', unused)
+        self.reject('Main() { quat q\n Print(q.Rotate()) }', "wrong argument count for 'Rotate'")
+        self.reject('Main() { quat q\n Print(q.Rotate(1.0)) }', 'Rotate requires a vec3')
+        self.reject('Main() { quat q\n Print(q.Rotate(dvec3(1.0))) }', 'Rotate requires a vec3')
+        self.reject('Main() { quat q\n Print(q.FromEuler(1.0)) }', 'FromEuler requires a rot')
+        self.reject('Main() { quat q\n Print(q.FromEuler(1.0, 2.0)) }', "wrong argument count for 'FromEuler'")
+        self.reject('Main() { quat q\n Print(q.FromEuler(1.0, 2.0, true)) }', 'FromEuler requires a number')
+        self.reject('Main() { quat q\n Print(q.FromAxisAngle(1.0, 2.0)) }', 'requires a vec3 axis')
+        self.reject('Main() { quat q\n Print(q.Slerp(q)) }', "wrong argument count for 'Slerp'")
+        self.reject('Main() { quat q\n Print(q.Missing()) }', "quat has no method 'Missing'")
+        self.reject('Main() { quat q\n Print(q.Abs()) }', "quat has no method 'Abs'")
+        self.reject('Main() { rot r\n Print(r.Length()) }', "rot has no method 'Length'")
+        self.reject('Main() { rot r\n Print(r.Normalize()) }', "rot has no method 'Normalize'")
+        self.reject('Main() { rot r\n Print(r.ToEuler()) }', "rot has no method 'ToEuler'")
+        self.reject('Main() { Print(quat.Zero()) }', "quat has no function 'Zero'")
+        self.reject('Main() { Print(rot.One()) }', "rot has no function 'One'")
+        self.reject('Main() { Print(rot.FromEuler(1.0, 2.0, 3.0)) }', "rot has no function 'FromEuler'")
+        self.reject('Main() { #quat q = quat.Identity()\n Print(q.FromEuler(1.0, 2.0, 3.0)) }', 'mutable method on a constant')
+
     def test_only_used_types_are_defined(self):
         path, ir = self.root / 'main.dk', self.root / 'main.ll'
         path.write_text('Holder { mat3 M }\nMain() { Print(1) }\n', encoding='utf-8')
@@ -556,6 +785,7 @@ Main() {
         self.assertIn('%struct.vec3 = type', text)
         self.assertNotIn('%struct.mat4 = type', text)
         self.assertNotIn('%struct.dvec3 = type', text)
+        self.assertNotIn('quat', text)
 
     def test_out_of_range_index_traps(self):
         self.traps('Main() {\n vec3 v\n int i = 3\n Print(v[i]) }\n')

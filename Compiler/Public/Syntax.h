@@ -153,6 +153,7 @@ inline bool recordValue(const Type &t) { return !t.depth && t.base == Type::Reco
 struct NativeMath {
   Type::Kind scalar = Type::Void;
   unsigned columns = 0, rows = 0; // A vector has one column.
+  bool quaternion = false, euler = false; // quat and rot, stored like vectors.
   explicit operator bool() const { return rows != 0; }
   bool matrix() const { return columns > 1; }
   // What indexing gives: a vector's scalar, or a matrix's column vector.
@@ -165,6 +166,8 @@ struct NativeMath {
   }
 };
 inline NativeMath nativeMath(const std::string &name) {
+  if (name == "quat") return {Type::Float, 1, 4, true, false};
+  if (name == "rot") return {Type::Float, 1, 3, false, true};
   if (name.size() < 4 || name.size() > 5) return {};
 
   const unsigned size = unsigned(name.back() - '0');
@@ -184,6 +187,11 @@ inline NativeMath nativeMath(const std::string &name) {
   return {};
 }
 inline NativeMath nativeMath(const Type &t) { return recordValue(t) ? nativeMath(t.record) : NativeMath{}; }
+inline Type nativeNamed(const std::string &name) {
+  Type t(Type::Record);
+  t.record = name;
+  return t;
+}
 // `T [N]` stores N elements inline; `T []` is a handle to growable heap
 // storage, null while empty.
 inline bool arrayValue(const Type &t) { return !t.depth && t.base == Type::Array; }

@@ -2834,7 +2834,8 @@ class Generator {
     const Type scalar = shape.scalar;
     const auto total = shape.columns * shape.rows;
 
-    if (e.args.empty()) return {type, "zeroinitializer"};
+    if (e.args.empty() && !shape.quaternion) return {type, "zeroinitializer"};
+    if (e.args.empty()) return nativeBuild(type, {"0.0", "0.0", "0.0", "1.0"});
 
     const std::string zero = floating(scalar) ? "0.0" : "0", one = floating(scalar) ? "1.0" : "1";
     std::vector<Value> values;
@@ -2890,6 +2891,8 @@ class Generator {
 
       return {Type::Bool, op == "==" ? same : mathInstruction("xor", Type::Bool, same, "true")};
     }
+
+    if (left.quaternion) return right.quaternion ? nativeBuild(a.type, quatProduct(x, y)) : nativeBuild(b.type, quatRotate(x, y));
 
     if (op == "*" && left.matrix() && right) { // Linear algebra, not componentwise.
       const auto n = left.rows;
@@ -2977,18 +2980,197 @@ class Generator {
 
     return nativeBuild(value.type, result);
   }
+  std::string floatOp(const char *code, const std::string &a, const std::string &b) {
+    return mathInstruction(code, Type::Float, a, b);
+  }
+  std::string floatMath(const char *name, const std::string &a) {
+    return mathScalar(name, Type::Float, {{Type::Float, a}}).value;
+  }
+  std::string floatNegate(const std::string &a) {
+    auto id = fresh();
+    emit(id + " = fneg float " + a);
+    return id;
+  }
+  // Quaternions are X, Y, Z, W. In a product, the right operand applies first.
+  std::vector<std::string> quatProduct(const std::vector<std::string> &a, const std::vector<std::string> &b) {
+    auto mul = [&](size_t i, size_t j) { return floatOp("fmul", a[i], b[j]); };
+    auto add = [&](const std::string &p, const std::string &q) { return floatOp("fadd", p, q); };
+    auto sub = [&](const std::string &p, const std::string &q) { return floatOp("fsub", p, q); };
+    const auto x = sub(add(add(mul(3, 0), mul(0, 3)), mul(1, 2)), mul(2, 1));
+    const auto y = add(add(sub(mul(3, 1), mul(0, 2)), mul(1, 3)), mul(2, 0));
+    const auto z = add(sub(add(mul(3, 2), mul(0, 1)), mul(1, 0)), mul(2, 3));
+    const auto w = sub(sub(sub(mul(3, 3), mul(0, 0)), mul(1, 1)), mul(2, 2));
+    return {x, y, z, w};
+  }
+  std::vector<std::string> floatCross(const std::vector<std::string> &a, const std::vector<std::string> &b) {
+    auto term = [&](size_t i, size_t j) {
+      return floatOp("fsub", floatOp("fmul", a[i], b[j]), floatOp("fmul", a[j], b[i]));
+    };
+    const auto x = term(1, 2), y = term(2, 0), z = term(0, 1);
+    return {x, y, z};
+  }
+  // v + w*t + u x t, where u is the vector part and t is 2 (u x v).
+  std::vector<std::string> quatRotate(const std::vector<std::string> &q, const std::vector<std::string> &v) {
+    auto t = floatCross(q, v);
+
+    for (auto &part : t) part = floatOp("fmul", part, "2.0");
+
+    const auto c = floatCross(q, t);
+    std::vector<std::string> result;
+
+    for (size_t i = 0; i < 3; ++i) result.push_back(floatOp("fadd", floatOp("fadd", v[i], floatOp("fmul", q[3], t[i])), c[i]));
+
+    return result;
+  }
+  // Pitch about X, yaw about Y and roll about Z, in radians: roll applies
+  // first, then pitch, then yaw.
+  std::vector<std::string> quatFromEuler(const std::vector<std::string> &angles) {
+    auto half = [&](size_t i) { return floatOp("fmul", angles[i], "0.5"); };
+    const std::string zero = "0.0";
+    const auto pitch = half(0), yaw = half(1), roll = half(2);
+    const std::vector<std::string> x{floatMath("Sin", pitch), zero, zero, floatMath("Cos", pitch)};
+    const std::vector<std::string> y{zero, floatMath("Sin", yaw), zero, floatMath("Cos", yaw)};
+    const std::vector<std::string> z{zero, zero, floatMath("Sin", roll), floatMath("Cos", roll)};
+    return quatProduct(quatProduct(y, x), z);
+  }
+  std::vector<std::string> eulerAngles(const std::vector<Value> &values, size_t first) {
+    if (values.size() == first + 1) return nativeParts(values[first]);
+
+    return {values[first].value, values[first + 1].value, values[first + 2].value};
+  }
+  std::vector<std::string> quatFromAxisAngle(const std::vector<Value> &values, size_t first) {
+    const auto axis = nativeParts(lowerMathVector("Normalize", {values[first]}));
+    const auto half = floatOp("fmul", values[first + 1].value, "0.5");
+    const auto sine = floatMath("Sin", half);
+    std::vector<std::string> result;
+
+    for (const auto &part : axis) result.push_back(floatOp("fmul", part, sine));
+
+    result.push_back(floatMath("Cos", half));
+    return result;
+  }
+  // Column order, for a unit quaternion.
+  std::vector<std::string> quatToMat3(const std::vector<std::string> &q) {
+    auto twice = [&](size_t i, size_t j) { return floatOp("fmul", floatOp("fmul", q[i], q[j]), "2.0"); };
+    auto add = [&](const std::string &p, const std::string &q2) { return floatOp("fadd", p, q2); };
+    auto sub = [&](const std::string &p, const std::string &q2) { return floatOp("fsub", p, q2); };
+    auto one = [&](const std::string &p, const std::string &q2) { return sub("1.0", add(p, q2)); };
+    const auto xx = twice(0, 0), yy = twice(1, 1), zz = twice(2, 2);
+    const auto xy = twice(0, 1), xz = twice(0, 2), yz = twice(1, 2);
+    const auto wx = twice(3, 0), wy = twice(3, 1), wz = twice(3, 2);
+    return {one(yy, zz), add(xy, wz), sub(xz, wy),
+            sub(xy, wz), one(xx, zz), add(yz, wx),
+            add(xz, wy), sub(yz, wx), one(xx, yy)};
+  }
+  // Inverts the order quatFromEuler composes in. At straight up or down, yaw
+  // and roll turn the same axis, so all of it is reported as yaw.
+  std::vector<std::string> quatToEuler(const std::vector<std::string> &q) {
+    const auto m = quatToMat3(q);
+    const auto m00 = m[0], m10 = m[1], m20 = m[2], m11 = m[4], m02 = m[6], m12 = m[7], m22 = m[8];
+    const auto sine = mathScalar("Clamp", Type::Float, {{Type::Float, floatNegate(m12)}, {Type::Float, "-1.0"}, {Type::Float, "1.0"}}).value;
+    const auto pitch = floatMath("Asin", sine);
+    auto atan2 = [&](const std::string &y, const std::string &x) {
+      return mathScalar("Atan2", Type::Float, {{Type::Float, y}, {Type::Float, x}}).value;
+    };
+    const auto magnitude = mathCall("llvm.fabs.f32", Type::Float, {sine});
+    const auto locked = floatOp("fcmp oge", magnitude, "0.999755859375");
+    const auto yaw = mathSelect(locked, Type::Float, atan2(floatNegate(m20), m00), atan2(m02, m22));
+    const auto roll = mathSelect(locked, Type::Float, "0.0", atan2(m10, m11));
+    return {pitch, yaw, roll};
+  }
+  // Takes the shorter way round, and falls back to a normalized straight line
+  // when the two are so close that the angle cannot be divided by.
+  Value quatSlerp(const Value &from, const Value &to, const std::string &amount) {
+    const auto a = nativeParts(from);
+    auto b = nativeParts(to);
+    auto cosine = floatOp("fmul", a[0], b[0]);
+
+    for (size_t i = 1; i < 4; ++i) cosine = floatOp("fadd", cosine, floatOp("fmul", a[i], b[i]));
+
+    const auto opposite = floatOp("fcmp olt", cosine, "0.0");
+    cosine = mathSelect(opposite, Type::Float, floatNegate(cosine), cosine);
+
+    for (auto &part : b) part = mathSelect(opposite, Type::Float, floatNegate(part), part);
+
+    const auto theta = floatMath("Acos", cosine);
+    const auto sine = floatMath("Sin", theta);
+    const auto fromWeight = floatOp("fdiv", floatMath("Sin", floatOp("fmul", floatOp("fsub", "1.0", amount), theta)), sine);
+    const auto toWeight = floatOp("fdiv", floatMath("Sin", floatOp("fmul", amount, theta)), sine);
+    std::vector<std::string> curved, straight;
+
+    for (size_t i = 0; i < 4; ++i) {
+      curved.push_back(floatOp("fadd", floatOp("fmul", a[i], fromWeight), floatOp("fmul", b[i], toWeight)));
+      straight.push_back(floatOp("fadd", a[i], floatOp("fmul", floatOp("fsub", b[i], a[i]), amount)));
+    }
+
+    const auto line = nativeParts(lowerMathVector("Normalize", {nativeBuild(from.type, straight)}));
+    const auto close = floatOp("fcmp ogt", cosine, "0.99951171875");
+    std::vector<std::string> result;
+
+    for (size_t i = 0; i < 4; ++i) result.push_back(mathSelect(close, Type::Float, line[i], curved[i]));
+
+    return nativeBuild(from.type, result);
+  }
+  // The methods only quat and rot have; the rest are shared with vectors.
+  std::optional<Value> lowerRotationMethod(const std::string &name, const Value &self, const std::vector<Value> &values) {
+    const auto shape = nativeMath(self.type);
+    const auto quat = nativeNamed("quat");
+
+    if (name == "FromEuler") return nativeBuild(quat, quatFromEuler(eulerAngles(values, 1)));
+    if (name == "FromAxisAngle") return nativeBuild(quat, quatFromAxisAngle(values, 1));
+    if (name == "Slerp") return quatSlerp(self, values[1], values[2].value);
+
+    if (name != "Rotate" && name != "ToMat3" && name != "ToMat4" && name != "ToQuat" && name != "ToEuler" &&
+        name != "Conjugate" && name != "Inverse")
+      return std::nullopt;
+
+    const auto q = shape.euler ? quatFromEuler(nativeParts(self)) : nativeParts(self);
+
+    if (name == "Rotate") return nativeBuild(values[1].type, quatRotate(q, nativeParts(values[1])));
+    if (name == "ToQuat") return nativeBuild(quat, q);
+    if (name == "ToEuler") return nativeBuild(nativeNamed("rot"), quatToEuler(q));
+    if (name == "ToMat3") return nativeBuild(nativeNamed("mat3"), quatToMat3(q));
+
+    if (name == "ToMat4") {
+      const auto m = quatToMat3(q);
+      return nativeBuild(nativeNamed("mat4"), {m[0], m[1], m[2], "0.0", m[3], m[4], m[5], "0.0",
+                                               m[6], m[7], m[8], "0.0", "0.0", "0.0", "0.0", "1.0"});
+    }
+
+    std::string lengthSquared = floatOp("fmul", q[0], q[0]);
+
+    for (size_t i = 1; i < 4; ++i) lengthSquared = floatOp("fadd", lengthSquared, floatOp("fmul", q[i], q[i]));
+
+    std::vector<std::string> result{floatNegate(q[0]), floatNegate(q[1]), floatNegate(q[2]), q[3]};
+
+    if (name == "Inverse")
+      for (auto &part : result) part = floatOp("fdiv", part, lengthSquared);
+
+    return nativeBuild(self.type, result);
+  }
   Value lowerNativeMethod(const Expr &e) {
     const auto name = memberName(e.token.text);
 
     if (!e.receiver) { // vec3.Identity(), mat4.Zero() and the like.
       const auto type = analysis.expressionTypes.at(&e);
       const auto shape = nativeMath(type);
+
+      if (name == "FromEuler" || name == "FromAxisAngle") {
+        std::vector<Value> values;
+
+        for (const auto &argument : e.args) values.push_back(expression(*argument));
+
+        return nativeBuild(type, name == "FromEuler" ? quatFromEuler(eulerAngles(values, 0)) : quatFromAxisAngle(values, 0));
+      }
+
       const std::string zero = floating(shape.scalar) ? "0.0" : "0", one = floating(shape.scalar) ? "1.0" : "1";
-      std::vector<std::string> parts(shape.columns * shape.rows, name == "Zero" ? zero : one);
+      std::vector<std::string> parts(shape.columns * shape.rows, name == "Zero" || shape.euler ? zero : one);
 
       if (name == "Identity" && shape.matrix())
         for (unsigned i = 0; i < parts.size(); ++i)
           if (i % (shape.rows + 1)) parts[i] = zero;
+
+      if (shape.quaternion) parts = {zero, zero, zero, one};
 
       return nativeBuild(type, parts);
     }
@@ -3012,6 +3194,13 @@ class Generator {
     std::vector<Value> values{self};
 
     for (const auto &argument : e.args) values.push_back(expression(*argument));
+
+    if (shape.quaternion || shape.euler)
+      if (const auto rotation = lowerRotationMethod(name, self, values)) {
+        if (inPlace) emit("store " + irType(rotation->type) + " " + rotation->value + ", ptr " + address);
+
+        return *rotation;
+      }
 
     if (name == "Inverse") return nativeInverse(self);
     if (name == "Determinant") return {scalar, nativeDeterminant(scalar, nativeParts(self), shape.rows)};
@@ -5153,6 +5342,9 @@ std::string emitNativeMathTypes(const Symbols &symbols, const std::string &modul
       for (size_t i = 0; i < record.fields.size(); ++i) ir += (i ? ", " : "") + irType(record.fields[i].type);
 
       ir += " }\n";
+
+      if (module.find("@duck$default." + name) != std::string::npos)
+        ir += "@duck$default." + name + " = private unnamed_addr constant " + symbol + " " + recordConstant(symbols, name) + "\n";
     }
 
   return ir;
@@ -5207,7 +5399,7 @@ std::string emitRecords(const Symbols &symbols) {
       if (field.initializer && !field.runtimeDefault && field.initialValue.empty())
         ir += managedTextGlobal(defaultTextSymbol(name, field), field.initializer->token, field.type);
 
-    if (hasDefaults(symbols, name))
+    if (hasDefaults(symbols, name) && !nativeMath(name))
       ir += "@duck$default." + name + " = private unnamed_addr constant %struct." + name + " " +
             recordConstant(symbols, name) + "\n";
   }

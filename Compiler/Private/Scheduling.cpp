@@ -278,6 +278,8 @@ class EffectWalker {
       if (a.expressionTypes.at(e.receiver.get()).depth) current.unknown = true;
       else write(*e.receiver, true);
 
+      for (const auto &argument : e.args) expression(*argument);
+
       return;
     }
 

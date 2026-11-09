@@ -1,1 +1,232 @@
-{}
+{
+    "Main": {
+        "prefix": "main",
+        "description": "Program entry point",
+        "body": ["Main()", "{", "\t$0", "}"]
+    },
+    "Main with arguments": {
+        "prefix": "mainargs",
+        "description": "Program entry point receiving its arguments",
+        "body": ["Main(string [] args)", "{", "\t$0", "}"]
+    },
+    "Container": {
+        "prefix": "container",
+        "description": "Container with an object body",
+        "body": ["${1:Name}", "{", "\t$0", "}"]
+    },
+    "Container with parents": {
+        "prefix": "inherit",
+        "description": "Container inheriting from its parents",
+        "body": ["${1:Name} : ${2:Parent}", "{", "\t$0", "}"]
+    },
+    "Static container": {
+        "prefix": "static",
+        "description": "Static-only container, also used as a namespace",
+        "body": ["${1:Name}", "#{", "\t$0", "}"]
+    },
+    "Chained container": {
+        "prefix": "chained",
+        "description": "Container with an object body and a static body",
+        "body": ["${1:Name}", "{", "\t$2", "}", "#{", "\t$0", "}"]
+    },
+    "Constructor": {
+        "prefix": "ctor",
+        "description": "Constructor",
+        "body": ["${1:Name}(${2})", "{", "\t$0", "}"]
+    },
+    "Partial constructor": {
+        "prefix": "partial",
+        "description": "Partial constructor, called before the regular one",
+        "body": ["-${1:Name}(${2})", "{", "\t$0", "}"]
+    },
+    "Destructor": {
+        "prefix": "dtor",
+        "description": "Destructor",
+        "body": ["~${1:Name}()", "{", "\t$0", "}"]
+    },
+    "Function": {
+        "prefix": "fn",
+        "description": "Function that returns nothing",
+        "body": ["${1:Name}(${2})", "{", "\t$0", "}"]
+    },
+    "Function with result": {
+        "prefix": "fnr",
+        "description": "Function that returns a value",
+        "body": ["${1:int} ${2:Name}(${3})", "{", "\t$0", "}"]
+    },
+    "If": {
+        "prefix": "if",
+        "description": "if block",
+        "body": ["if ${1:condition}", "{", "\t$0", "}"]
+    },
+    "If else": {
+        "prefix": "ifelse",
+        "description": "if and else blocks",
+        "body": ["if ${1:condition}", "{", "\t$2", "}", "else", "{", "\t$0", "}"]
+    },
+    "For": {
+        "prefix": "for",
+        "description": "Counted for loop",
+        "body": ["for ${1:i} : 0; $1 < ${2:count}; $1++", "{", "\t$0", "}"]
+    },
+    "For each": {
+        "prefix": "foreach",
+        "description": "for each element",
+        "body": ["for ${1:item} : ${2:items}", "{", "\t$0", "}"]
+    },
+    "For each in reverse": {
+        "prefix": "forrev",
+        "description": "for each element, last to first; preferred when removing elements",
+        "body": ["for -${1:item} : ${2:items}", "{", "\t$0", "}"]
+    },
+    "For range": {
+        "prefix": "forr",
+        "description": "for over an inclusive range",
+        "body": ["for ${1:i} : ${2:0}...${3:5}", "{", "\t$0", "}"]
+    },
+    "Loop chain": {
+        "prefix": "forchain",
+        "description": "Two nested for loops written as a chain",
+        "body": ["for ${1:x} : ${2:0}...${3:3} |", "    ${4:y} : ${5:0}...${6:3}", "{", "\t$0", "}"]
+    },
+    "While": {
+        "prefix": "while",
+        "description": "while loop",
+        "body": ["while ${1:condition}", "{", "\t$0", "}"]
+    },
+    "Do while": {
+        "prefix": "dowhile",
+        "description": "do-while loop",
+        "body": ["do", "{", "\t$0", "} while ${1:condition}"]
+    },
+    "Switch": {
+        "prefix": "switch",
+        "description": "Switch; every section must end in break, continue, or return",
+        "body": ["Switch (${1:value})", "{", "\tcase ${2:0}:", "\t\t$0", "\t\tbreak", "\tdefault:", "\t\tbreak", "}"]
+    },
+    "Lambda": {
+        "prefix": "lambda",
+        "description": "Lambda stored in a func",
+        "body": ["func ${1:callback} = @ ${2:int}(${3})", "{", "\t$0", "}"]
+    },
+    "Func field or parameter type": {
+        "prefix": "functype",
+        "description": "Written-out func signature: result first, then parameters",
+        "body": ["func ${1:int}(${2:int}) ${3:callback}"]
+    },
+    "Enum": {
+        "prefix": "enum",
+        "description": "Enum with an underlying type",
+        "body": ["${1:Name} : ${2:byte}", "#@{", "\t${0:First, Second}", "}"]
+    },
+    "Attribute enum": {
+        "prefix": "attrenum",
+        "description": "Enum whose members can be used as [attributes]",
+        "body": ["[args]", "${1:Name} : ${2:byte}", "#@{", "\t${0:First, Second}", "}"]
+    },
+    "Property getters": {
+        "prefix": "get",
+        "description": "Getter block, chained to a container body",
+        "body": ["@{", "\t${1:Name}: ${0:field}", "}"]
+    },
+    "Property setters": {
+        "prefix": "set",
+        "description": "Setter block, chained to a container body; the type can be dropped when a getter declares it",
+        "body": ["={", "\t${1:int} ${2:Name}: ${3:field} = value", "}"]
+    },
+    "Ordered block": {
+        "prefix": "ordered",
+        "description": "Ordered execution that locks the resources it uses",
+        "body": ["\\${", "\t$0", "}"]
+    },
+    "Test block": {
+        "prefix": "test",
+        "description": "T{ block, chained to a container body with no blank line",
+        "body": ["T{", "\t${1:Name}()", "\t{", "\t\t$0", "\t}", "}"]
+    },
+    "Assert equal": {
+        "prefix": "areequal",
+        "description": "T.AreEqual assertion",
+        "body": ["T.AreEqual(${1:actual}, ${2:expected})"]
+    },
+    "Assert not equal": {
+        "prefix": "arenotequal",
+        "description": "T.AreNotEqual assertion",
+        "body": ["T.AreNotEqual(${1:a}, ${2:b})"]
+    },
+    "Assert true": {
+        "prefix": "istrue",
+        "description": "T.IsTrue assertion",
+        "body": ["T.IsTrue(${1:condition})"]
+    },
+    "Assert false": {
+        "prefix": "isfalse",
+        "description": "T.IsFalse assertion",
+        "body": ["T.IsFalse(${1:condition})"]
+    },
+    "Fail test": {
+        "prefix": "fail",
+        "description": "T.Fail assertion",
+        "body": ["T.Fail(\"${1:reason}\")"]
+    },
+    "Markup block": {
+        "prefix": "markup",
+        "description": "Declare a container's child elements",
+        "body": ["this{", "\t<${1:Child} ${2:Field}=${3:value}/>", "}"]
+    },
+    "Markup element": {
+        "prefix": "tag",
+        "description": "Markup element with children",
+        "body": ["<${1:Child}>", "\t$0", "</$1>"]
+    },
+    "Macro": {
+        "prefix": "macro",
+        "description": "Macro with typed arguments",
+        "body": ["macro ${1:Name}(${2})", "{", "\t$0", "}"]
+    },
+    "Define": {
+        "prefix": "define",
+        "description": "Typed constant visible to #if",
+        "body": ["#define ${1:NAME} ${2:true}"]
+    },
+    "Conditional compilation": {
+        "prefix": "#if",
+        "description": "#if with a { } block",
+        "body": ["#if ${1:NAME}", "{", "\t$0", "}"]
+    },
+    "Conditional compilation with else": {
+        "prefix": "#ifelse",
+        "description": "#if and #else blocks",
+        "body": ["#if ${1:NAME}", "{", "\t$2", "}", "#else", "{", "\t$0", "}"]
+    },
+    "Native function": {
+        "prefix": "extern",
+        "description": "Native C function declaration",
+        "body": ["extern \"C\" ${1:int} ${2:Name}(${3}) = \"${4:symbol}\""]
+    },
+    "Named scope variable": {
+        "prefix": "scoped",
+        "description": "Field allocated in a named scope",
+        "body": ["[@${1:Play}]", "${2:float} ${3:Name}"]
+    },
+    "Named scope loop": {
+        "prefix": "scopedloop",
+        "description": "Loop that starts and ends a named scope every iteration",
+        "body": ["[@${1:Tick}]", "while ${2:true}", "{", "\t$0", "}"]
+    },
+    "Start scope": {
+        "prefix": "@start",
+        "description": "Start a named scope",
+        "body": ["@start ${1:Play}"]
+    },
+    "End scope": {
+        "prefix": "@end",
+        "description": "End a named scope",
+        "body": ["@end ${1:Play}"]
+    },
+    "Duck call": {
+        "prefix": "duckcall",
+        "description": "Optional call by name, resolved at run time",
+        "body": ["?${1:object}..${2:Method}(${3})"]
+    }
+}

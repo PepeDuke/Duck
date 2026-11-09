@@ -342,6 +342,8 @@ dvec2 dvec3 dvec4 // 2, 3 or 4 doubles
 ivec2 ivec3 ivec4 // 2, 3 or 4 ints
 mat3 mat4         // 3x3 or 4x4 floats, column-major
 dmat3 dmat4       // 3x3 or 4x4 doubles, column-major
+quat              // rotation as a quaternion: X, Y, Z, W floats
+rot               // rotation as Euler angles in radians: Pitch, Yaw, Roll floats
 // special types are
 big   // <-- that holds arbitrary size of int number --- should be used only for working with very large numbers
 ubig  // nonnegative big; a subtraction that would go below zero traps
@@ -476,6 +478,53 @@ The types themselves provide starting values:
 Vectors work directly with `Math.Dot`, `Math.Cross`, `Math.Length`,
 `Math.Distance` and `Math.Normalize`, except `ivec`, which has no fractional
 result to give.
+
+### Rotations
+
+`quat` holds a rotation as a quaternion and `rot` holds one as Euler angles in
+radians. `Pitch` turns about X, `Yaw` about Y and `Roll` about Z. Roll applies
+first, then pitch, then yaw. Rotations are right-handed.
+
+``` c++
+quat q = quat.FromEuler(0.0, 1.57, 0.0)       // pitch, yaw, roll
+vec3 turned = q.Rotate(vec3(0.0, 0.0, 1.0))   // about (1, 0, 0)
+
+rot aim = rot(0.1, 0.5, 0.0)
+q.FromEuler(aim)                              // q now holds aim's rotation
+quat both = q * other                         // other applies first
+mat4 transform = both.ToMat4()
+```
+
+| Function | Result |
+| --- | --- |
+| `quat.Identity()` | no rotation, `(0, 0, 0, 1)` |
+| `quat.FromEuler(rot)`, `quat.FromEuler(pitch, yaw, roll)` | a quaternion from Euler angles |
+| `quat.FromAxisAngle(axis, angle)` | a turn about a `vec3` axis, which need not be unit length |
+| `rot.Identity()`, `rot.Zero()` | no rotation |
+
+| Method | Result |
+| --- | --- |
+| `q.Rotate(v)`, `r.Rotate(v)` | `v` rotated, as a new `vec3` |
+| `q.FromEuler(...)`, `q.FromAxisAngle(axis, angle)` | sets `q`, and also returns it |
+| `q.Normalize()` | makes `q` unit length, and also returns it |
+| `q.Length()`, `q.LengthSquared()`, `q.Dot(p)` | as for vectors |
+| `q.Conjugate()`, `q.Inverse()` | the reverse rotation; `Inverse` also works when `q` is not unit length |
+| `q.Slerp(p, t)` | the rotation `t` of the way to `p`, taking the shorter way round |
+| `q.ToEuler()` | a `rot` |
+| `r.ToQuat()` | a `quat` |
+| `q.ToMat3()`, `q.ToMat4()`, `r.ToMat3()`, `r.ToMat4()` | the rotation matrix |
+
+`q * p` composes two rotations with `p` applying first, and `q * v` rotates a
+`vec3`. `==`, `!=` and a written tolerance work as for vectors, but `q` and `-q`
+are the same rotation and still compare unequal. A `rot` also has `+`, `-` and
+scaling by a number, and `q.Rotate`, `q * v` and the matrix conversions assume a
+unit-length `q`.
+
+A declared but unassigned `quat` is no rotation, `(0, 0, 0, 1)`, and so is
+`quat()`. At pitch of straight up or down, yaw and roll turn
+the same axis, so `ToEuler` reports all of that turn as yaw.
+
+### Memory layout
 
 Components are tightly packed, so `vec3` is 12 bytes and `mat4` is 64 bytes
 laid out as sixteen floats. That matches GLSL `mat4` and vertex attributes. It

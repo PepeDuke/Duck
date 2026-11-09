@@ -1,0 +1,58 @@
+{
+    "Duck project": {
+        "prefix": "project",
+        "description": "A .dkp project with one entry module",
+        "body": [
+            "version = 1",
+            "",
+            "[project]",
+            "name = \"${1:Game}\"",
+            "entry = \"${2:app}\"",
+            "",
+            "[modules.$2]",
+            "sources = [\"${3:src/**/*.dk}\"]",
+            "$0"
+        ]
+    },
+    "Module": {
+        "prefix": "module",
+        "description": "A build module with dependencies",
+        "body": [
+            "[modules.${1:core}]",
+            "sources = [\"${2:src/$1/**/*.dk}\"]",
+            "depends = [\"${3}\"]",
+            "$0"
+        ]
+    },
+    "Optional module": {
+        "prefix": "moduleoptional",
+        "description": "A module left out unless selected with --enable",
+        "body": [
+            "[modules.${1:editor}]",
+            "sources = [\"${2:src/$1/**/*.dk}\"]",
+            "depends = [\"${3:core}\"]",
+            "enabled = false",
+            "$0"
+        ]
+    },
+    "Native link settings": {
+        "prefix": "link",
+        "description": "Native libraries and their search paths",
+        "body": [
+            "[link]",
+            "library_paths = [\"${1:native/lib}\"]",
+            "libraries = [\"${2:example}\"]",
+            "$0"
+        ]
+    },
+    "Toolchain overrides": {
+        "prefix": "toolchain",
+        "description": "Override the compiler and clang executables",
+        "body": [
+            "[toolchain]",
+            "compiler = \"${1:duckc}\"",
+            "clang = \"${2:clang}\"",
+            "$0"
+        ]
+    }
+}

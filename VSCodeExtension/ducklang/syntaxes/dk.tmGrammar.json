@@ -1,1 +1,1008 @@
-{}
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Duck",
+  "scopeName": "source.dk",
+  "fileTypes": [
+    "dk"
+  ],
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#preprocessor"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#attributes"
+    },
+    {
+      "include": "#enum-block"
+    },
+    {
+      "include": "#property-block"
+    },
+    {
+      "include": "#setter-block"
+    },
+    {
+      "include": "#markup"
+    },
+    {
+      "include": "#container-declarations"
+    },
+    {
+      "include": "#using"
+    },
+    {
+      "include": "#macro-declaration"
+    },
+    {
+      "include": "#named-scopes"
+    },
+    {
+      "include": "#blocks"
+    },
+    {
+      "include": "#lambda"
+    },
+    {
+      "include": "#destructor"
+    },
+    {
+      "include": "#inferred-declarations"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#function-declarations"
+    },
+    {
+      "include": "#variable-declarations"
+    },
+    {
+      "include": "#builtin-types"
+    },
+    {
+      "include": "#support"
+    },
+    {
+      "include": "#compile-time"
+    },
+    {
+      "include": "#members"
+    },
+    {
+      "include": "#calls"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.duck",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.duck",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "preprocessor": {
+      "patterns": [
+        {
+          "match": "(#)(define)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.directive.duck"
+            },
+            "2": {
+              "name": "keyword.control.directive.define.duck"
+            },
+            "3": {
+              "name": "entity.name.constant.preprocessor.duck"
+            }
+          }
+        },
+        {
+          "match": "(#)(if|else)\\b",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.directive.duck"
+            },
+            "2": {
+              "name": "keyword.control.directive.conditional.duck"
+            }
+          }
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.duck",
+          "begin": "\"",
+          "end": "\"|$",
+          "patterns": [
+            {
+              "include": "#escapes"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.duck",
+          "begin": "'",
+          "end": "'|$",
+          "patterns": [
+            {
+              "include": "#escapes"
+            }
+          ]
+        }
+      ]
+    },
+    "escapes": {
+      "patterns": [
+        {
+          "name": "constant.character.escape.duck",
+          "match": "\\\\(?:u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[0nrt\\\\\"'])"
+        },
+        {
+          "name": "invalid.illegal.escape.duck",
+          "match": "\\\\.?"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.duck",
+          "match": "\\b0[xX][0-9a-fA-F]+\\b"
+        },
+        {
+          "name": "constant.numeric.binary.duck",
+          "match": "\\b0[bB][01]+\\b"
+        },
+        {
+          "name": "invalid.illegal.numeric.duck",
+          "match": "\\b0[xXbB][A-Za-z0-9_]*\\b"
+        },
+        {
+          "name": "constant.numeric.float.duck",
+          "match": "\\b[0-9]+(?:\\.[0-9]+(?:[eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)\\b"
+        },
+        {
+          "name": "constant.numeric.integer.duck",
+          "match": "\\b[0-9]+\\b"
+        },
+        {
+          "name": "invalid.illegal.numeric.duck",
+          "match": "\\b[0-9][A-Za-z0-9_.]*[A-Za-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "attributes": {
+      "name": "meta.attribute.duck",
+      "match": "^[ \\t]*(\\[)[ \\t]*(@?[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*(?:[ \\t]*,[ \\t]*[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)*)[ \\t]*(\\])",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.attribute.begin.duck"
+        },
+        "2": {
+          "patterns": [
+            {
+              "match": "(@)([A-Za-z_][A-Za-z0-9_]*)",
+              "captures": {
+                "1": {
+                  "name": "punctuation.definition.scope.duck"
+                },
+                "2": {
+                  "name": "entity.name.label.scope.duck"
+                }
+              }
+            },
+            {
+              "name": "keyword.other.attribute.args.duck",
+              "match": "\\bargs\\b"
+            },
+            {
+              "name": "entity.other.attribute-name.duck",
+              "match": "[A-Za-z_][A-Za-z0-9_]*"
+            },
+            {
+              "name": "punctuation.separator.duck",
+              "match": ","
+            },
+            {
+              "name": "punctuation.accessor.duck",
+              "match": "\\."
+            }
+          ]
+        },
+        "3": {
+          "name": "punctuation.definition.attribute.end.duck"
+        }
+      }
+    },
+    "enum-block": {
+      "name": "meta.block.enum.duck",
+      "begin": "(#@)(\\{)",
+      "beginCaptures": {
+        "1": {
+          "name": "storage.modifier.enum.duck"
+        },
+        "2": {
+          "name": "punctuation.definition.block.begin.duck"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.block.end.duck"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#strings"
+        },
+        {
+          "include": "#numbers"
+        },
+        {
+          "name": "keyword.operator.declaration.duck",
+          "match": ":"
+        },
+        {
+          "name": "punctuation.separator.duck",
+          "match": ","
+        },
+        {
+          "name": "variable.other.enummember.duck",
+          "match": "[A-Za-z_][A-Za-z0-9_]*"
+        }
+      ]
+    },
+    "property-block": {
+      "name": "meta.block.property.get.duck",
+      "begin": "(?:^[ \\t]*|(?<=\\})[ \\t]*)(@)(\\{)",
+      "beginCaptures": {
+        "1": {
+          "name": "storage.modifier.property.get.duck"
+        },
+        "2": {
+          "name": "punctuation.definition.block.begin.duck"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.block.end.duck"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#property-name"
+        },
+        {
+          "include": "#nested-block"
+        },
+        {
+          "include": "$self"
+        }
+      ]
+    },
+    "setter-block": {
+      "name": "meta.block.property.set.duck",
+      "begin": "(?:^[ \\t]*|(?<=\\})[ \\t]*)(=)(\\{)",
+      "beginCaptures": {
+        "1": {
+          "name": "storage.modifier.property.set.duck"
+        },
+        "2": {
+          "name": "punctuation.definition.block.begin.duck"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.block.end.duck"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#property-name"
+        },
+        {
+          "name": "variable.language.value.duck",
+          "match": "(?<![\\w.$])value\\b"
+        },
+        {
+          "include": "#nested-block"
+        },
+        {
+          "include": "$self"
+        }
+      ]
+    },
+    "property-name": {
+      "match": "(?:^|(?<=[,{]))[ \\t]*(?:([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)[ \\t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \\t]*(:)(?!:)",
+      "captures": {
+        "1": {
+          "patterns": [
+            {
+              "include": "#type-name"
+            }
+          ]
+        },
+        "2": {
+          "name": "variable.other.property.declaration.duck"
+        },
+        "3": {
+          "name": "keyword.operator.declaration.duck"
+        }
+      }
+    },
+    "nested-block": {
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#nested-block"
+        },
+        {
+          "include": "$self"
+        }
+      ]
+    },
+    "markup": {
+      "patterns": [
+        {
+          "name": "meta.tag.duck",
+          "begin": "(?:^[ \\t]*|(?<=[{>])[ \\t]*)(<)([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)(?=[\\s/>]|$)",
+          "beginCaptures": {
+            "1": {
+              "name": "punctuation.definition.tag.begin.duck"
+            },
+            "2": {
+              "name": "entity.name.tag.duck"
+            }
+          },
+          "end": "(/?)(>)",
+          "endCaptures": {
+            "1": {
+              "name": "punctuation.definition.tag.self-closing.duck"
+            },
+            "2": {
+              "name": "punctuation.definition.tag.end.duck"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#comments"
+            },
+            {
+              "match": "([A-Za-z_][A-Za-z0-9_]*)(=)(?!=)",
+              "captures": {
+                "1": {
+                  "name": "entity.other.attribute-name.duck"
+                },
+                "2": {
+                  "name": "keyword.operator.assignment.duck"
+                }
+              }
+            },
+            {
+              "include": "#strings"
+            },
+            {
+              "include": "#numbers"
+            },
+            {
+              "name": "constant.language.duck",
+              "match": "(?<![\\w.$])(?:true|false|null)\\b"
+            },
+            {
+              "name": "variable.language.duck",
+              "match": "(?<![\\w.$])this\\b"
+            },
+            {
+              "include": "#markup-expression"
+            }
+          ]
+        },
+        {
+          "name": "meta.tag.duck",
+          "match": "(</)([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)[ \\t]*(>)",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.tag.begin.duck"
+            },
+            "2": {
+              "name": "entity.name.tag.duck"
+            },
+            "3": {
+              "name": "punctuation.definition.tag.end.duck"
+            }
+          }
+        }
+      ]
+    },
+    "markup-expression": {
+      "begin": "\\(",
+      "end": "\\)",
+      "patterns": [
+        {
+          "include": "#markup-expression"
+        },
+        {
+          "include": "$self"
+        }
+      ]
+    },
+    "container-declarations": {
+      "patterns": [
+        {
+          "name": "meta.container.duck",
+          "match": "^[ \\t]*([-+])?(?!(?:if|else|for|while|do|return|break|continue|Switch|case|default|using|extern|this|null|true|false|macro|byte|short|int|long|float|double|bool|void|cstring|string|name|char|date|datetime|time|big|ubig|tiny|utiny|func|uint|uint8|uint16|uint32|uint64|int8|int16|int32|int64|[iu][0-9]+|[di]?vec[234]|d?mat[34]|quat|rot)\\b)([A-Za-z_][A-Za-z0-9_]*)[ \\t]*(:)[ \\t]*((?:[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)(?:\\s*,\\s*[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)*)(?=\\s*(?:#@?\\{|\\{))",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.access.duck"
+            },
+            "2": {
+              "name": "entity.name.type.container.duck"
+            },
+            "3": {
+              "name": "keyword.operator.inheritance.duck"
+            },
+            "4": {
+              "patterns": [
+                {
+                  "include": "#parent-name"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "meta.container.duck",
+          "match": "^[ \\t]*([-+])?(?!(?:if|else|for|while|do|return|break|continue|Switch|case|default|using|extern|this|null|true|false|macro|byte|short|int|long|float|double|bool|void|cstring|string|name|char|date|datetime|time|big|ubig|tiny|utiny|func|uint|uint8|uint16|uint32|uint64|int8|int16|int32|int64|[iu][0-9]+|[di]?vec[234]|d?mat[34]|quat|rot)\\b)([A-Z][A-Za-z0-9_]*)[ \\t]*(:)[ \\t]*((?:[A-Z][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*|byte|short|int|long|float|double|bool|void|cstring|string|name|char|date|datetime|time|big|ubig|tiny|utiny|func|uint|uint8|uint16|uint32|uint64|int8|int16|int32|int64|[iu][0-9]+|[di]?vec[234]|d?mat[34]|quat|rot)(?:\\s*,\\s*[A-Z][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)*)(?=\\s*(?://.*|/\\*.*)?$)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.access.duck"
+            },
+            "2": {
+              "name": "entity.name.type.container.duck"
+            },
+            "3": {
+              "name": "keyword.operator.inheritance.duck"
+            },
+            "4": {
+              "patterns": [
+                {
+                  "include": "#parent-name"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "meta.container.duck",
+          "match": "^[ \\t]*([-+])?(?!T\\{)(?!(?:if|else|for|while|do|return|break|continue|Switch|case|default|using|extern|this|null|true|false|macro|byte|short|int|long|float|double|bool|void|cstring|string|name|char|date|datetime|time|big|ubig|tiny|utiny|func|uint|uint8|uint16|uint32|uint64|int8|int16|int32|int64|[iu][0-9]+|[di]?vec[234]|d?mat[34]|quat|rot)\\b)([A-Za-z_][A-Za-z0-9_]*)(?=\\s*(?:#@?\\{.*|\\{.*|//.*|/\\*.*)?$)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.access.duck"
+            },
+            "2": {
+              "name": "entity.name.type.container.duck"
+            }
+          }
+        }
+      ]
+    },
+    "parent-name": {
+      "patterns": [
+        {
+          "include": "#builtin-types"
+        },
+        {
+          "name": "entity.other.inherited-class.duck",
+          "match": "[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*"
+        },
+        {
+          "name": "punctuation.separator.duck",
+          "match": ","
+        }
+      ]
+    },
+    "using": {
+      "match": "(?<![\\w.$])(using)[ \\t]+([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)",
+      "captures": {
+        "1": {
+          "name": "keyword.control.import.using.duck"
+        },
+        "2": {
+          "name": "entity.name.namespace.duck"
+        }
+      }
+    },
+    "macro-declaration": {
+      "match": "(?<![\\w.$])(macro)[ \\t]+([A-Za-z_][A-Za-z0-9_]*)(?=[ \\t]*\\()",
+      "captures": {
+        "1": {
+          "name": "storage.type.macro.duck"
+        },
+        "2": {
+          "name": "entity.name.function.macro.duck"
+        }
+      }
+    },
+    "named-scopes": {
+      "patterns": [
+        {
+          "match": "(@)(start|end)[ \\t]+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.scope.duck"
+            },
+            "2": {
+              "name": "keyword.control.scope.duck"
+            },
+            "3": {
+              "name": "entity.name.label.scope.duck"
+            }
+          }
+        },
+        {
+          "match": "(@)([A-Za-z_][A-Za-z0-9_]*)(?![ \\t]*\\()",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.scope.duck"
+            },
+            "2": {
+              "name": "entity.name.label.scope.duck"
+            }
+          }
+        }
+      ]
+    },
+    "blocks": {
+      "patterns": [
+        {
+          "name": "storage.modifier.static.duck",
+          "match": "#(?=[ \\t]*(?:\\{|$))"
+        },
+        {
+          "name": "keyword.control.ordered.duck",
+          "match": "\\$(?=[ \\t]*\\{)"
+        },
+        {
+          "name": "keyword.other.test.duck",
+          "match": "(?<![\\w.$])T(?=\\{)"
+        },
+        {
+          "name": "keyword.other.markup.duck",
+          "match": "(?<![\\w.$])this(?=\\{)"
+        }
+      ]
+    },
+    "lambda": {
+      "name": "storage.type.function.lambda.duck",
+      "match": "@(?=[ \\t]*(?:[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*[ \\t*\\[\\]]*)?\\()"
+    },
+    "destructor": {
+      "match": "^[ \\t]*(~)([A-Za-z_][A-Za-z0-9_]*)(?=[ \\t]*\\()",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.destructor.duck"
+        },
+        "2": {
+          "name": "entity.name.function.destructor.duck"
+        }
+      }
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.conditional.duck",
+          "match": "(?<![\\w.$])(?:if|else|Switch)\\b"
+        },
+        {
+          "name": "keyword.control.conditional.duck",
+          "match": "(?<![\\w.$])case\\b(?=[ \\t]+\\S)"
+        },
+        {
+          "name": "keyword.control.conditional.duck",
+          "match": "(?<![\\w.$])default\\b(?=[ \\t]*:)"
+        },
+        {
+          "name": "keyword.control.loop.duck",
+          "match": "(?<![\\w.$])(?:for|while|do)\\b"
+        },
+        {
+          "name": "keyword.control.flow.duck",
+          "match": "(?<![\\w.$])(?:break|continue|return)\\b"
+        },
+        {
+          "name": "storage.modifier.extern.duck",
+          "match": "(?<![\\w.$])extern\\b"
+        },
+        {
+          "name": "constant.language.duck",
+          "match": "(?<![\\w.$])(?:true|false|null)\\b"
+        },
+        {
+          "name": "variable.language.duck",
+          "match": "(?<![\\w.$])this\\b"
+        }
+      ]
+    },
+    "function-declarations": {
+      "patterns": [
+        {
+          "name": "meta.function.duck",
+          "match": "(?<![\\w.$])(byte|short|int|long|float|double|bool|void|cstring|string|name|char|date|datetime|time|big|ubig|tiny|utiny|func|uint|uint8|uint16|uint32|uint64|int8|int16|int32|int64|[iu][0-9]+|[di]?vec[234]|d?mat[34]|quat|rot|markup)\\b((?:[ \\t]*\\*+)?(?:[ \\t]*\\[[^\\]\\n]*\\])*(?:[ \\t]+(?:queue|stack|pair)\\b)?(?:[ \\t]*\\*+)?[ \\t]*&?)[ \\t]+(?!(?:if|else|for|while|do|return|break|continue|Switch|case|default|using|extern|this|null|true|false|macro|byte|short|int|long|float|double|bool|void|cstring|string|name|char|date|datetime|time|big|ubig|tiny|utiny|func|uint|uint8|uint16|uint32|uint64|int8|int16|int32|int64|[iu][0-9]+|[di]?vec[234]|d?mat[34]|quat|rot)\\b)([A-Za-z_][A-Za-z0-9_]*)(?=[ \\t]*\\()",
+          "captures": {
+            "1": {
+              "patterns": [
+                {
+                  "include": "#type-name"
+                }
+              ]
+            },
+            "2": {
+              "patterns": [
+                {
+                  "include": "#type-suffix"
+                }
+              ]
+            },
+            "3": {
+              "name": "entity.name.function.duck"
+            }
+          }
+        },
+        {
+          "name": "meta.function.duck",
+          "match": "(?<![\\w.$])(?!(?:if|else|for|while|do|return|break|continue|Switch|case|default|using|extern|this|null|true|false|macro|byte|short|int|long|float|double|bool|void|cstring|string|name|char|date|datetime|time|big|ubig|tiny|utiny|func|uint|uint8|uint16|uint32|uint64|int8|int16|int32|int64|[iu][0-9]+|[di]?vec[234]|d?mat[34]|quat|rot)\\b)([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)((?:[ \\t]*\\*+)?(?:[ \\t]*\\[[^\\]\\n]*\\])*(?:[ \\t]+(?:queue|stack|pair)\\b)?(?:[ \\t]*\\*+)?[ \\t]*&?)[ \\t]+(?!(?:if|else|for|while|do|return|break|continue|Switch|case|default|using|extern|this|null|true|false|macro|byte|short|int|long|float|double|bool|void|cstring|string|name|char|date|datetime|time|big|ubig|tiny|utiny|func|uint|uint8|uint16|uint32|uint64|int8|int16|int32|int64|[iu][0-9]+|[di]?vec[234]|d?mat[34]|quat|rot)\\b)([A-Z][A-Za-z0-9_]*)(?=[ \\t]*\\()",
+          "captures": {
+            "1": {
+              "patterns": [
+                {
+                  "include": "#type-name"
+                }
+              ]
+            },
+            "2": {
+              "patterns": [
+                {
+                  "include": "#type-suffix"
+                }
+              ]
+            },
+            "3": {
+              "name": "entity.name.function.duck"
+            }
+          }
+        },
+        {
+          "name": "meta.function.duck",
+          "match": "^[ \\t]*([-+])?(?!(?:if|else|for|while|do|return|break|continue|Switch|case|default|using|extern|this|null|true|false|macro|byte|short|int|long|float|double|bool|void|cstring|string|name|char|date|datetime|time|big|ubig|tiny|utiny|func|uint|uint8|uint16|uint32|uint64|int8|int16|int32|int64|[iu][0-9]+|[di]?vec[234]|d?mat[34]|quat|rot)\\b)([A-Za-z_][A-Za-z0-9_]*)[ \\t]+(?=\\()",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.access.duck"
+            },
+            "2": {
+              "name": "entity.name.function.duck"
+            }
+          }
+        },
+        {
+          "name": "storage.modifier.access.duck",
+          "match": "^[ \\t]*[-+](?=[A-Za-z_~#\\[])"
+        }
+      ]
+    },
+    "variable-declarations": {
+      "match": "(?<![\\w.$])(?!(?:if|else|for|while|do|return|break|continue|Switch|case|default|using|extern|this|null|true|false|macro)\\b)([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)((?:[ \\t]*\\*+)?(?:[ \\t]*\\[[^\\]\\n]*\\])*(?:[ \\t]+(?:queue|stack|pair)\\b)?(?:[ \\t]*\\*+)?[ \\t]*&?)[ \\t]+(?!(?:if|else|while|for|break|continue|do|return|extern|null|using|Switch|true|false|this|byte|short|int|long|float|double|bool|void|cstring|string|name|char|date|datetime|time|big|ubig|tiny|utiny|func|uint|uint8|uint16|uint32|uint64|int8|int16|int32|int64|[iu][0-9]+|[di]?vec[234]|d?mat[34]|quat|rot)\\b)([A-Za-z_][A-Za-z0-9_]*)\\b",
+      "captures": {
+        "1": {
+          "patterns": [
+            {
+              "include": "#type-name"
+            }
+          ]
+        },
+        "2": {
+          "patterns": [
+            {
+              "include": "#type-suffix"
+            }
+          ]
+        },
+        "3": {
+          "name": "variable.other.declaration.duck"
+        }
+      }
+    },
+    "inferred-declarations": {
+      "match": "^[ \\t]*(?:(for)[ \\t]+)?(-)?(?!(?:if|else|for|while|do|return|break|continue|Switch|case|default|using|extern|this|null|true|false|macro|byte|short|int|long|float|double|bool|void|cstring|string|name|char|date|datetime|time|big|ubig|tiny|utiny|func|uint|uint8|uint16|uint32|uint64|int8|int16|int32|int64|[iu][0-9]+|[di]?vec[234]|d?mat[34]|quat|rot)\\b)([A-Za-z_][A-Za-z0-9_]*)[ \\t]*(::?)(?!:)",
+      "captures": {
+        "1": {
+          "name": "keyword.control.loop.duck"
+        },
+        "2": {
+          "name": "storage.modifier.reverse.duck"
+        },
+        "3": {
+          "name": "variable.other.declaration.duck"
+        },
+        "4": {
+          "name": "keyword.operator.declaration.duck"
+        }
+      }
+    },
+    "type-name": {
+      "patterns": [
+        {
+          "include": "#builtin-types"
+        },
+        {
+          "name": "storage.type.markup.duck",
+          "match": "\\bmarkup\\b"
+        },
+        {
+          "name": "entity.name.type.duck",
+          "match": "[A-Za-z_][A-Za-z0-9_]*"
+        },
+        {
+          "name": "punctuation.accessor.duck",
+          "match": "\\."
+        }
+      ]
+    },
+    "type-suffix": {
+      "patterns": [
+        {
+          "name": "storage.type.collection.duck",
+          "match": "\\b(?:queue|stack|pair)\\b"
+        },
+        {
+          "name": "storage.modifier.pointer.duck",
+          "match": "\\*"
+        },
+        {
+          "name": "storage.modifier.reference.duck",
+          "match": "&"
+        },
+        {
+          "name": "storage.modifier.array.duck",
+          "match": "-"
+        },
+        {
+          "include": "#numbers"
+        },
+        {
+          "name": "variable.other.duck",
+          "match": "[A-Za-z_][A-Za-z0-9_]*"
+        }
+      ]
+    },
+    "builtin-types": {
+      "name": "storage.type.duck",
+      "match": "(?<![\\w.$])(?:byte|short|int|long|float|double|bool|void|cstring|string|name|char|date|datetime|time|big|ubig|tiny|utiny|func|uint|uint8|uint16|uint32|uint64|int8|int16|int32|int64|[iu][0-9]+|[di]?vec[234]|d?mat[34]|quat|rot)\\b"
+    },
+    "support": {
+      "patterns": [
+        {
+          "match": "(?<![\\w.$])(T)(\\.)(AreEqual|AreNotEqual|IsTrue|IsFalse|Fail)(?=\\()",
+          "captures": {
+            "1": {
+              "name": "support.class.test.duck"
+            },
+            "2": {
+              "name": "punctuation.accessor.duck"
+            },
+            "3": {
+              "name": "support.function.test.duck"
+            }
+          }
+        },
+        {
+          "match": "(?<![\\w.$])(Math)(\\.)(Sqrt|Cbrt|Exp2|Exp|Log10|Log2|Log|Sinh|Cosh|Tanh|Asin|Acos|Atan2|Atan|Sin|Cos|Tan|Floor|Ceil|Round|Trunc|Pow|Hypot|Mod|Lerp|Abs|Sign|Min|Max|Clamp|Dot|Cross|Length|Distance|Normalize)(?=\\()",
+          "captures": {
+            "1": {
+              "name": "support.class.math.duck"
+            },
+            "2": {
+              "name": "punctuation.accessor.duck"
+            },
+            "3": {
+              "name": "support.function.math.duck"
+            }
+          }
+        },
+        {
+          "name": "support.function.builtin.duck",
+          "match": "(?<![\\w.$])(?:Print|Exec|IsValid|Length|CodeUnitAt)(?=\\()"
+        },
+        {
+          "name": "entity.name.function.main.duck",
+          "match": "(?<![\\w.$])Main(?=[ \\t]*\\()"
+        }
+      ]
+    },
+    "compile-time": {
+      "patterns": [
+        {
+          "name": "keyword.operator.compile-time.duck",
+          "match": "#(?=[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*\\()"
+        },
+        {
+          "name": "storage.modifier.constant.duck",
+          "match": "#"
+        }
+      ]
+    },
+    "members": {
+      "patterns": [
+        {
+          "name": "keyword.operator.range.duck",
+          "match": "\\.\\.\\."
+        },
+        {
+          "match": "(\\.\\.)(\\?)?([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.operator.duck-call.duck"
+            },
+            "2": {
+              "name": "keyword.operator.guard.duck"
+            },
+            "3": {
+              "name": "entity.name.function.duck-call.duck"
+            }
+          }
+        },
+        {
+          "match": "(\\.)(GetName|GetDeclaringName|GetTags|GetChildren)(?=\\()",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.duck"
+            },
+            "2": {
+              "name": "support.function.reflection.duck"
+            }
+          }
+        },
+        {
+          "match": "(\\.)(Len)\\b(?!\\()",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.duck"
+            },
+            "2": {
+              "name": "support.variable.property.duck"
+            }
+          }
+        },
+        {
+          "match": "(\\.)([A-Za-z_][A-Za-z0-9_]*)(?=\\()",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.duck"
+            },
+            "2": {
+              "name": "entity.name.function.member.duck"
+            }
+          }
+        },
+        {
+          "match": "(\\.)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.duck"
+            },
+            "2": {
+              "name": "variable.other.property.duck"
+            }
+          }
+        }
+      ]
+    },
+    "calls": {
+      "name": "entity.name.function.call.duck",
+      "match": "(?<![\\w.$])(?!(?:if|else|for|while|do|return|break|continue|Switch|case|default|using|extern|this|null|true|false|macro)\\b)[A-Za-z_][A-Za-z0-9_]*(?=\\()"
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.move.duck",
+          "match": "::"
+        },
+        {
+          "name": "keyword.operator.declaration.duck",
+          "match": ":"
+        },
+        {
+          "name": "keyword.operator.guard.duck",
+          "match": "\\?"
+        },
+        {
+          "name": "keyword.operator.assignment.compound.duck",
+          "match": "<<=|>>=|[-+*/%&|^]="
+        },
+        {
+          "name": "keyword.operator.comparison.duck",
+          "match": "==|!=|<=|>="
+        },
+        {
+          "name": "keyword.operator.bitwise.shift.duck",
+          "match": "<<|>>"
+        },
+        {
+          "name": "keyword.operator.comparison.duck",
+          "match": "<|>"
+        },
+        {
+          "name": "keyword.operator.assignment.duck",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.increment.duck",
+          "match": "\\+\\+|--"
+        },
+        {
+          "name": "keyword.operator.logical.duck",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "name": "keyword.operator.bitwise.duck",
+          "match": "[&|^~]"
+        },
+        {
+          "name": "keyword.operator.arithmetic.duck",
+          "match": "[-+*/%]"
+        },
+        {
+          "name": "storage.type.function.lambda.duck",
+          "match": "@"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.duck",
+          "match": ","
+        },
+        {
+          "name": "punctuation.terminator.duck",
+          "match": ";"
+        }
+      ]
+    }
+  }
+}

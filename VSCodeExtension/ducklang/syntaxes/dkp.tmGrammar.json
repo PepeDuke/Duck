@@ -1,0 +1,78 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Duck Project",
+  "scopeName": "source.dkp",
+  "fileTypes": [
+    "dkp"
+  ],
+  "patterns": [
+    {
+      "name": "comment.line.number-sign.dkp",
+      "match": "#.*$"
+    },
+    {
+      "match": "^\\s*(\\[)([^\\]\\n]+)(\\])",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.table.dkp"
+        },
+        "2": {
+          "name": "entity.name.section.dkp"
+        },
+        "3": {
+          "name": "punctuation.definition.table.dkp"
+        }
+      }
+    },
+    {
+      "match": "^\\s*(version|name|entry|build_dir|sources|depends|enabled|compiler|clang|library_paths|libraries)\\s*(=)",
+      "captures": {
+        "1": {
+          "name": "keyword.other.key.dkp"
+        },
+        "2": {
+          "name": "keyword.operator.assignment.dkp"
+        }
+      }
+    },
+    {
+      "match": "^\\s*([A-Za-z0-9_-]+)\\s*(=)",
+      "captures": {
+        "1": {
+          "name": "variable.other.key.dkp"
+        },
+        "2": {
+          "name": "keyword.operator.assignment.dkp"
+        }
+      }
+    },
+    {
+      "name": "string.quoted.double.dkp",
+      "begin": "\"",
+      "end": "\"|$",
+      "patterns": [
+        {
+          "name": "constant.character.escape.dkp",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "string.quoted.single.dkp",
+      "begin": "'",
+      "end": "'|$"
+    },
+    {
+      "name": "constant.language.boolean.dkp",
+      "match": "\\b(?:true|false)\\b"
+    },
+    {
+      "name": "constant.numeric.dkp",
+      "match": "\\b[0-9]+(?:\\.[0-9]+)?\\b"
+    },
+    {
+      "name": "punctuation.separator.dkp",
+      "match": ","
+    }
+  ]
+}

@@ -2750,18 +2750,96 @@ class Analyzer {
 
     return type;
   }
-  // vec3.Identity(), vec3.Zero(), vec3.One(), mat4.Identity() and mat4.Zero().
+  void floatArgument(const Expr &argument, const std::string &name) {
+    const auto given = decay(argument, expression(argument, nativeLiteralHint(argument, {Type::Float, 1, 1})));
+
+    if (!numeric(given)) fail(argument.token, name + " requires a number, got " + typeName(given));
+
+    convert(argument, given, Type::Float);
+  }
+  // A rotation built from a rot, or from pitch, yaw and roll.
+  void checkEulerArguments(const Expr &e) {
+    if (e.args.size() == 1) {
+      const auto given = expression(*e.args[0]);
+
+      if (!nativeMath(given).euler) fail(e.args[0]->token, "FromEuler requires a rot or pitch, yaw and roll, got " + typeName(given));
+    } else if (e.args.size() == 3) {
+      for (const auto &argument : e.args) floatArgument(*argument, "FromEuler");
+    } else
+      fail(e.token, "wrong argument count for 'FromEuler'");
+  }
+  void checkAxisAngleArguments(const Expr &e) {
+    if (e.args.size() != 2) fail(e.token, "wrong argument count for 'FromAxisAngle'");
+
+    const auto axis = expression(*e.args[0]);
+
+    if (axis != nativeNamed("vec3")) fail(e.args[0]->token, "FromAxisAngle requires a vec3 axis, got " + typeName(axis));
+
+    floatArgument(*e.args[1], "FromAxisAngle");
+  }
+  // vec3.Identity(), mat4.Zero(), quat.FromEuler(...) and the like.
   Type checkNativeStatic(const Expr &e, const std::string &record, const std::string &name) {
-    Type type(Type::Record);
-    type.record = record;
+    const auto type = nativeNamed(record);
+    const auto shape = nativeMath(record);
 
-    if (name != "Identity" && name != "Zero" && (name != "One" || nativeMath(record).matrix()))
-      fail(e.token, record + " has no function '" + name + "'");
+    if (shape.quaternion && (name == "FromEuler" || name == "FromAxisAngle")) {
+      analysis.nativeMethods.insert(&e);
 
+      if (name == "FromEuler") checkEulerArguments(e);
+      else checkAxisAngleArguments(e);
+
+      return type;
+    }
+
+    const bool known = name == "Identity" || (name == "Zero" && !shape.quaternion) ||
+                       (name == "One" && !shape.matrix() && !shape.quaternion && !shape.euler);
+
+    if (!known) fail(e.token, record + " has no function '" + name + "'");
     if (!e.args.empty()) fail(e.token, "wrong argument count for '" + e.token.text + "'");
 
     analysis.nativeMethods.insert(&e);
     return type;
+  }
+  // The methods of quat and rot that do not fit the vector table below.
+  std::optional<Type> checkRotationMethod(const Expr &e, const Type &type) {
+    const auto shape = nativeMath(type);
+    const auto name = memberName(e.token.text);
+    const auto noArguments = [&]() {
+      if (!e.args.empty()) fail(e.token, "wrong argument count for '" + name + "'");
+    };
+    Type result = Type::Void;
+
+    if (name == "Rotate") {
+      if (e.args.size() != 1) fail(e.token, "wrong argument count for 'Rotate'");
+
+      const auto given = expression(*e.args[0]);
+
+      if (given != nativeNamed("vec3")) fail(e.args[0]->token, "Rotate requires a vec3, got " + typeName(given));
+
+      result = given;
+    } else if (name == "ToMat3" || name == "ToMat4") {
+      noArguments();
+      result = nativeNamed(name == "ToMat3" ? "mat3" : "mat4");
+    } else if (shape.euler && name == "ToQuat") {
+      noArguments();
+      result = nativeNamed("quat");
+    } else if (shape.quaternion && name == "ToEuler") {
+      noArguments();
+      result = nativeNamed("rot");
+    } else if (shape.quaternion && (name == "Conjugate" || name == "Inverse")) {
+      noArguments();
+      result = type;
+    } else if (shape.quaternion && name == "FromEuler") {
+      checkEulerArguments(e);
+      result = type;
+    } else if (shape.quaternion && name == "FromAxisAngle") {
+      checkAxisAngleArguments(e);
+      result = type;
+    } else
+      return std::nullopt;
+
+    analysis.nativeMethods.insert(&e);
+    return result;
   }
   // Every method returns its result; only Normalize also changes the receiver.
   Type checkNativeMethod(const Expr &e, const Type &type) {
@@ -2772,7 +2850,17 @@ class Analyzer {
     Type result = Type::Void;
     size_t count = 0;
 
-    if (shape.matrix()) {
+    if (shape.quaternion || shape.euler)
+      if (const auto rotation = checkRotationMethod(e, type)) return *rotation;
+
+    if (shape.euler) {
+      // Only the conversions above.
+    } else if (shape.quaternion) {
+      if (name == "Length" || name == "LengthSquared") result = scalar;
+      else if (name == "Normalize") result = type;
+      else if (name == "Dot") { result = scalar; count = 1; }
+      else if (name == "Slerp") { result = type; count = 2; }
+    } else if (shape.matrix()) {
       if (name == "Transpose" || name == "Inverse") result = type;
       else if (name == "Determinant") result = scalar;
     } else if (name == "Abs") result = type;
@@ -2814,6 +2902,17 @@ class Analyzer {
 
     if (!equality && op != "+" && op != "-" && op != "*" && op != "/") refuse();
 
+    // A quaternion only composes with another and rotates a vec3.
+    if (a.quaternion || b.quaternion) {
+      if (first == second && equality) return Type::Bool;
+      if (first == second && op == "*") return first;
+      if (a.quaternion && op == "*" && second == nativeNamed("vec3")) return second;
+
+      refuse();
+    }
+
+    if (a.euler && b.euler && (op == "*" || op == "/")) refuse();
+
     if (a && b) {
       if (first == second) {
         if (a.matrix() && op == "/") refuse();
@@ -2821,7 +2920,7 @@ class Analyzer {
         return equality ? Type(Type::Bool) : first;
       }
 
-      if (op == "*" && a.matrix() && !b.matrix() && a.scalar == b.scalar && a.rows == b.rows) return second;
+      if (op == "*" && a.matrix() && !b.matrix() && !b.euler && a.scalar == b.scalar && a.rows == b.rows) return second;
 
       refuse();
     }
@@ -3060,9 +3159,11 @@ class Analyzer {
     if (nativeMath(t)) {
       const auto result = checkNativeMethod(e, t);
 
-      // Normalize updates what it was called on and also returns it. A
+      // These update what they were called on and also return it. A
       // temporary has nothing to update, so it only gives the result.
-      if (memberName(op) == "Normalize" && stored) {
+      const auto member = memberName(op);
+
+      if ((member == "Normalize" || member == "FromEuler" || member == "FromAxisAngle") && stored) {
         if (constant) fail(base.token, "cannot call a mutable method on a constant");
 
         analysis.nativeInPlace.insert(&e);
