@@ -85,4 +85,8 @@ Main()
         Print(found.Value)                    // 9
     }
     Print(IsValid((Day)200))                  // 0
+
+    // A for loop visits every member in declaration order.
+    for person : CommonNames
+        Print(person)                         // Bob, Tom, Dan
 }

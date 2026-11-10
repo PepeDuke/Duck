@@ -923,6 +923,11 @@ Print(d.Value)                     // its underlying value
   holds `x`, without trapping. Implicit conversion stays one way: `Day d = 0`
   is a type mismatch, enum members are constants, and compound assignment such
   as `d += 1` is rejected.
+- **Loops.** `for item : Day` visits every member in declaration order,
+  `for -item : Day` in reverse, and `for i, item : Day` also numbers them
+  from 0 as `int`s. The loop variables are constants. A nested enum loops the
+  same way, as in `for mode : Game.Mode`, and a local of the same name hides
+  the enum.
 - **Native calls.** An `extern "C"` parameter or result may be an enum whose
   underlying type is `int`, `uint32`, `long`, `uint64`, `float`, or `double`.
   The native side sees the underlying value; a result that no member holds
@@ -933,8 +938,7 @@ Print(d.Value)                     // its underlying value
 - **Modules.** Each module emits private name and value tables. An importing
   module may use an imported enum, including passing it to the library, but
   cannot extend it; add members in the defining module instead.
-- Not yet supported: iterating an enum's members and looking a member up by
-  its name at run time.
+- Not yet supported: looking a member up by its name at run time.
 
 ## Files
 

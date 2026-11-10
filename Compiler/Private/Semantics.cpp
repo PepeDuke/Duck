@@ -534,6 +534,34 @@ class Analyzer {
 
     return &symbols.enums.at(qualified);
   }
+  // The enum a name or dotted path such as Game.Mode denotes, or empty.
+  std::string enumNamed(const Expr &e) {
+    if (e.kind != "name" && e.kind != ".") return "";
+
+    std::string path;
+    const Expr *root = dottedRoot(e, path);
+
+    if (root->kind != "name" || findLocal(root->token)) return "";
+
+    return qualify(root->token.text + path, e.token,
+                   [&](const std::string &n) { return symbols.enums.count(n) != 0; });
+  }
+  // `for item : Day` visits each member in declaration order (`for -item`
+  // in reverse); `for i, item : Day` also numbers them from 0 as ints. The
+  // loop variables are constants.
+  void bindEnumIteration(const Stmt &s, const std::string &record) {
+    analysis.enumLoops[&s] = record;
+    Type type = Type::Enum;
+    type.record = record;
+    auto name = s.token;
+    name.text = s.name;
+    bind(name, {type, true});
+
+    if (s.key.empty()) return;
+
+    name.text = s.key;
+    bind(name, {Type::Int, true});
+  }
   // d.Name (the member's name) and d.Value (its underlying value) on an enum
   // value; Void for any other expression.
   Type enumProperty(const Expr &e) {
@@ -1590,7 +1618,7 @@ class Analyzer {
 
     if (!arrayValue(type) && !collectionValue(type))
       fail(collection.token, "cannot iterate over " + typeName(type) +
-                                 "; a for loop takes an array, queue, stack, pair, or grid");
+                                 "; a for loop takes an array, queue, stack, pair, grid, or enum");
 
     if (!s.key.empty() && type.base != Type::Pair)
       fail(collection.token, "for k, v : c needs a pair or a grid; " + typeName(type) + " has no keys");
@@ -4339,7 +4367,9 @@ class Analyzer {
     if (s.initializer)
       statement(*s.initializer);
 
-    if (s.kind == "foreach")
+    if (const auto record = s.kind == "foreach" ? enumNamed(*s.expr) : ""; !record.empty())
+      bindEnumIteration(s, record);
+    else if (s.kind == "foreach")
       bindIteration(s);
     else if (s.kind == "rangefor") {
       const auto type = rangeEndpoints(*s.expr, Type::Void);
@@ -4362,7 +4392,7 @@ class Analyzer {
     requireCompleteScopes(scopes.size() - 1);
     scopes.pop_back();
 
-    if (s.kind == "foreach") iterations.pop_back();
+    if (s.kind == "foreach" && !analysis.enumLoops.count(&s)) iterations.pop_back();
 
     return false;
   }

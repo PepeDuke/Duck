@@ -432,6 +432,8 @@ struct FunctionAnalysis {
   std::map<const Expr *, Type> enumCasts;
   // d.Name and d.Value reads on enum values.
   std::map<const Expr *, std::string> enumProperties;
+  // `for item : Day` loops over an enum's members, by the enum's name.
+  std::map<const Stmt *, std::string> enumLoops;
   // Calls of a file's methods, by method name: Open, Create, Append, Close,
   // Read, Write, ReadText.
   std::map<const Expr *, std::string> fileCalls;

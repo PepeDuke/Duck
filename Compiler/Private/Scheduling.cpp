@@ -586,6 +586,25 @@ class EffectWalker {
     scopes.pop_back();
   }
   void forEachEffects(const Stmt &s) {
+    if (auto loop = a.enumLoops.find(&s); loop != a.enumLoops.end()) {
+      // Members are constants: the loop reads nothing but its own variables.
+      Type type = Type::Enum;
+      type.record = loop->second;
+      scopes.emplace_back();
+      auto name = s.token;
+      name.text = s.name;
+      declare(name, type);
+
+      if (!s.key.empty()) {
+        name.text = s.key;
+        declare(name, Type::Int);
+      }
+
+      list(s.body);
+      scopes.pop_back();
+      return;
+    }
+
     auto collection = place(*s.expr);
     scopes.emplace_back();
 
@@ -784,7 +803,7 @@ class CostModel {
   double iterations(const Stmt &s, const Frame &frame) const {
     double count = -1;
 
-    if (s.kind == "foreach") count = sizeOf(*s.expr, frame);
+    if (s.kind == "foreach" && !frame.a.enumLoops.count(&s)) count = sizeOf(*s.expr, frame);
     else if (s.kind == "rangefor") {
       const auto low = bound(*s.expr->args[0], frame), high = bound(*s.expr->args[1], frame);
 

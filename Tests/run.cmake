@@ -3070,7 +3070,7 @@ foreach(op IN ITEMS "<<" ">>")
 endforeach()
 file(READ "${SOURCE}/Examples/Bootstrap/19_Enums.dk" enums)
 run_program(enum_example "${enums}"
-  "Sunday\n1\n10\nMonday\n1\n3\n1\nTom\nBob and Thomas\nDaniel\n3\nPlay\nWednesday\n9\n0\n")
+  "Sunday\n1\n10\nMonday\n1\n3\n1\nTom\nBob and Thomas\nDaniel\n3\nPlay\nWednesday\n9\n0\nBob\nTom\nDan\n")
 # Runtime member indices decay through the value tables.
 run_program(enum_runtime "Color : string #@{ Red, Green: \"verde\" }
 Tag : name #@{ A: \"alpha\" }
@@ -3218,6 +3218,51 @@ Pause
 Pause
 Other
 ")
+# `for item : E` visits members in declaration order; `-item` reverses and
+# `i, item` numbers them.
+run_program(enum_loops "Items : string #@{ Sword, Shield: \"Round shield\", Potion }
+Game #{
+  Mode : int #@{ Menu, Play: 10, Pause }
+  int Total() {
+    int sum = 0
+    for m : Mode
+      sum += m
+    return sum
+  }
+}
+One : byte #@{ Only }
+Main() {
+  for item : Items
+    Print(item)
+  for -item : Items {
+    string text = item
+    Print(text)
+  }
+  for i, m : Game.Mode {
+    if m == Game.Mode.Play
+      continue
+    Print(i)
+    Print(m.Name)
+  }
+  for m : Game.Mode {
+    if m.Value > 5
+      break
+    Print(m)
+  }
+  Print(Game.Total())
+  int count = 0
+  for a : One |
+    b : Items {
+    count++
+  }
+  Print(count)
+  func int() last = null
+  for m : Game.Mode
+    last = @ int() { return m.Value }
+  Print(last())
+}" "Sword\nShield\nPotion\nPotion\nRound shield\nSword\n0\nMenu\n2\nPause\nMenu\n21\n3\n11\n")
+reject(enum_loop_constant "E : int #@{ A }\nMain() {\nfor e : E\ne = E.A\n}" "cannot modify constant 'e'")
+reject(enum_loop_shadowed "E : int #@{ A }\nMain() {\nint E = 1\nfor e : E\nPrint(e)\n}" "pair, grid, or enum")
 # A native function takes and returns an enum as its underlying value.
 run_program(enum_native_values "Level : int #@{ Low: -5, High: 5 }
 extern \"C\" Level abs(Level value)

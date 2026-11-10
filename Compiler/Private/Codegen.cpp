@@ -2201,6 +2201,52 @@ class Generator {
   }
   // `for i : a...b`: i is the counter itself, so a body that changes it
   // changes which values follow. A range always holds at least one value.
+  // `for item : Day` counts through member indices; the key, when there is
+  // one, is the same position as an int.
+  void enumFor(const Stmt &s, const std::string &record) {
+    const auto count = functions.enums.at(record).members.size();
+
+    if (count == 0) return;
+
+    const auto first = s.reverse ? std::to_string(count - 1) : "0";
+    const auto last = s.reverse ? "0" : std::to_string(count - 1);
+    Type type = Type::Enum;
+    type.record = record;
+    scopes.emplace_back();
+    auto name = s.token;
+    name.text = s.name;
+    declare(name, {type, first}, true);
+    auto key = s.token;
+    key.text = s.key;
+
+    if (!s.key.empty()) declare(key, {Type::Int, first}, true);
+
+    auto body = label(), step = label(), advance = label(), end = label();
+    emit("br label %" + body);
+    startBlock(body);
+    loops.push_back({end, step, scopes.size()});
+
+    if (!block(s.body))
+      emit("br label %" + step);
+
+    loops.pop_back();
+    startBlock(step);
+    const auto slot = findBinding(name).value;
+    auto current = fresh(), done = fresh(), next = fresh();
+    emit(current + " = load i32, ptr " + slot);
+    emit(done + " = icmp eq i32 " + current + ", " + last);
+    emit("br i1 " + done + ", label %" + end + ", label %" + advance);
+    startBlock(advance);
+    emit(next + " = " + (s.reverse ? "sub" : "add") + " i32 " + current + ", 1");
+    emit("store i32 " + next + ", ptr " + slot);
+
+    if (!s.key.empty()) emit("store i32 " + next + ", ptr " + findBinding(key).value);
+
+    emit("br label %" + body);
+    startBlock(end);
+    cleanupScopes(scopes.size() - 1);
+    scopes.pop_back();
+  }
   void rangeFor(const Stmt &s) {
     const auto first = condition(*s.expr->args[0]), last = condition(*s.expr->args[1]);
     scopes.emplace_back();
@@ -5184,6 +5230,11 @@ class Generator {
 
     if (s.kind == "if") return lowerIf(s);
     if (s.kind == "do") return lowerDo(s);
+
+    if (auto loop = analysis.enumLoops.find(&s); loop != analysis.enumLoops.end()) {
+      enumFor(s, loop->second);
+      return false;
+    }
 
     if (s.kind == "foreach") {
       forEach(s);

@@ -1613,6 +1613,13 @@ Print(d.Name)            // prints Tuesday
 Print(d.Value)           // prints 2
 Print(IsValid((Day)42))  // prints false
 ```
+A for loop visits every member of an enum, in the order they were declared
+``` c++
+for day : Day
+{
+    Print(day)           // Sunday, Monday, Tuesday, ...
+}
+```
 Enums can also live in a static block, where they are named by the container
 ``` c++
 Game
