@@ -3812,6 +3812,11 @@ class Generator {
     if (member != analysis.enumMembers.end())
       return Value{analysis.expressionTypes.at(&e), std::to_string(member->second)};
 
+    // Day.Count.
+    if (e.kind == ".")
+      if (const auto count = analysis.integerConstants.find(&e); count != analysis.integerConstants.end())
+        return Value{analysis.expressionTypes.at(&e), count->second};
+
     if (e.kind == "char")
       return Value{Type::Char, std::to_string(decodeUTF8(e.token).front())};
 

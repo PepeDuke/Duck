@@ -89,4 +89,8 @@ Main()
     // A for loop visits every member in declaration order.
     for person : CommonNames
         Print(person)                         // Bob, Tom, Dan
+
+    Print(Day.Count)                          // 6
+    Print(Day.Min)                            // Sunday: the smallest value
+    Print(Day.Max)                            // Friday: the largest value
 }

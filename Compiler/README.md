@@ -923,6 +923,12 @@ Print(d.Value)                     // its underlying value
   holds `x`, without trapping. Implicit conversion stays one way: `Day d = 0`
   is a type mismatch, enum members are constants, and compound assignment such
   as `d += 1` is rejected.
+- **Count, Min, and Max.** `Day.Count` is the number of members, an `int`
+  constant usable anywhere a literal is, including `case` labels. `Day.Min`
+  and `Day.Max` are the members holding the smallest and largest values (the
+  first declared on a tie), so `Print(Day.Max)` writes a name and
+  `Day.Max + 0` its value. Text enums have `Count` but no order, so no `Min`
+  or `Max`. A member with one of these names takes precedence.
 - **Loops.** `for item : Day` visits every member in declaration order,
   `for -item : Day` in reverse, and `for i, item : Day` also numbers them
   from 0 as `int`s. The loop variables are constants. A nested enum loops the

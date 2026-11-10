@@ -534,6 +534,41 @@ class Analyzer {
 
     return &symbols.enums.at(qualified);
   }
+  // The member holding the smallest (Min) or largest (Max) value; the first
+  // declared one when several share it. Text values have no order.
+  static size_t enumExtreme(const EnumInfo &info, const std::string &name, const Token &token) {
+    if (managedText(info.type))
+      fail(token, "'" + name + "' holds " + typeName(info.type) + " values, which have no order, so it has no " +
+                      token.text + "; it has Count");
+
+    if (info.members.empty()) fail(token, "enum '" + name + "' has no members, so it has no " + token.text);
+
+    // Integers are signed decimal text; floating values are LLVM hex doubles.
+    auto compare = [&](const std::string &a, const std::string &b) {
+      if (floating(info.type)) {
+        double x = 0, y = 0;
+        const uint64_t rx = std::stoull(a.substr(2), nullptr, 16), ry = std::stoull(b.substr(2), nullptr, 16);
+        std::memcpy(&x, &rx, sizeof(x));
+        std::memcpy(&y, &ry, sizeof(y));
+        return x < y ? -1 : x > y ? 1 : 0;
+      }
+
+      const bool na = a[0] == '-', nb = b[0] == '-';
+
+      if (na != nb) return na ? -1 : 1;
+
+      const auto ma = na ? a.substr(1) : a, mb = nb ? b.substr(1) : b;
+      const int order = ma.size() != mb.size() ? (ma.size() < mb.size() ? -1 : 1) : ma.compare(mb) < 0 ? -1 : ma == mb ? 0 : 1;
+      return na ? -order : order;
+    };
+    const bool largest = token.text == "Max";
+    size_t best = 0;
+
+    for (size_t i = 1; i < info.values.size(); ++i)
+      if (const int order = compare(info.values[i], info.values[best]); largest ? order > 0 : order < 0) best = i;
+
+    return best;
+  }
   // The enum a name or dotted path such as Game.Mode denotes, or empty.
   std::string enumNamed(const Expr &e) {
     if (e.kind != "name" && e.kind != ".") return "";
@@ -3827,6 +3862,19 @@ class Analyzer {
     if (std::string name; auto info = enumOf(e, &name)) {
       const auto index = info->find(e.token.text);
 
+      // Day.Count, Day.Min, and Day.Max, unless a member has that name.
+      if (index == info->members.size() && e.token.text == "Count") {
+        analysis.integerConstants[&e] = std::to_string(info->members.size());
+        return Type::Int;
+      }
+
+      if (index == info->members.size() && (e.token.text == "Min" || e.token.text == "Max")) {
+        analysis.enumMembers[&e] = enumExtreme(*info, name, e.token);
+        Type type = Type::Enum;
+        type.record = name;
+        return type;
+      }
+
       if (index == info->members.size()) {
         std::vector<std::string> members;
 
@@ -4086,6 +4134,7 @@ class Analyzer {
   bool constantLabel(const Expr &e) {
     if (e.kind == "int" || e.kind == "bool" || e.kind == "char" || e.kind == "text" || e.kind == "typeMember" ||
         e.kind == "compileTime" || analysis.enumMembers.count(&e) ||
+        (e.kind == "." && analysis.integerConstants.count(&e)) ||
         (e.kind == "unary" && e.token.text == "-" && e.args[0]->kind == "int"))
       return true;
 

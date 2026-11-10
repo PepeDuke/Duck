@@ -399,7 +399,7 @@ class EffectWalker {
     if (constants.count(e.kind)) return;
 
     if (e.kind == "name" || e.kind == "." || e.kind == "index") {
-      if (a.enumMembers.count(&e) || a.functionValues.count(&e)) return;
+      if (a.enumMembers.count(&e) || a.integerConstants.count(&e) || a.functionValues.count(&e)) return;
       if (a.collectionMembers.count(&e)) return read(*e.args[0]);
       if (a.enumProperties.count(&e)) return expression(*e.args[0]);
 

@@ -1619,6 +1619,10 @@ for day : Day
 {
     Print(day)           // Sunday, Monday, Tuesday, ...
 }
+
+Print(Day.Count)         // prints 7, the number of members
+Print(Day.Min)           // prints Sunday, the member with the smallest value
+Print(Day.Max)           // prints Saturday, the member with the largest value
 ```
 Enums can also live in a static block, where they are named by the container
 ``` c++

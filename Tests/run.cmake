@@ -3070,7 +3070,7 @@ foreach(op IN ITEMS "<<" ">>")
 endforeach()
 file(READ "${SOURCE}/Examples/Bootstrap/19_Enums.dk" enums)
 run_program(enum_example "${enums}"
-  "Sunday\n1\n10\nMonday\n1\n3\n1\nTom\nBob and Thomas\nDaniel\n3\nPlay\nWednesday\n9\n0\nBob\nTom\nDan\n")
+  "Sunday\n1\n10\nMonday\n1\n3\n1\nTom\nBob and Thomas\nDaniel\n3\nPlay\nWednesday\n9\n0\nBob\nTom\nDan\n6\nSunday\nFriday\n")
 # Runtime member indices decay through the value tables.
 run_program(enum_runtime "Color : string #@{ Red, Green: \"verde\" }
 Tag : name #@{ A: \"alpha\" }
@@ -3261,6 +3261,45 @@ Main() {
     last = @ int() { return m.Value }
   Print(last())
 }" "Sword\nShield\nPotion\nPotion\nRound shield\nSword\n0\nMenu\n2\nPause\nMenu\n21\n3\n11\n")
+# Count is the number of members; Min and Max are the members holding the
+# smallest and largest values, the first declared on a tie.
+run_program(enum_count_min_max "Day : byte #@{ Mon, Tue, Wed, Thu, Fri }
+Signed : int #@{ A: 5, B: -20, C: 30, D: -20 }
+Wide : uint64 #@{ Small: 3, Huge: 18446744073709551615 }
+Steps : double #@{ X: 1.5, Y: -0.25, Z: 9.0 }
+Words : string #@{ Hello, World }
+Game #{ Mode : int #@{ Menu, Play } }
+Odd : int #@{ Count: 99, Max: 1 }
+Holder { int Days = Day.Count }
+Main() {
+  Print(Day.Count)
+  Print(Day.Min)
+  Print(Day.Max)
+  Print(Signed.Min)
+  Print(Signed.Max + 0)
+  Print(Wide.Max)
+  Print(Steps.Min)
+  Print(Steps.Max)
+  Print(Words.Count)
+  Print(Game.Mode.Count)
+  Print(Odd.Count + 0)
+  Print(Odd.Max)
+  long total = Day.Count * 10
+  Print(total)
+  Holder h
+  Print(h.Days)
+  int n = 5
+  Switch (n) {
+    case Day.Count:
+      Print(\"five\")
+      break
+    default:
+      break
+  }
+}" "5\nMon\nFri\nB\n30\nHuge\nY\nZ\n2\n2\n99\nMax\n50\n5\nfive\n")
+reject(enum_text_max "W : string #@{ A }\nMain() { Print(W.Max) }" "have no order, so it has no Max")
+reject(enum_empty_min "W : int #@{ }\nMain() { Print(W.Min) }" "has no members")
+reject(enum_count_constant "W : int #@{ A }\nMain() { W.Count = 2 }" "is a constant")
 reject(enum_loop_constant "E : int #@{ A }\nMain() {\nfor e : E\ne = E.A\n}" "cannot modify constant 'e'")
 reject(enum_loop_shadowed "E : int #@{ A }\nMain() {\nint E = 1\nfor e : E\nPrint(e)\n}" "pair, grid, or enum")
 # A native function takes and returns an enum as its underlying value.
