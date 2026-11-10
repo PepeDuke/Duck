@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <locale>
+#include <optional>
 #include <regex>
 #include <sstream>
 
@@ -42,52 +43,315 @@ bool fitsInteger(const std::string &value, const Type &type) {
 
   return bits <= width - 1 || (negative && bits == width && magnitude.powerOfTwo());
 }
-// An explicit value is a literal of the enum's kind, optionally negated.
-std::string integerValue(const Expr &e, const Type &type, const std::string &member) {
-  const bool negative = e.kind == "unary" && e.token.text == "-";
-  const auto &literal = negative ? *e.args[0] : e;
+// A constant from an enum value expression. Integers are evaluated in 512
+// bits, wider than any underlying type, and range-checked at the end.
+struct EnumConstant {
+  enum Kind { Integer, Real, Text } kind = Integer;
+  Bits bits;
+  double real = 0;
+  std::string text;
+};
+bool negativeBits(const Bits &b) { return b.bit(511); }
+std::string bitsDecimal(const Bits &b) { return negativeBits(b) ? "-" + b.negate().decimal() : b.decimal(); }
+double bitsReal(const Bits &b) { return std::stod(bitsDecimal(b)); }
+const char *constantKind(const EnumConstant &c) {
+  return c.kind == EnumConstant::Integer ? "an integer" : c.kind == EnumConstant::Real ? "a decimal number" : "text";
+}
+// A literal operand: an integer, a decimal number, or a string. Empty for
+// any other expression.
+std::optional<EnumConstant> literalConstant(const Expr &e) {
+  EnumConstant c;
 
-  if (literal.kind != "int")
-    fail(e.token, "enum member '" + member + "' requires an integer literal value");
+  if (e.kind == "int") {
+    const auto &text = e.token.text;
+    const int base = integerLiteralBase(text);
+    const auto digits = base == 10 ? text : text.substr(2);
 
-  const auto &text = literal.token.text;
-  const int base = integerLiteralBase(text);
-  const auto digits = base == 10 ? text : text.substr(2);
+    if (digits.empty()) fail(e.token, "integer literal requires digits after its prefix");
 
-  if (digits.empty()) fail(e.token, "integer literal requires digits after its prefix");
+    for (char d : digits)
+      if (const int digit = digitValue(d); digit < 0 || digit >= base) fail(e.token, "invalid integer literal");
 
-  for (char c : digits) {
-    const int digit = digitValue(c);
+    const auto magnitude = Magnitude::parse(digits, base);
 
-    if (digit < 0 || digit >= base) fail(e.token, "invalid integer literal");
+    if (magnitude.bits() > 511) fail(e.token, "integer literal is too large for an enum value");
+
+    c.bits = Bits::parse(magnitude.decimal());
+    return c;
   }
 
-  const auto decimal = Magnitude::parse(digits, base).decimal();
-  const auto value = negative && decimal != "0" ? "-" + decimal : decimal;
+  if (e.kind == "real") {
+    c.kind = EnumConstant::Real;
 
-  if (!fitsInteger(value, type))
-    fail(e.token, "enum value out of range for " + typeName(type));
+    if (!parseFloatingLiteral(e.token.text, false, c.real))
+      fail(e.token, "invalid or out-of-range floating literal");
 
-  return value;
+    return c;
+  }
+
+  if (e.kind == "text" && !e.token.character) {
+    c.kind = EnumConstant::Text;
+    c.text = e.token.text;
+    return c;
+  }
+
+  return std::nullopt;
 }
-double floatingValue(const Expr &e, const Type &type, const std::string &member) {
-  const bool negative = e.kind == "unary" && e.token.text == "-";
-  const auto &literal = negative ? *e.args[0] : e;
+EnumConstant unaryConstant(const Token &op, EnumConstant c) {
+  if (op.text == "-" && c.kind == EnumConstant::Integer) c.bits = c.bits.negate();
+  else if (op.text == "-" && c.kind == EnumConstant::Real) c.real = -c.real;
+  else if (op.text == "~" && c.kind == EnumConstant::Integer) {
+    for (auto &w : c.bits.words) w = ~w;
+  } else
+    fail(op, "operator '" + op.text + "' does not apply to " + constantKind(c) + " in an enum value");
 
-  if ((literal.kind != "real" && literal.kind != "int") ||
-      integerLiteralBase(literal.token.text) != 10)
-    fail(e.token, "enum member '" + member + "' requires a decimal number literal value");
-
-  double value = 0;
-
-  if (!parseFloatingLiteral(literal.token.text, type == Type::Float, value))
-    fail(e.token, "invalid or out-of-range floating literal");
-
-  return negative ? -value : value;
+  return c;
 }
+Bits absolute(const Bits &v) { return negativeBits(v) ? v.negate() : v; }
+unsigned bitLength(const Bits &v) {
+  for (unsigned i = 512; i > 0; --i)
+    if (v.bit(i - 1)) return i;
+
+  return 0;
+}
+EnumConstant binaryConstant(const Token &token, EnumConstant a, EnumConstant b) {
+  const auto &op = token.text;
+
+  if (a.kind == EnumConstant::Text || b.kind == EnumConstant::Text) {
+    if (op != "+" || a.kind != b.kind)
+      fail(token, "enum text values can only be joined with '+' to other text");
+
+    a.text += b.text;
+    return a;
+  }
+
+  if (a.kind == EnumConstant::Real || b.kind == EnumConstant::Real) {
+    const double x = a.kind == EnumConstant::Real ? a.real : bitsReal(a.bits);
+    const double y = b.kind == EnumConstant::Real ? b.real : bitsReal(b.bits);
+    EnumConstant r;
+    r.kind = EnumConstant::Real;
+
+    if (op == "+") r.real = x + y;
+    else if (op == "-") r.real = x - y;
+    else if (op == "*") r.real = x * y;
+    else if (op == "/") r.real = x / y;
+    else fail(token, "operator '" + op + "' does not apply to decimal numbers in an enum value");
+
+    if (!std::isfinite(r.real)) fail(token, "enum value is not a finite number");
+
+    return r;
+  }
+
+  // Signed 512-bit arithmetic. Division truncates toward zero, as at run time.
+  const bool na = negativeBits(a.bits), nb = negativeBits(b.bits);
+  EnumConstant r;
+
+  if (op == "+") r.bits = a.bits.add(b.bits);
+  else if (op == "-") r.bits = a.bits.add(b.bits.negate());
+  else if (op == "*") {
+    // Operands stay far below 2^256 in practice; larger ones would wrap.
+    if (bitLength(absolute(a.bits)) + bitLength(absolute(b.bits)) > 510) fail(token, "enum value overflows");
+
+    r.bits = a.bits.multiply(b.bits);
+  } else if (op == "/" || op == "%") {
+    if (b.bits.zero()) fail(token, "division by zero in an enum value");
+
+    auto [q, rem] = absolute(a.bits).divide(absolute(b.bits), 512);
+    r.bits = op == "/" ? (na != nb ? q.negate() : q) : (na ? rem.negate() : rem);
+  } else if (op == "<<" || op == ">>") {
+    if (nb || b.bits.compare(Bits(511)) > 0) fail(token, "enum value shift count out of range");
+
+    r.bits = a.bits.shift(b.bits.words[0], 512, op == ">>", na);
+  } else if (op == "&" || op == "|" || op == "^") {
+    for (size_t i = 0; i < r.bits.words.size(); ++i)
+      r.bits.words[i] = op == "&" ? a.bits.words[i] & b.bits.words[i]
+                        : op == "|" ? a.bits.words[i] | b.bits.words[i]
+                                    : a.bits.words[i] ^ b.bits.words[i];
+  } else
+    fail(token, "operator '" + op + "' is not allowed in an enum value");
+
+  return r;
+}
+// The text form EnumInfo stores for a constant of the enum's type, or a
+// diagnostic at token when the constant has the wrong kind or range.
+std::string storedValue(const EnumConstant &c, const Type &type, const Token &token, const std::string &member) {
+  const auto subject = member.empty() ? std::string("the value") : "enum member '" + member + "'";
+
+  if (integral(type)) {
+    if (c.kind != EnumConstant::Integer)
+      fail(token, subject + " requires an integer value, not " + constantKind(c));
+
+    const auto value = bitsDecimal(c.bits);
+
+    if (!fitsInteger(value, type)) fail(token, "enum value " + value + " is out of range for " + typeName(type));
+
+    return value;
+  }
+
+  if (floating(type)) {
+    if (c.kind == EnumConstant::Text) fail(token, subject + " requires a decimal number value, not text");
+
+    double value = c.kind == EnumConstant::Real ? c.real : bitsReal(c.bits);
+
+    if (type == Type::Float) value = double(float(value));
+    if (!std::isfinite(value)) fail(token, "enum value is out of range for " + typeName(type));
+
+    return floatingConstantText(value);
+  }
+
+  if (c.kind != EnumConstant::Text) fail(token, subject + " requires a string value, not " + constantKind(c));
+
+  return c.text;
+}
+EnumConstant constantOf(const std::string &stored, const Type &type) {
+  EnumConstant c;
+
+  if (integral(type)) c.bits = Bits::parse(stored);
+  else if (floating(type)) {
+    c.kind = EnumConstant::Real;
+    const uint64_t raw = std::stoull(stored.substr(2), nullptr, 16);
+    std::memcpy(&c.real, &raw, sizeof(raw));
+  } else {
+    c.kind = EnumConstant::Text;
+    c.text = stored;
+  }
+
+  return c;
+}
+// Assigns every member's value. A value may be a constant expression of
+// literals, unary - and ~, arithmetic, shifts, bitwise operators, and members
+// of this or another enum (`Monday`, `Day.Monday`, `Outer.Day.Monday`).
+// Members are evaluated on demand, so a member may refer to a later one;
+// a cycle is an error.
+class EnumResolver {
+public:
+  struct Pending {
+    EnumInfo info;
+    std::vector<const EnumMember *> members;
+    std::vector<int> state; // 0 unvisited, 1 in progress, 2 done.
+  };
+  std::map<std::string, Pending> enums;
+
+  std::string memberValue(const std::string &name, size_t index) {
+    auto &pending = enums.at(name);
+    const auto &member = *pending.members[index];
+    const auto &label = member.name.text;
+
+    if (pending.state[index] == 2) return pending.info.values[index];
+    if (pending.state[index] == 1)
+      fail(member.name, "enum member '" + name + "." + label + "' depends on its own value");
+
+    pending.state[index] = 1;
+    const auto type = pending.info.type;
+    std::string value;
+
+    if (member.value) value = storedValue(evaluate(*member.value, name), type, member.value->token, label);
+    else if (managedText(type)) value = label;
+    else if (integral(type)) {
+      // Integers count up by 1 and floating values by 0.5, both from 0 or
+      // from the previous member.
+      value = index ? successor(memberValue(name, index - 1)) : "0";
+
+      if (!fitsInteger(value, type))
+        fail(member.name, "implicit value " + value + " of '" + label + "' is out of range for " + typeName(type));
+    } else {
+      double real = index ? constantOf(memberValue(name, index - 1), type).real + 0.5 : 0;
+
+      if (type == Type::Float) real = double(float(real));
+      if (!std::isfinite(real)) fail(member.name, "implicit value of '" + label + "' is out of range");
+
+      value = floatingConstantText(real);
+    }
+
+    // `enums` is not resized during evaluation, so the reference is stable.
+    pending.info.values[index] = value;
+    pending.state[index] = 2;
+    return value;
+  }
+
+private:
+  // The enum a dotted path names, seen from inside enum `from`: from its
+  // enclosing static containers outward, then at file scope.
+  std::string qualify(const std::string &path, const std::string &from) const {
+    for (auto scope = from;;) {
+      const auto dot = scope.rfind('.');
+      scope = dot == std::string::npos ? "" : scope.substr(0, dot);
+      const auto candidate = scope.empty() ? path : scope + "." + path;
+
+      if (enums.count(candidate)) return candidate;
+      if (scope.empty()) return "";
+    }
+  }
+  EnumConstant member(const std::string &name, const Token &token) {
+    const auto &info = enums.at(name).info;
+    const auto index = info.find(token.text);
+
+    if (index == info.members.size()) {
+      std::vector<std::string> names;
+
+      for (const auto &m : info.members) names.push_back(m.text);
+
+      fail(token, "unknown member '" + token.text + "' in enum '" + name + "'" + didYouMean(token.text, names));
+    }
+
+    return constantOf(memberValue(name, index), info.type);
+  }
+  EnumConstant evaluate(const Expr &e, const std::string &from) {
+    if (auto literal = literalConstant(e)) return *literal;
+
+    if (e.kind == "name") {
+      const auto &info = enums.at(from).info;
+
+      if (info.find(e.token.text) == info.members.size())
+        fail(e.token, "unknown name '" + e.token.text + "' in an enum value; it can use literals and members of '" +
+                          from + "' or other enums");
+
+      return member(from, e.token);
+    }
+
+    if (e.kind == ".") {
+      std::string path;
+      const Expr *root = e.args[0].get();
+
+      while (root->kind == ".") {
+        path = "." + root->token.text + path;
+        root = root->args[0].get();
+      }
+
+      if (root->kind == "name") {
+        const auto name = qualify(root->token.text + path, from);
+
+        if (!name.empty()) return member(name, e.token);
+      }
+
+      fail(e.token, "'" + e.token.text + "' is not an enum member; an enum value can use literals and enum members");
+    }
+
+    if (e.kind == "unary") return unaryConstant(e.token, evaluate(*e.args[0], from));
+    if (e.kind == "binary") return binaryConstant(e.token, evaluate(*e.args[0], from), evaluate(*e.args[1], from));
+
+    fail(e.token, "an enum value must be a constant expression of literals and enum members");
+  }
+};
 } // namespace
+std::optional<size_t> enumLiteralMember(const EnumInfo &info, const Expr &e) {
+  auto c = literalConstant(e);
+
+  if (!c && e.kind == "unary" && e.token.text == "-")
+    if ((c = literalConstant(*e.args[0]))) c = unaryConstant(e.token, *c);
+
+  if (!c) return std::nullopt;
+
+  const auto value = storedValue(*c, info.type, e.token, "");
+  const auto found = std::find(info.values.begin(), info.values.end(), value);
+
+  if (found == info.values.end())
+    fail(e.token, "no member of enum '" + info.declaration.text + "' has this value");
+
+  return size_t(found - info.values.begin());
+}
 std::map<std::string, EnumInfo> resolveEnums(const std::vector<EnumFragment> &fragments) {
-  std::map<std::string, EnumInfo> enums;
+  EnumResolver resolver;
   std::map<std::string, std::vector<const EnumFragment *>> groups;
   std::vector<std::string> order;
 
@@ -123,61 +387,32 @@ std::map<std::string, EnumInfo> resolveEnums(const std::vector<EnumFragment> &fr
       fail(typed->name, "enum underlying type must be an integer, float, double, string, or name; got " +
                             typeName(type));
 
-    EnumInfo info{group.front()->name, type, {}, {}};
+    auto &pending = resolver.enums[name];
+    pending.info = EnumInfo{group.front()->name, type, {}, {}};
 
-    for (const auto *fragment : group) info.attribute = info.attribute || fragment->attribute;
+    for (const auto *fragment : group) {
+      pending.info.attribute = pending.info.attribute || fragment->attribute;
 
-    // Integers count up by 1 and floating values by 0.5, both from 0 or from
-    // the previous member. Text defaults to the member name.
-    std::string integer = "-1";
-    double real = -0.5;
-
-    for (const auto *fragment : group)
       for (const auto &member : fragment->members) {
-        const auto &label = member.name.text;
+        if (pending.info.find(member.name.text) != pending.info.members.size())
+          fail(member.name, "duplicate member '" + member.name.text + "' in enum '" + name + "'");
 
-        if (info.find(label) != info.members.size())
-          fail(member.name, "duplicate member '" + label + "' in enum '" + name + "'");
-
-        std::string value;
-
-        if (integral(type)) {
-          if (member.value) integer = integerValue(*member.value, type, label);
-          else {
-            integer = successor(integer);
-
-            if (!fitsInteger(integer, type))
-              fail(member.name, "implicit value " + integer + " of '" + label +
-                                    "' is out of range for " + typeName(type));
-          }
-
-          value = integer;
-        } else if (floating(type)) {
-          if (member.value) real = floatingValue(*member.value, type, label);
-          else {
-            real += 0.5;
-
-            if (type == Type::Float) real = double(float(real));
-
-            if (!std::isfinite(real))
-              fail(member.name, "implicit value of '" + label + "' is out of range");
-          }
-
-          value = floatingConstantText(real);
-        } else if (member.value) {
-          if (member.value->kind != "text" || member.value->token.character)
-            fail(member.value->token, "enum member '" + label + "' requires a string literal value");
-
-          value = member.value->token.text;
-        } else
-          value = label;
-
-        info.members.push_back(member.name);
-        info.values.push_back(value);
+        pending.info.members.push_back(member.name);
+        pending.members.push_back(&member);
       }
+    }
 
-    enums.emplace(name, std::move(info));
+    pending.info.values.resize(pending.members.size());
+    pending.state.assign(pending.members.size(), 0);
   }
+
+  // Values in input order, so diagnostics come out in source order.
+  for (const auto &name : order)
+    for (size_t i = 0; i < resolver.enums.at(name).members.size(); ++i) resolver.memberValue(name, i);
+
+  std::map<std::string, EnumInfo> enums;
+
+  for (auto &[name, pending] : resolver.enums) enums.emplace(name, std::move(pending.info));
 
   return enums;
 }
@@ -331,7 +566,14 @@ static void addMarkupFields(Symbols &symbols, const Program &program) {
     }
   }
 }
-static void validateNativeDeclaration(const Function &f) {
+static void validateNativeDeclaration(const Function &f, const std::map<std::string, EnumInfo> &enums) {
+  // An enum crosses the boundary as its underlying value, so it needs one
+  // that native code can take: a 32/64-bit integer, float, or double.
+  const auto native = [&](const Type &t) {
+    const auto found = enumValue(t) ? enums.find(t.record) : enums.end();
+    return found != enums.end() ? nativeScalar(found->second.type) : nativeScalar(t);
+  };
+
   if (f.name.text == "Main")
     fail(f.name, "Main cannot be a native declaration");
 
@@ -340,17 +582,19 @@ static void validateNativeDeclaration(const Function &f) {
       f.nativeSymbol == "malloc" || f.nativeSymbol == "free" || f.nativeSymbol == "putchar")
     fail(f.name, "invalid or reserved native symbol '" + f.nativeSymbol + "'");
 
-  if (f.result != Type::Void && !nativeScalar(f.result))
-    fail(f.name, "native return requires void, a pointer, float, double, or a 32/64-bit integer");
+  if (f.result != Type::Void && !native(f.result))
+    fail(f.name, "native return requires void, a pointer, float, double, a 32/64-bit integer, "
+                 "or an enum of one of those");
 
   for (const auto &p : f.params) {
     if (p.type == Type::Bool ||
-        (!p.reference && !textType(p.type) && !nativeScalar(p.type)) ||
+        (!p.reference && !textType(p.type) && !native(p.type)) ||
         // References follow the C layout of numeric values up to 64 bits,
         // pointers, and containers; other Duck types have no native ABI.
         (p.reference && !((numeric(p.type) && integerWidth(p.type) <= 64) ||
                           p.type.depth || recordValue(p.type))))
-      fail(p.name, "unsupported native parameter ABI; use 32/64-bit values, numeric references, pointers, pointer references, or text by value");
+      fail(p.name, "unsupported native parameter ABI; use 32/64-bit values, enums of them, numeric references, "
+                   "pointers, pointer references, or text by value");
   }
 }
 static void rejectMethodClash(const Symbols &symbols, const Function &f, const InputOrder &before) {
@@ -533,7 +777,7 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
       fail(info.declaration, "duplicate type name '" + name + "'");
 
   for (const auto &f : program) {
-    if (!f.nativeSymbol.empty()) validateNativeDeclaration(f);
+    if (!f.nativeSymbol.empty()) validateNativeDeclaration(f, symbols.enums);
     if (f.method) rejectMethodClash(symbols, f, before);
 
     if (f.name.text == "Print" || f.name.text == "Length" || f.name.text == "CodeUnitAt" || f.name.text == "Exec" ||
@@ -717,7 +961,8 @@ bool Symbols::destructible(const std::string &record) const {
   if (count(destructorKey(record))) return true;
 
   for (const auto &field : records.at(record).fields)
-    if (field.type.role == Type::Owner || collectionValue(field.type) || dynamicArray(field.type) ||
+    if (field.type.role == Type::Owner || collectionValue(field.type) || fileValue(field.type) ||
+        dynamicArray(field.type) ||
         (fixedArray(field.type) && needsCleanup(field.type)) ||
         (recordValue(field.type) && destructible(field.type.record)))
       return true;
@@ -1181,6 +1426,9 @@ void validateLifetimes(const Symbols &symbols) {
       if (!parameter.reference && collectionValue(parameter.type))
         fail(parameter.name, "parameter '" + parameter.name.text + "' must take " + typeName(parameter.type) +
                                  " by reference (&): collections are move-only");
+      else if (!parameter.reference && fileValue(parameter.type))
+        fail(parameter.name, "parameter '" + parameter.name.text + "' must take its file by reference (file&): "
+                                 "a file is move-only");
       else if (!parameter.reference && arrayValue(parameter.type) && symbols.moveOnly(parameter.type))
         fail(parameter.name, "parameter '" + parameter.name.text + "' must take " + typeName(parameter.type) +
                                  " by reference (&): " +

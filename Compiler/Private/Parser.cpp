@@ -89,7 +89,7 @@ class Parser {
                                    "uint8", "uint16", "uint32", "uint64", "float", "double", "bool", "void",
                                    "string", "name", "cstring", "char", "date", "time", "datetime", "big",
                                    "ubig", "tiny", "utiny", "func", "vec2", "vec3", "vec4", "mat3", "mat4",
-                                   "quat", "rot"};
+                                   "quat", "rot", "file"};
     names.insert(names.end(), containerNames.begin(), containerNames.end());
     return names;
   }
@@ -637,11 +637,19 @@ class Parser {
            at("float") || at("double") || at("bool") || at("void") || at("cstring") ||
            at("string") || at("name") || at("char") || at("date") ||
            at("time") || at("datetime") || at("big") || at("ubig") || at("tiny") ||
-           at("utiny") || at("func") || nativeMathType() || markupKeyword();
+           at("utiny") || at("func") || nativeMathType() || markupKeyword() || fileKeyword();
   }
   bool nativeMathType() const {
     const auto &token = tokens.at(pos);
     return !token.string && !token.character && nativeMath(token.text);
+  }
+  // `file` is a type only where one can be, as in `file log` or `file& log`:
+  // it is still a usable name, as in `void* file`.
+  bool fileKeyword() const {
+    if (!at("file") || containerNames.count("file")) return false;
+
+    const auto &next = tokens.at(pos + 1);
+    return !next.string && !next.text.empty() && (isIdentifierStart(next.text[0]) || next.text == "&");
   }
   // `markup` is a type only where one can be: it is still a usable name.
   bool markupKeyword() const {
@@ -858,6 +866,11 @@ class Parser {
       return markupType();
     }
 
+    if (fileKeyword()) {
+      pop();
+      return Type::File;
+    }
+
     if (accept("string")) return Type::String;
     if (accept("name")) return Type::Name;
     if (accept("char")) return Type::Char;
@@ -1059,8 +1072,14 @@ class Parser {
   void parenthesized(std::unique_ptr<Expr> &e, bool stopAtPipe) {
     lines();
 
+    std::string named;
+    const auto namedLength = typePath(pos, &named);
+
+    // `(Day)n` converts a value to the enum member that holds it.
     if ((isType() && !constructorType() && !typeMember()) ||
-        (namedType() && tokens[pos + typePath(pos)].text == "*")) {
+        (namedLength && tokens[pos + namedLength].text == "*") ||
+        (namedLength && containerNames.count("#@" + named) && !tokens[pos + namedLength].string &&
+         tokens[pos + namedLength].text == ")")) {
       e->kind = "cast";
       e->castType = type();
       lines();
@@ -2429,6 +2448,9 @@ class Parser {
   void containerField(Record &record, const Token &name, Type t, bool typed, bool isProtected, std::vector<Tag> tags, const std::optional<Token> &scoped) {
     if (!typed && isWord(peek())) rejectMisspelledType(name);
 
+    if (!typed && (at(":") || enumBlock()))
+      fail(name, "an enum belongs at file scope or in a static #{ } block, not in a container's instance body");
+
     if (!typed || t == Type::Void)
       fail(name, "container fields require a known value type");
 
@@ -2917,8 +2939,8 @@ class Parser {
     const auto opening = peek();
     const auto tags = attributes();
 
-    if (nested || tags.size() != 1 || tags[0].token.text != "args" || !namedType())
-      fail(opening, nested ? "attributes on static members are not supported yet"
+    if (tags.size() != 1 || tags[0].token.text != "args" || !namedType())
+      fail(opening, nested ? "attributes on static members are not supported yet; only [args] can mark an enum here"
                            : "only [args] can precede a file-scope declaration, and it marks an enum");
 
     return true;
@@ -2949,12 +2971,13 @@ class Parser {
     if (attributeEnum && !at(":") && !enumBlock()) fail(tag, "[args] marks an enum, not a container");
 
     if (at(":") || enumBlock()) {
-      if (nested) fail(tag, "enum declarations must be at file scope");
-
+      // An enum in a static body is named by its enclosing containers, as
+      // in Outer.Day; inside Outer it is simply Day.
+      tag.text = prefix + tag.text;
       enumFragment(functions, tag);
       functions.enums.back().attribute = attributeEnum;
 
-      if (!at("<eof>") && !at("\n")) fail(peek(), "expected newline after enum");
+      if (!at("<eof>") && !at("\n") && !(nested && at("}"))) fail(peek(), "expected newline after enum");
 
       lines();
       return true;

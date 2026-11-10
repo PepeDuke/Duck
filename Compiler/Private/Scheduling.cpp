@@ -320,6 +320,18 @@ class EffectWalker {
 
     if (op == "Print" || op == "$T.fail" || op == "$T.show") current.external = true;
     if (e.receiver && memberName(op) == "Clear" && !a.callTargets.count(&e)) return write(*e.receiver, true);
+
+    // File methods do I/O, so they stay in order with other external effects.
+    if (const auto file = a.fileCalls.find(&e); file != a.fileCalls.end()) {
+      current.external = true;
+      write(*e.receiver, true);
+
+      for (const auto &argument : e.args)
+        if (file->second == "Read" && e.args.size() == 1) write(*argument, false);
+        else expression(*argument);
+
+      return;
+    }
     if (op == "IsValid" && !e.receiver) return read(*e.args[0]);
 
     const auto target = a.callTargets.find(&e);
@@ -389,6 +401,7 @@ class EffectWalker {
     if (e.kind == "name" || e.kind == "." || e.kind == "index") {
       if (a.enumMembers.count(&e) || a.functionValues.count(&e)) return;
       if (a.collectionMembers.count(&e)) return read(*e.args[0]);
+      if (a.enumProperties.count(&e)) return expression(*e.args[0]);
 
       if (a.markupLookups.count(&e)) {
         current.unknown = true;

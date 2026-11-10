@@ -4,6 +4,7 @@
 #include <cctype>
 #include <map>
 #include <set>
+#include <optional>
 #include <tuple>
 
 namespace duck {
@@ -272,15 +273,15 @@ struct Symbols : std::map<std::string, Signature> {
   }
   // Storage that must release, destroy, or free something when it dies.
   bool needsCleanup(const Type &type) const {
-    return managedValue(type) || funcValue(type) || trackedAlias(type) || collectionValue(type) ||
+    return managedValue(type) || funcValue(type) || trackedAlias(type) || collectionValue(type) || fileValue(type) ||
            dynamicArray(type) || (fixedArray(type) && needsCleanup(*type.element)) ||
            (recordValue(type) && (managedRecord(type.record) || destructible(type.record)));
   }
   // Values that cannot be copied, only moved: they own heap storage or
   // something destroyed exactly once.
   bool moveOnly(const Type &type) const {
-    return collectionValue(type) || dynamicArray(type) || (fixedArray(type) && needsCleanup(*type.element)) ||
-           (recordValue(type) && destructible(type.record));
+    return collectionValue(type) || fileValue(type) || dynamicArray(type) ||
+           (fixedArray(type) && needsCleanup(*type.element)) || (recordValue(type) && destructible(type.record));
   }
   // Values whose default is all zero bits: plain scalars, and containers
   // without constructors, defaults, or anything to clean up.
@@ -357,6 +358,9 @@ struct Symbols : std::map<std::string, Signature> {
 std::string sourceKey(const std::string &path);
 // Merges fragments by name in input order, then assigns implicit values.
 std::map<std::string, EnumInfo> resolveEnums(const std::vector<EnumFragment> &fragments);
+// The member a literal (or negated literal) names when converted to the enum,
+// as in (Day)2, or empty when e is not a literal. No matching member is an error.
+std::optional<size_t> enumLiteralMember(const EnumInfo &info, const Expr &e);
 bool borrowsOnly(const Stmt &statement, const std::string &name);
 Symbols collectSymbols(const Program &program, bool requireEntry = true);
 // Checks parent lists, rejects inheritance cycles, redeclared inherited
@@ -423,6 +427,14 @@ struct FunctionAnalysis {
   std::map<const Expr *, std::string> staticFields;
   // Enum member constants such as Day.Monday: the member's index.
   std::map<const Expr *, size_t> enumMembers;
+  // (Day)x conversions found at run time: the type both x and each member's
+  // value are compared in.
+  std::map<const Expr *, Type> enumCasts;
+  // d.Name and d.Value reads on enum values.
+  std::map<const Expr *, std::string> enumProperties;
+  // Calls of a file's methods, by method name: Open, Create, Append, Close,
+  // Read, Write, ReadText.
+  std::map<const Expr *, std::string> fileCalls;
   // Container constructions (`Gun(5)`, `Gun g(w, 5)`, `Gun()`): the parts
   // run in order, automatic ones included. Empty without constructors.
   std::map<const Expr *, std::vector<PartCall>> constructions;
@@ -661,6 +673,7 @@ struct FunctionIR {
   std::set<std::string> scopeNames; // Named scopes this function refers to.
   // Declarations by symbol of the intrinsics and C math functions Math calls use.
   std::map<std::string, std::string> mathImports;
+  bool usesFileRuntime = false;
 };
 FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
                          const FunctionAnalysis &analysis);
@@ -670,7 +683,7 @@ FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
 std::string assembleModule(const std::vector<FunctionIR> &functions,
                            bool entry = true,
                            const std::set<std::string> &nativeSymbols = {},
-                           bool mainArguments = false);
+                           bool mainArguments = false, bool fileFields = false);
 std::string textRuntimeIR();
 // The native entry that builds Main's argument array.
 std::string entryArgumentsIR();
@@ -686,6 +699,7 @@ std::string funcRuntimeIR();
 std::string metaRuntimeIR();
 std::string markupRuntimeIR();
 std::string scopeRuntimeIR(const std::set<std::string> &nativeSymbols);
+std::string fileRuntimeIR(const std::set<std::string> &nativeSymbols);
 std::string taskRuntimeIR(const std::set<std::string> &nativeSymbols);
 // The locks behind `${ }`. The task runtime reads their per-thread state too.
 std::string lockRuntimeIR(const std::set<std::string> &nativeSymbols);

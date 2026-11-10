@@ -26,7 +26,7 @@ enum MemberField { MemberName, MemberNameBytes, MemberSignature, MemberDeclaring
 std::string irType(Type t) {
   if (funcValue(t)) return "ptr";
   if (fixedArray(t)) return "[" + std::to_string(t.extent) + " x " + irType(*t.element) + "]";
-  if (collectionValue(t) || dynamicArray(t)) return "ptr";
+  if (collectionValue(t) || dynamicArray(t) || fileValue(t)) return "ptr";
 
   if (integral(t))
     return "i" + std::to_string(integerWidth(t));
@@ -84,6 +84,10 @@ struct Value {
 };
 std::string enumTextSymbol(const std::string &name, size_t index) {
   return "@enum." + name + ".value." + std::to_string(index);
+}
+// A member's name as an immortal managed name, for d.Name.
+std::string enumLabelSymbol(const std::string &name, size_t index) {
+  return "@enum." + name + ".label." + std::to_string(index);
 }
 // An immortal managed string or name literal (reference count -1) holding
 // text.text, which is UTF-8. string stores UTF-16 code units, name bytes.
@@ -239,6 +243,7 @@ class Generator {
   bool usesCalendarRuntime = false, usesWideRuntime = false;
   bool usesBigRuntime = false, usesDecimalRuntime = false, usesCollectionRuntime = false;
   bool usesFuncRuntime = false, usesMetaRuntime = false, usesMarkupRuntime = false, usesScopeRuntime = false;
+  bool usesFileRuntime = false;
   std::map<std::string, std::string> mathImports;
   std::optional<std::string> tolerance; // The (t)== being lowered, if any.
   std::set<std::string> scopeNames;
@@ -307,7 +312,7 @@ class Generator {
   // not: only this function can clear it.
   bool pinnable(const Expr &e, const Type &type) const {
     if (!e.addressable() || e.kind == "unary" || analysis.properties.count(&e) ||
-        analysis.collectionMembers.count(&e) || analysis.staticFields.count(&e))
+        analysis.collectionMembers.count(&e) || analysis.staticFields.count(&e) || analysis.enumProperties.count(&e))
       return false;
 
     if (e.kind != "name") return true;
@@ -525,6 +530,8 @@ class Generator {
         auto v = expression(argument);
         arguments.push_back(v);
 
+        if (!f.nativeSymbol.empty() && enumValue(v.type)) v = enumUnderlying(v);
+
         if (!f.nativeSymbol.empty() && managedText(v.type)) {
           auto data = fresh();
           emit(data + " = getelementptr i8, ptr " + v.value + ", i64 16");
@@ -708,6 +715,11 @@ class Generator {
   // its destructor and releases its fields.
   std::string elementCleanup(const Type &type) {
     if (trackedAlias(type)) return slotRelease(type);
+
+    if (fileValue(type)) {
+      usesFileRuntime = true;
+      return "@duck.file$drop";
+    }
 
     if (funcValue(type)) {
       usesFuncRuntime = true;
@@ -1126,6 +1138,13 @@ class Generator {
   }
   void release(Value value) {
     if (collectionValue(value.type)) return freeCollection(value.value, value.type);
+
+    if (fileValue(value.type)) {
+      usesFileRuntime = true;
+      emit("call void @duck.file$close(ptr " + value.value + ")");
+      return;
+    }
+
     if (dynamicArray(value.type)) return freeArray(value.value, value.type);
 
     if (fixedArray(value.type)) {
@@ -1538,6 +1557,12 @@ class Generator {
       return;
     }
 
+    if (fileValue(binding.type)) {
+      if (destroy) release({binding.type, load(binding.value)});
+
+      return;
+    }
+
     if (collectionValue(binding.type) || dynamicArray(binding.type)) {
       if (!destroy) return;
 
@@ -1601,6 +1626,83 @@ class Generator {
          "], ptr @enum." + value.type.record + ".values, i32 0, i32 " + value.value);
     emit(loaded + " = load " + type + ", ptr " + slot);
     return {info.type, loaded};
+  }
+  static Type enumType(const std::string &record) {
+    Type type = Type::Enum;
+    type.record = record;
+    return type;
+  }
+  // The index of the first member of `record` whose value equals v, both
+  // compared as `compared`, and whether one was found: a linear scan of the
+  // module's value table. Consumes v.
+  std::pair<std::string, std::string> enumLookup(Value v, const std::string &record, const Type &compared) {
+    const auto &info = functions.enums.at(record);
+    const auto count = std::to_string(info.members.size());
+    v = convert(v, compared);
+    const auto before = currentBlock;
+    const auto head = label(), body = label(), step = label(), done = label();
+    const auto i = fresh(), next = fresh(), end = fresh();
+    emit("br label %" + head);
+    startBlock(head);
+    emit(i + " = phi i32 [0, %" + before + "], [" + next + ", %" + step + "]");
+    emit(end + " = icmp eq i32 " + i + ", " + count);
+    emit("br i1 " + end + ", label %" + done + ", label %" + body);
+    startBlock(body);
+    const auto element = convert(enumUnderlying({enumType(record), i}), compared);
+    auto equal = fresh();
+
+    if (managedText(compared)) {
+      usesTextRuntime = true;
+      emit(equal + " = call i1 @duck.text.equal(ptr " + v.value + ", ptr " + element.value + ", i64 " +
+           textWidth(compared) + ")");
+    } else if (floating(compared))
+      emit(equal + " = fcmp oeq " + irType(compared) + " " + v.value + ", " + element.value);
+    else
+      emit(equal + " = icmp eq " + irType(compared) + " " + v.value + ", " + element.value);
+
+    const auto matched = currentBlock;
+    emit("br i1 " + equal + ", label %" + done + ", label %" + step);
+    startBlock(step);
+    emit(next + " = add i32 " + i + ", 1");
+    emit("br label %" + head);
+    startBlock(done);
+    const auto index = fresh(), found = fresh();
+    emit(index + " = phi i32 [" + count + ", %" + head + "], [" + i + ", %" + matched + "]");
+    emit(found + " = icmp ult i32 " + index + ", " + count);
+    release(v);
+    return {index, found};
+  }
+  // (Day)x: a member constant, the value itself, or a run-time lookup that
+  // traps when no member holds x.
+  Value lowerEnumCast(const Expr &e) {
+    if (const auto member = analysis.enumMembers.find(&e); member != analysis.enumMembers.end())
+      return {e.castType, std::to_string(member->second)};
+
+    const auto &compared = analysis.enumCasts.at(&e);
+    auto v = expression(*e.args[0]);
+
+    if (enumValue(compared)) return {e.castType, v.value};
+
+    const auto [index, found] = enumLookup(v, e.castType.record, compared);
+    require(found);
+    return {e.castType, index};
+  }
+  // d.Name gives the member's name and d.Value its underlying value.
+  Value lowerEnumProperty(const Expr &e, const std::string &property) {
+    const auto v = expression(*e.args[0]);
+
+    if (property == "Value") return enumUnderlying(v);
+
+    const auto &record = v.type.record;
+
+    if (std::isdigit(static_cast<unsigned char>(v.value[0])))
+      return {Type::Name, enumLabelSymbol(record, std::stoul(v.value))};
+
+    auto slot = fresh(), loaded = fresh();
+    emit(slot + " = getelementptr [" + std::to_string(functions.enums.at(record).members.size()) +
+         " x ptr], ptr @enum." + record + ".labels, i32 0, i32 " + v.value);
+    emit(loaded + " = load ptr, ptr " + slot);
+    return {Type::Name, loaded};
   }
   Value convert(Value value, Type target) {
     if (value.type == target)
@@ -2223,7 +2325,7 @@ class Generator {
     if (recordValue(value.type) && value.value.empty()) value.value = defaultValue(value.type);
 
     if ((managedValue(value.type) || funcValue(value.type) || collectionValue(value.type) ||
-         dynamicArray(value.type)) &&
+         fileValue(value.type) || dynamicArray(value.type)) &&
         value.value.empty())
       value.value = "null";
 
@@ -2635,6 +2737,12 @@ class Generator {
     return {type, value};
   }
   Value lowerCollectionMember(const Expr &e, const std::string &name) {
+    if (name == "IsOpen") {
+      auto open = fresh();
+      emit(open + " = icmp ne ptr " + load(location(*e.args[0]).value) + ", null");
+      return {Type::Bool, open};
+    }
+
     usesCollectionRuntime = true;
     const auto type = analysis.expressionTypes.at(e.args[0].get());
     auto c = fresh();
@@ -2665,8 +2773,73 @@ class Generator {
 
     return loadSlot(slot, *type.element);
   }
+  // A file's methods; the receiver is always stored, so they work on its slot.
+  Value lowerFileCall(const Expr &e, const std::string &name) {
+    usesFileRuntime = true;
+    usesTextRuntime = true; // ReadText and the runtime's text helpers.
+    const auto slot = location(*e.receiver).value;
+
+    if (name == "Close") {
+      emit("call void @duck.file$drop(ptr " + slot + ")");
+      return {Type::Void, ""};
+    }
+
+    if (name == "Open" || name == "Create" || name == "Append") {
+      const auto path = convert(expression(*e.args[0]), Type::String);
+      const auto mode = name == "Open" ? "0" : name == "Create" ? "1" : "2";
+      auto ok = fresh();
+      emit(ok + " = call i1 @duck.file$open(ptr " + slot + ", ptr " + path.value + ", i32 " + mode + ")");
+      release(path);
+      return {Type::Bool, ok};
+    }
+
+    const auto handle = load(slot);
+
+    if (name == "ReadText") {
+      auto text = fresh();
+      emit(text + " = call ptr @duck.file$text(ptr " + handle + ")");
+      return convert({Type::Name, text}, Type::String);
+    }
+
+    const std::string call = name == "Read" ? "@duck.file$read" : "@duck.file$write";
+    auto moved = fresh();
+
+    if (e.args.size() == 2) {
+      const auto buffer = expression(*e.args[0]);
+      const auto bytes = expression(*e.args[1]);
+      emit(moved + " = call i64 " + call + "(ptr " + handle + ", ptr " + buffer.value + ", i64 1, i64 " +
+           bytes.value + ")");
+      return {Type::Long, moved};
+    }
+
+    const auto &argument = *e.args[0];
+    const auto given = analysis.expressionTypes.at(&argument);
+
+    if (managedText(given)) {
+      // Text is written as UTF-8 bytes.
+      const auto text = convert(expression(argument), Type::Name);
+      auto length = fresh(), data = fresh();
+      emit(length + " = call i64 @duck.text.length(ptr " + text.value + ")");
+      emit(data + " = getelementptr i8, ptr " + text.value + ", i64 16");
+      emit(moved + " = call i64 " + call + "(ptr " + handle + ", ptr " + data + ", i64 1, i64 " + length + ")");
+      release(text);
+      return {Type::Long, moved};
+    }
+
+    // A fixed array of numbers moves as raw bytes; the result counts elements.
+    Type leaf = given;
+    unsigned long long count = 1;
+
+    for (; fixedArray(leaf); leaf = *leaf.element) count *= leaf.extent;
+
+    emit(moved + " = call i64 " + call + "(ptr " + handle + ", ptr " + location(argument).value + ", i64 " +
+         sizeOf(leaf) + ", i64 " + std::to_string(count) + ")");
+    return {Type::Long, moved};
+  }
   Value lowerCall(const Expr &e) {
     const auto &op = e.token.text;
+
+    if (auto file = analysis.fileCalls.find(&e); file != analysis.fileCalls.end()) return lowerFileCall(e, file->second);
 
     if (e.receiver && memberName(op) == "Clear")
       if (const auto held = analysis.expressionTypes.find(e.receiver.get());
@@ -2703,6 +2876,16 @@ class Generator {
     if (analysis.mathCalls.count(&e)) return lowerMath(e);
 
     if (op == "Length" || op == "CodeUnitAt") return lowerTextQuery(e);
+
+    if (op == "IsValid" && !e.receiver && e.args[0]->kind == "cast") {
+      const auto &cast = *e.args[0];
+      const auto &compared = analysis.enumCasts.at(&cast);
+      auto v = expression(*cast.args[0]);
+
+      if (enumValue(compared)) return {Type::Bool, "true"};
+
+      return {Type::Bool, enumLookup(v, cast.castType.record, compared).second};
+    }
 
     if (op == "IsValid" && !e.receiver) {
       auto valid = fresh();
@@ -3558,12 +3741,21 @@ class Generator {
     Value temporaryReceiver{Type::Void, ""};
     std::vector<Value> arguments;
     const auto args = callArguments(e, target, f, callee, temporaryReceiver, arguments);
-    const auto id = emitCall(f.result, callee, args);
+    // A native enum result arrives as its underlying value and must name a member.
+    const bool nativeEnum = !f.nativeSymbol.empty() && enumValue(f.result);
+    const auto result = nativeEnum ? functions.enums.at(f.result.record).type : f.result;
+    const auto id = emitCall(result, callee, args);
 
     for (auto argument : arguments) release(argument);
     // A temporary receiver dies after the call, holding whatever the method left in it.
     if (!temporaryReceiver.value.empty()) releaseBinding({temporaryReceiver.type, temporaryReceiver.value});
     if (mayUnwind(target)) unwindCheck();
+
+    if (nativeEnum) {
+      const auto [index, found] = enumLookup({result, id}, f.result.record, result);
+      require(found);
+      return {f.result, index};
+    }
 
     return {f.result, id};
   }
@@ -3703,6 +3895,8 @@ class Generator {
 
     if (e.kind == "initializer") return lowerRecordInitializer(e);
 
+    if (e.kind == "cast" && enumValue(e.castType)) return lowerEnumCast(e);
+
     if (e.kind == "cast")
       return convert(expression(*e.args[0]), e.castType);
 
@@ -3754,6 +3948,9 @@ class Generator {
 
     if (auto member = analysis.collectionMembers.find(&e); member != analysis.collectionMembers.end())
       return lowerCollectionMember(e, member->second);
+
+    if (auto property = analysis.enumProperties.find(&e); property != analysis.enumProperties.end())
+      return lowerEnumProperty(e, property->second);
 
     if (e.kind == "index" && analysis.expressionTypes.at(e.args[0].get()).base == Type::Pair &&
         !analysis.expressionTypes.at(e.args[0].get()).depth) {
@@ -3950,6 +4147,7 @@ class Generator {
     usesMetaRuntime = usesMetaRuntime || inner.usesMetaRuntime;
     usesMarkupRuntime = usesMarkupRuntime || inner.usesMarkupRuntime;
     usesScopeRuntime = usesScopeRuntime || inner.usesScopeRuntime;
+    usesFileRuntime = usesFileRuntime || inner.usesFileRuntime;
     usesLockRuntime = usesLockRuntime || inner.usesLockRuntime;
     scopeNames.insert(inner.scopeNames.begin(), inner.scopeNames.end());
     mathImports.insert(inner.mathImports.begin(), inner.mathImports.end());
@@ -5312,9 +5510,11 @@ public:
     }
 
     output << ") {\nentry:\n" << allocations.str() << code.str() << "}\n\n" << thunks.str();
-    return {globals.str(), output.str(), usesTextRuntime, usesHeapRuntime, usesTaskRuntime, usesLockRuntime,
+    FunctionIR result{globals.str(), output.str(), usesTextRuntime, usesHeapRuntime, usesTaskRuntime, usesLockRuntime,
             usesCalendarRuntime, usesWideRuntime, usesBigRuntime, usesDecimalRuntime, usesCollectionRuntime,
             usesFuncRuntime, usesMetaRuntime, usesMarkupRuntime, usesScopeRuntime, cleanups, destroys, tables, helpers, types, scopeNames, mathImports};
+    result.usesFileRuntime = usesFileRuntime;
+    return result;
   }
 };
 } // namespace
@@ -5419,6 +5619,7 @@ std::string emitEnums(const Symbols &symbols) {
       const auto &label = info.members[i].text;
       ir << "@enum." << name << ".name." << i << " = private unnamed_addr constant ["
          << label.size() + 1 << " x i8] c\"" << label << "\\00\"\n";
+      ir << managedTextGlobal(enumLabelSymbol(name, i), info.members[i], Type::Name);
 
       if (!managedText(info.type)) continue;
 
@@ -5431,6 +5632,11 @@ std::string emitEnums(const Symbols &symbols) {
 
     for (size_t i = 0; i < info.members.size(); ++i)
       ir << (i ? ", " : "") << "ptr @enum." << name << ".name." << i;
+
+    ir << "]\n@enum." << name << ".labels = private unnamed_addr constant [" << count << " x ptr] [";
+
+    for (size_t i = 0; i < info.members.size(); ++i)
+      ir << (i ? ", " : "") << "ptr " << enumLabelSymbol(name, i);
 
     ir << "]\n@enum." << name << ".values = private unnamed_addr constant [" << count << " x "
        << type << "] [";
@@ -5542,6 +5748,13 @@ std::string emitDestroys(const Symbols &symbols, std::set<std::string> container
               "\n  call void @duck.array$each(ptr " + part + ", i64 " + std::to_string(count) +
               ", i64 ptrtoint (ptr getelementptr (ptr, ptr null, i32 1) to i64), ptr " +
               (trackedAlias(leaf) ? "@duck.heap$slot" : "@duck$slot.func") + ")\n";
+        continue;
+      }
+
+      if (fileValue(field.type)) {
+        const auto part = "%field" + std::to_string(i);
+        ir += "  " + part + " = getelementptr %struct." + record + ", ptr %self, i32 0, i32 " + std::to_string(i) +
+              "\n  call void @duck.file$drop(ptr " + part + ")\n";
         continue;
       }
 
@@ -5777,14 +5990,18 @@ std::string emitDeclarations(const Symbols &symbols) {
 
     if (!emitted.insert(symbol).second) continue;
 
-    declarations += "declare " + irType(signature.result) + " @" + symbol + "(";
+    // Native code sees an enum as its underlying value.
+    const auto nativeType = [&](const Type &t) {
+      return !signature.nativeSymbol.empty() && enumValue(t) ? symbols.enums.at(t.record).type : t;
+    };
+    declarations += "declare " + irType(nativeType(signature.result)) + " @" + symbol + "(";
 
     for (size_t i = 0; i < signature.parameters.size(); ++i) {
       if (i)
         declarations += ", ";
 
       const auto &p = signature.parameters[i];
-      declarations += p.reference ? "ptr" : irType(p.type);
+      declarations += p.reference ? "ptr" : irType(nativeType(p.type));
 
       if (i == 0 && signature.method) {
         if (dispatched(item.first, true)) declarations += ", ptr";

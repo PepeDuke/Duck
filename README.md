@@ -1599,6 +1599,49 @@ CommonNames : string
 Print(CommonNames.Tom) // prints Tom
 Print(CommonNames.Bob + " and " + CommonNames.Tom) // prints Bob and Thomas <-- direct cast  
 ```
+A value can be a constant expression that uses other members
+``` c++
+Access : int
+#@{
+    None, Read: 1 << 0, Write: 1 << 1, All: Read | Write
+}
+```
+Converting back to an enum is explicit. `(Day)n` gives the member that holds `n` and stops the program if there is none, so `IsValid((Day)n)` can ask first. Every enum value also knows its member's name and value
+``` c++
+Day d = (Day)2
+Print(d.Name)            // prints Tuesday
+Print(d.Value)           // prints 2
+Print(IsValid((Day)42))  // prints false
+```
+Enums can also live in a static block, where they are named by the container
+``` c++
+Game
+#{
+    Mode : byte
+    #@{
+        Menu, Play, Paused
+    }
+}
+
+Game.Mode mode = Game.Mode.Play
+```
+
+## Files in Duck
+`file` is a built-in type for reading and writing files on disk. A file starts closed, cannot be copied, and closes itself when it goes away, so `Close()` is only needed to finish early.
+``` c++
+file f
+if f.Open("level.txt")              // false if it cannot be opened
+{
+    string text = f.ReadText()      // the rest of the file as text
+}
+
+uint8 [4096] chunk
+long n = f.Read(chunk)              // raw bytes; 0 at the end
+
+file log
+log.Create("log.txt")               // Append(path) adds to the end instead
+log.Write("started\n")
+```
 
 ## Properties in Duck
 the @ symbol is used as representation to similar to Get, with inclusion of any non-static variable in @ block, by default anything after : is returned

@@ -774,6 +774,10 @@
           "match": "\\bmarkup\\b"
         },
         {
+          "name": "storage.type.file.duck",
+          "match": "\\bfile\\b"
+        },
+        {
           "name": "entity.name.type.duck",
           "match": "[A-Za-z_][A-Za-z0-9_]*"
         },

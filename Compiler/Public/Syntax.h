@@ -120,7 +120,8 @@ struct Type {
     Enum,        // A #@ enum member; `record` holds the enum name.
     Queue, Stack, Pair, // Collections; `element` (and a pair's `key`) hold their types.
     Array,              // `element` holds the element type; `extent` is 0 when dynamic.
-    Func                // A callable; `signature` is null until inferred from its initializer.
+    Func,               // A callable; `signature` is null until inferred from its initializer.
+    File                // An open file handle (the C FILE*), null while closed.
   };
   enum Role { Raw, Owner, Alias };
   Role role = Raw;
@@ -276,6 +277,9 @@ inline bool pairValue(const Type &t) { return !t.depth && t.base == Type::Pair &
 // An enum value is stored as its member's declaration index. Printing uses the
 // member name; operators, conversions, and concatenation use its underlying value.
 inline bool enumValue(const Type &t) { return !t.depth && t.base == Type::Enum; }
+// A file is a move-only handle: the C FILE*, null while closed. It closes
+// itself when its variable, field, or temporary dies.
+inline bool fileValue(const Type &t) { return !t.depth && t.base == Type::File; }
 // A markup value holds a tree's top-level elements: a queue of element nodes.
 // Being a collection, it is a move-only handle that is null while empty.
 inline Type elementType() {

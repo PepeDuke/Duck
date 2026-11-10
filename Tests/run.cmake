@@ -3070,7 +3070,7 @@ foreach(op IN ITEMS "<<" ">>")
 endforeach()
 file(READ "${SOURCE}/Examples/Bootstrap/19_Enums.dk" enums)
 run_program(enum_example "${enums}"
-  "Sunday\n1\n10\nMonday\n1\n3\n1\nTom\nBob and Thomas\nDaniel\n")
+  "Sunday\n1\n10\nMonday\n1\n3\n1\nTom\nBob and Thomas\nDaniel\n3\nPlay\nWednesday\n9\n0\n")
 # Runtime member indices decay through the value tables.
 run_program(enum_runtime "Color : string #@{ Red, Green: \"verde\" }
 Tag : name #@{ A: \"alpha\" }
@@ -3106,6 +3106,225 @@ file(WRITE "${WORK}/enum_typed.dk" "Shade : int #@{ Dark }\n")
 file(WRITE "${WORK}/enum_extension.dk" "Shade #@{ Light }\nMain() {\n  Print(Shade.Dark + 0)\n  Print(Shade.Light)\n}\n")
 run_files(enum_fragments "0\nLight\n" "${WORK}/enum_typed.dk" "${WORK}/enum_extension.dk")
 run_files(enum_fragments_reversed "1\nLight\n" "${WORK}/enum_extension.dk" "${WORK}/enum_typed.dk")
+# Values may be constant expressions of literals and members, in any order.
+run_program(enum_value_expressions "Flags : int #@{ None, Read: 1 << 0, Write: 1 << 1, All: Read | Write | Exec, Exec: 1 << 2 }
+Wide : uint64 #@{ Top: 18446744073709551615, Half: Top / 2, Mask: ~0 & 255 }
+Signed : int8 #@{ Low: -128, Quotient: -7 / 2, Rest: -7 % 2, Shifted: -8 >> 1 }
+Steps : float #@{ A: 1.5, B, C: B * 2.0, D: -A, E: 3 }
+Greeting : string #@{ Hi, There: Hi + \" there\", Again: Greeting.There + \"!\" }
+Derived : int #@{ First: Flags.All * 10, Next }
+Main() {
+  Print(Flags.All + 0)
+  Print(Wide.Half + (uint64)0)
+  Print(Wide.Mask + (uint64)0)
+  Print(Signed.Quotient + 0)
+  Print(Signed.Rest + 0)
+  Print(Signed.Shifted + 0)
+  Print(Steps.C + 0.0)
+  Print(Steps.D + 0.0)
+  Print(Steps.E + 0.0)
+  string s = Greeting.Again
+  Print(s)
+  Print(Derived.Next + 0)
+}" "7
+9223372036854775807
+255
+-3
+-1
+-4
+4
+-1.5
+3
+Hi there!
+71
+")
+# (E)x finds the first member holding x; Name and Value read a member back.
+run_program(enum_conversions "Day : byte #@{ Sunday, Monday, Tuesday, Again: 1 }
+Color : string #@{ Red: \"#ff0000\", Green }
+Half : double #@{ Zero, One, Two }
+Day Parse(int n) { return (Day)n }
+Main() {
+  int n = 2
+  d : (Day)n
+  Print(d)
+  Print(d.Name)
+  Print(d.Value)
+  Print(Day.Monday.Name + (name)\"!\")
+  Print(Parse(1))
+  long wide = 1
+  Print((Day)wide)
+  Print((Day)Day.Again)
+  Print(IsValid((Day)n))
+  Print(IsValid((Day)9))
+  Print((Color)\"#ff0000\")
+  name green = (name)\"Green\"
+  Print((Color)green)
+  Print(IsValid((Color)green))
+  Print((Half)0.5)
+  Print((Half)1)
+  Print(IsValid((Half)0.25))
+  Print(Color.Red.Value)
+  Switch ((Day)n) {
+    case (Day)2:
+      Print(\"tuesday\")
+      break
+    default:
+      break
+  }
+}" "Tuesday
+Tuesday
+2
+Monday!
+Monday
+Monday
+Again
+1
+0
+Red
+Green
+1
+One
+Two
+0
+#ff0000
+tuesday
+")
+# Enums in static containers are named by their containers, and extend there.
+run_program(enum_static_container "Game #{
+  Mode : int #@{ Menu, Play: 10, Pause }
+  Mode Start() { return Mode.Play }
+  Inner #{
+    Speed : float #@{ Slow: 0.5, Fast: Slow * 4.0 }
+  }
+  Mode #@{ Quit }
+}
+Mode : int #@{ Other }
+Holder { Game.Mode Current = Game.Mode.Pause }
+Main() {
+  Print(Game.Start())
+  Print(Game.Mode.Quit + 0)
+  Game.Mode m = Game.Mode.Pause
+  Print(m.Name)
+  Print((Game.Mode)11)
+  Print(Game.Inner.Speed.Fast + 0.0)
+  Holder h
+  Print(h.Current)
+  Print(Mode.Other)
+}" "Play
+12
+Pause
+Pause
+2
+Pause
+Other
+")
+# A native function takes and returns an enum as its underlying value.
+run_program(enum_native_values "Level : int #@{ Low: -5, High: 5 }
+extern \"C\" Level abs(Level value)
+Main() {
+  Print(abs(Level.Low))
+  Print(abs(Level.High))
+}" "High\nHigh\n")
+# file: a move-only handle that closes itself when it dies.
+file(REMOVE "${WORK}/file_round_trip.txt" "${WORK}/file_numbers.bin")
+run_program(file_round_trip "Log { file Output }
+bool Save(string path, string text) {
+  file f
+  if !f.Create(path) { return false }
+  f.Write(text)
+  return true
+}
+file OpenFor(string path) {
+  file f
+  f.Open(path)
+  return f
+}
+long CountBytes(file& f) {
+  uint8 [4] chunk
+  long total = 0
+  long n = f.Read(chunk)
+  while n > 0 {
+    total += n
+    n = f.Read(chunk)
+  }
+  return total
+}
+Main() {
+  string path = \"${WORK}/file_round_trip.txt\"
+  Print(Save(path, \"héllo duck\"))
+  file f
+  Print(f.IsOpen)
+  Print(f.Open(path))
+  Print(f.ReadText() == \"héllo duck\")
+  f.Close()
+  Print(f.IsOpen)
+  Print(f.Open(\"${WORK}/missing.txt\"))
+  Print(f.ReadText() == \"\")
+  Print(f.Append((name)path))
+  f.Write((name)\"!\")
+  f.Close()
+  g : OpenFor(path)
+  Print(CountBytes(g))
+  Log log
+  log.Output.Create(\"${WORK}/file_numbers.bin\")
+  int [3] numbers = {1, 2, 300}
+  Print(log.Output.Write(numbers))
+  uint8 [2] raw
+  raw[0] = 65
+  raw[1] = 66
+  Print(log.Output.Write(&raw[0], 2))
+  log.Output.Close()
+  file back
+  back.Open(\"${WORK}/file_numbers.bin\")
+  int [2] first
+  Print(back.Read(first))
+  Print(first[1])
+  int third = 0
+  Print(back.Read(third))
+  Print(third)
+  uint8 [8] rest
+  Print(back.Read(&rest[0], 8))
+  Print(back.Read(rest))
+}" "1
+0
+1
+1
+0
+0
+1
+1
+12
+3
+2
+2
+2
+1
+300
+2
+0
+")
+reject(file_copy "Main() { file a\nfile b = a }" "a file is move-only")
+reject(file_by_value "F(file f) {}\nMain() {}" "must take its file by reference")
+reject(file_unknown_method "Main() { file f\nf.Seek(1) }" "file has no method 'Seek'")
+reject(file_unknown_member "Main() { file f\nPrint(f.Size) }" "file has no member 'Size'")
+reject(file_static "S #{ file F }\nMain() {}" "static fields of type file")
+reject(file_open_number "Main() { file f\nf.Open(5) }" "Open requires a string or name")
+reject(file_read_text "Main() { file f\nstring s = \"\"\nf.Read(s) }" "fixed array of numbers")
+reject(file_raw_needs_pointer "Main() { file f\nfloat [2] a\nf.Read(a, 2) }" "requires a raw pointer")
+reject(file_temporary "file Make() { file f\nreturn f }\nMain() { Make().Close() }" "store the file in a variable")
+file(READ "${SOURCE}/Examples/Bootstrap/31_Files.dk" files_example)
+run_program(file_example "${files_example}" "first
+second
+
+13
+0
+0
+")
+# `file` stays an ordinary name wherever a type cannot be.
+run_program(file_as_name "Main() {
+  void* file = null
+  Print(file == null)
+}" "1\n")
 # An imported enum is usable, including as a parameter, but not extensible.
 file(WRITE "${WORK}/enum_library.dk" "Shade : int #@{ Dark, Light }\nint Code(Shade s) { return s * 10 }\n")
 file(WRITE "${WORK}/enum_client.dk" "Main() {\n  Print(Shade.Light)\n  Print(Code(Shade.Light))\n}\n")
@@ -3137,14 +3356,32 @@ reject(enum_explicit_range "E : int8 #@{ A: -129 }\nMain() {}" "out of range")
 reject(enum_assign_member "E : int #@{ A }\nMain() { E.A = 1 }" "is a constant")
 reject(enum_from_integer "E : int #@{ A }\nMain() { E e = 0 }" "type mismatch")
 reject(enum_compound "E : int #@{ A }\nMain() { E e = E.A\ne += 1 }" "type mismatch")
-reject(enum_text_value "E : string #@{ A: 1 }\nMain() {}" "string literal")
-reject(enum_integer_value "E : int #@{ A: \"x\" }\nMain() {}" "integer literal")
-reject(enum_float_value "E : float #@{ A: 0x10 }\nMain() {}" "decimal number literal")
+reject(enum_text_value "E : string #@{ A: 1 }\nMain() {}" "requires a string value")
+reject(enum_integer_value "E : int #@{ A: \"x\" }\nMain() {}" "requires an integer value")
+reject(enum_float_value "E : float #@{ A: \"x\" }\nMain() {}" "requires a decimal number value")
+reject(enum_real_in_integer "E : int #@{ A: 1.5 }\nMain() {}" "requires an integer value, not a decimal number")
+reject(enum_value_cycle "E : int #@{ A: B, B: A + 1 }\nMain() {}" "depends on its own value")
+reject(enum_value_unknown "E : int #@{ A: Missing }\nMain() {}" "unknown name 'Missing'")
+reject(enum_value_unknown_member "E : int #@{ A }\nF : int #@{ B: E.Z }\nMain() {}" "unknown member 'Z' in enum 'E'")
+reject(enum_value_call "int Seven() { return 7 }\nE : int #@{ A: Seven() }\nMain() {}" "constant expression")
+reject(enum_value_divide_zero "E : int #@{ A: 1 / 0 }\nMain() {}" "division by zero")
+reject(enum_value_range "E : byte #@{ A: 200 + 100 }\nMain() {}" "out of range for uint8")
+reject(enum_value_text_operator "E : string #@{ A: \"a\" - \"b\" }\nMain() {}" "joined with")
+reject(enum_cast_literal "E : int #@{ A, B }\nMain() { E e = (E)5 }" "no member of enum 'E' has this value")
+reject(enum_cast_text_literal "E : string #@{ A }\nMain() { E e = (E)\"B\" }" "no member of enum 'E' has this value")
+reject(enum_cast_kind "E : int #@{ A }\nMain() { string s = \"A\"\nE e = (E)s }" "cannot convert string to enum 'E'")
+reject(enum_cast_float_to_integer "E : int #@{ A }\nMain() { float f = 1.0\nE e = (E)f }" "cannot convert float")
+reject(enum_cast_mixed_sign "E : uint64 #@{ A }\nMain() { long n = 0\nE e = (E)n }" "cannot compare long")
+reject(enum_name_readonly "E : int #@{ A }\nMain() { E e = E.A\ne.Name = (name)\"B\" }" "read-only")
+reject(enum_nested_instance "C { E : int #@{ A } }\nMain() {}" "instance body")
+reject(enum_nested_outside "S #{ E : int #@{ A } }\nMain() { Print(E.A) }" "unknown variable .E.")
 reject(enum_bool "E : bool #@{ A }\nMain() {}" "underlying type must be")
-reject(enum_nested "S #{ E : int #@{ A } }\nMain() {}" "file scope")
+trap_program(enum_cast_trap "E : int #@{ A, B }\nMain() {\n  int n = 2\n  E e = (E)n\n  Print(e)\n}")
+trap_program(enum_native_result_trap "E : int #@{ Low: -5 }\nextern \"C\" E abs(E value)\nMain() {\n  Print(abs(E.Low))\n}")
 reject(enum_container_clash "E { int x }\nE : int #@{ A }\nMain() {}" "duplicate type name")
 reject(enum_separator "E : int #@{ A B }\nMain() {}" "between enum members")
-reject(enum_native "E : int #@{ A }\nextern \"C\" F(E e)\nMain() {}" "native parameter")
+reject(enum_native "E : byte #@{ A }\nextern \"C\" F(E e)\nMain() {}" "native parameter")
+reject(enum_native_text "E : string #@{ A }\nextern \"C\" E F()\nMain() {}" "native return")
 file(READ "${SOURCE}/Examples/Bootstrap/20_TypeLimits.dk" limits)
 run_program(type_limits_example "${limits}"
   "2147483647\n-2147483648\n255\n8388607\n340282366920938463463374607431768211455\n2147483647\n1\n")

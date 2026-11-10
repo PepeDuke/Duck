@@ -42,9 +42,18 @@ void enableTests(Program &program) {
 
   program.tests.clear();
 }
+// Destroying a container with a file field closes the file, so the module
+// needs the file runtime even when no function touches a file directly.
+static bool fileFields(const Symbols &symbols) {
+  for (const auto &[name, record] : symbols.records)
+    for (const auto &field : record.fields)
+      if (fileValue(field.type)) return true;
+
+  return false;
+}
 std::string assembleModule(const std::vector<FunctionIR> &functions,
                            bool entry, const std::set<std::string> &nativeSymbols,
-                           bool mainArguments) {
+                           bool mainArguments, bool fileFields) {
   std::string module =
       "; Duck bootstrap LLVM IR\ndeclare i32 @printf(ptr, ...)\n"
       "declare double @llvm.floor.f64(double)\ndeclare void @llvm.trap()\n";
@@ -60,6 +69,10 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
     if (symbol != "llvm.floor.f64" && !nativeSymbols.count(symbol)) module += declaration;
 
   for (const auto &f : functions) needsScope = needsScope || f.usesScopeRuntime;
+
+  bool needsFile = fileFields;
+
+  for (const auto &f : functions) needsFile = needsFile || f.usesFileRuntime;
 
   for (const auto &f : functions) {
     needsMarkup = needsMarkup || f.usesMarkupRuntime;
@@ -77,7 +90,7 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
 
   // big storage shares the text reference count and the wide digit printer;
   // collections release text and big elements through it.
-  for (const auto &f : functions) needsText = needsText || f.usesTextRuntime || needsBig || needsCollections;
+  for (const auto &f : functions) needsText = needsText || f.usesTextRuntime || needsBig || needsCollections || needsFile;
 
   bool needsHeap = needsMarkup;
 
@@ -109,6 +122,7 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
   if (needsTasks || needsLocks) module += lockRuntimeIR(nativeSymbols);
   if (needsTasks) module += taskRuntimeIR(nativeSymbols);
   if (needsText) module += textRuntimeIR();
+  if (needsFile) module += fileRuntimeIR(nativeSymbols);
   if (needsCollections) module += collectionRuntimeIR();
   if (needsMarkup) module += markupRuntimeIR();
   if (needsCollections && needsBig) module += collectionBigKeyIR();
@@ -388,6 +402,9 @@ std::string compileModule(const Program &program, const Program &imports,
   for (const auto &[name, signature] : symbols)
     if (!signature.nativeSymbol.empty()) declarations.emplace(name, signature);
 
+  // A native declaration spells an enum as its underlying type.
+  declarations.enums.insert(symbols.enums.begin(), symbols.enums.end());
+
   const auto generated = generateInitializers(symbols, declarations);
   std::vector<FunctionAnalysis> analyses;
   // Signatures are settled and each body is checked on its own, so an error
@@ -477,7 +494,7 @@ std::string compileModule(const Program &program, const Program &imports,
       emitDestroys(symbols, destroys) + emitTables(symbols, tables, types) +
       emitDeclarations(declarations) +
       assembleModule(fragments, entry, nativeSymbols,
-                     entry && !symbols.at("Main").parameters.empty()) +
+                     entry && !symbols.at("Main").parameters.empty(), fileFields(symbols)) +
       runner;
   return emitNativeMathTypes(symbols, module) + module;
 }

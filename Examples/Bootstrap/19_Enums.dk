@@ -32,6 +32,26 @@ CommonNames : string
     Dan: "Daniel"
 }
 
+// Values can be constant expressions of literals and other members.
+Access : int
+#@{
+    None, Read: 1 << 0, Write: 1 << 1, All: Read | Write
+}
+
+// An enum in a static block is named by its container.
+Game
+#{
+    Mode : int
+    #@{
+        Menu, Play: 10, Paused
+    }
+
+    Mode Start()
+    {
+        return Mode.Play         // inside Game, Mode is enough
+    }
+}
+
 Day Next(Day day)
 {
     return day == Day.Sunday ? Day.Monday | Day.Tuesday
@@ -52,4 +72,17 @@ Main()
     Print(CommonNames.Bob + " and " + CommonNames.Tom) // Bob and Thomas
     string friend = CommonNames.Dan
     Print(friend)                             // Daniel
+    Print(Access.All + 0)                     // 3
+    Print(Game.Start())                       // Play
+
+    // (Day)n finds the member holding n, and traps when none does.
+    // IsValid asks first; Name and Value read a member back.
+    int n = 9
+    if IsValid((Day)n)
+    {
+        Day found = (Day)n
+        Print(found.Name)                     // Wednesday
+        Print(found.Value)                    // 9
+    }
+    Print(IsValid((Day)200))                  // 0
 }

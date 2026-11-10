@@ -90,6 +90,7 @@ std::string typeName(Type type) {
   case Type::Name: return "name";
   case Type::Char: return "char";
   case Type::Date: return "date";
+  case Type::File: return "file";
   case Type::Time: return "time";
   case Type::DateTime: return "datetime";
   case Type::Big: return "big";
@@ -514,12 +515,44 @@ class Analyzer {
     analysis.conversions[&e] = underlying;
     return underlying;
   }
-  // Day.Monday, unless Day is a local whose field is being read.
-  const EnumInfo *enumOf(const Expr &e) {
-    if (e.kind != "." || e.args[0]->kind != "name" || findLocal(e.args[0]->token)) return nullptr;
+  // Day.Monday or Outer.Day.Monday, unless Day is a local whose field is
+  // being read. The enum path resolves like a static name: from the
+  // enclosing containers outward, then through using directives.
+  const EnumInfo *enumOf(const Expr &e, std::string *name = nullptr) {
+    if (e.kind != ".") return nullptr;
 
-    auto found = symbols.enums.find(e.args[0]->token.text);
-    return found == symbols.enums.end() ? nullptr : &found->second;
+    std::string path;
+    const Expr *root = dottedRoot(*e.args[0], path);
+
+    if (root->kind != "name" || findLocal(root->token)) return nullptr;
+
+    const auto qualified = qualify(root->token.text + path, e.token,
+                                   [&](const std::string &n) { return symbols.enums.count(n) != 0; });
+
+    if (qualified.empty()) return nullptr;
+    if (name) *name = qualified;
+
+    return &symbols.enums.at(qualified);
+  }
+  // d.Name (the member's name) and d.Value (its underlying value) on an enum
+  // value; Void for any other expression.
+  Type enumProperty(const Expr &e) {
+    if (e.kind != "." || (e.token.text != "Name" && e.token.text != "Value")) return Type::Void;
+    if (analysis.enumProperties.count(&e)) return analysis.expressionTypes.at(&e);
+    if (enumOf(e) || !staticPath(e).empty()) return Type::Void;
+
+    const auto &base = *e.args[0];
+    const bool constant = enumOf(base) != nullptr;
+    const auto type = !constant && storage(base) ? location(base).type : expression(base);
+
+    if (!enumValue(type)) return Type::Void;
+
+    const auto result = e.token.text == "Name" ? Type(Type::Name) : symbols.enums.at(type.record).type;
+    requireComplete(base);
+    analysis.expressionTypes[&base] = type;
+    analysis.enumProperties[&e] = e.token.text;
+    analysis.expressionTypes[&e] = result;
+    return result;
   }
   // The function a direct call resolves to, or null.
   const Signature *calledFunction(const Expr &e) const {
@@ -691,6 +724,10 @@ class Analyzer {
     if (collectionValue(type) && e.addressable() && !analysis.properties.count(&e) && &e != movable)
       fail(e.token, "cannot copy " + typeName(type) + " '" + storageText(e) +
                         "': collections are move-only; pass it by reference (&), or return a local to move it");
+
+    if (fileValue(type) && e.addressable() && &e != movable)
+      fail(e.token, "cannot copy file '" + storageText(e) +
+                        "': a file is move-only; pass it by reference (file&), or return a local to move it");
 
     if (arrayValue(type) && symbols.moveOnly(type) && e.addressable() && !analysis.properties.count(&e) &&
         &e != movable)
@@ -1208,7 +1245,7 @@ class Analyzer {
       return true;
     }
 
-    if (e.kind != "." || enumOf(e) || !staticPath(e).empty()) return false;
+    if (e.kind != "." || enumOf(e) || !staticPath(e).empty() || enumProperty(e) != Type::Void) return false;
 
     const auto &base = *e.args[0];
     Type type = storage(base) ? location(base).type : expression(base);
@@ -1230,7 +1267,7 @@ class Analyzer {
   // q.Front, s.Top, p.Last, p.LastKey, and .Len on stored collections; Void
   // when e is not such a read.
   Type collectionMember(const Expr &e) {
-    if (e.kind != "." || enumOf(e) || !staticPath(e).empty()) return Type::Void;
+    if (e.kind != "." || enumOf(e) || !staticPath(e).empty() || enumProperty(e) != Type::Void) return Type::Void;
 
     const auto &base = *e.args[0];
 
@@ -1241,6 +1278,17 @@ class Analyzer {
     if (!storage(base)) return Type::Void;
 
     const auto type = location(base).type;
+
+    if (fileValue(type)) {
+      if (e.token.text != "IsOpen")
+        fail(e.token, "file has no member '" + e.token.text + "'; a file has IsOpen and the methods Open, Create, "
+                      "Append, Read, ReadText, Write, and Close");
+
+      requireComplete(base);
+      analysis.collectionMembers[&e] = "IsOpen";
+      analysis.expressionTypes[&e] = Type::Bool;
+      return Type::Bool;
+    }
 
     if (arrayValue(type)) {
       if (e.token.text != "Len") fail(e.token, typeName(type) + " has no member '" + e.token.text + "'; an array has Len");
@@ -1619,6 +1667,7 @@ class Analyzer {
   // Existing storage: an addressable expression that is not a property.
   bool storage(const Expr &e) {
     if (childrenCall(e)) return true;
+    if (enumProperty(e) != Type::Void) return false;
 
     std::string owner;
     // q.Front gives a copy of an element, so q.Front.X reads through that.
@@ -1873,9 +1922,10 @@ class Analyzer {
     return false;
   }
   bool memberLocation(const Expr &e, bool read, Local &local) {
-    if (enumOf(e))
-      fail(e.token, "enum member '" + e.args[0]->token.text + "." + e.token.text +
-                        "' is a constant");
+    if (std::string name; enumOf(e, &name))
+      fail(e.token, "enum member '" + name + "." + e.token.text + "' is a constant");
+    if (enumProperty(e) != Type::Void)
+      fail(e.token, "'" + e.token.text + "' of an enum value is read-only");
 
     const auto &base = *e.args[0];
 
@@ -2446,7 +2496,53 @@ class Analyzer {
 
     return type;
   }
+  // (Day)x: the first member whose value equals x. A literal is matched
+  // now; any other value is looked up at run time and traps when no member
+  // holds it, unless IsValid((Day)x) is asking whether one does.
+  bool probingEnumCast = false;
+  Type checkEnumCast(const Expr &e) {
+    symbols.validateType(e.castType, e.token);
+
+    const auto &info = symbols.enums.at(e.castType.record);
+    const auto &operand = *e.args[0];
+    const bool probing = probingEnumCast;
+    probingEnumCast = false;
+
+    if (!probing)
+      if (const auto member = enumLiteralMember(info, operand)) {
+        analysis.enumMembers[&e] = *member;
+        return e.castType;
+      }
+
+    auto source = expression(operand);
+
+    if (source == e.castType) {
+      analysis.enumCasts[&e] = e.castType;
+      return e.castType;
+    }
+
+    source = decay(operand, source);
+    const auto &underlying = info.type;
+    Type compared = Type::Void;
+
+    if ((integral(underlying) && integral(source)) || (floating(underlying) && numeric(source)))
+      compared = commonNumeric(source, underlying);
+    else if (managedText(underlying) && managedText(source))
+      compared = underlying;
+    else
+      fail(e.token, "cannot convert " + typeName(source) + " to enum '" + e.castType.record + "', whose values are " +
+                        typeName(underlying));
+
+    if (compared == Type::Void)
+      fail(e.token, "cannot compare " + typeName(source) + " with the " + typeName(underlying) + " values of '" +
+                        e.castType.record + "'; cast it to a type that holds both first");
+
+    analysis.enumCasts[&e] = compared;
+    return e.castType;
+  }
   Type checkCast(const Expr &e) {
+    if (enumValue(e.castType)) return checkEnumCast(e);
+
     if (e.castType.depth && e.castType.base == Type::Record && symbols.records.count(e.castType.record) &&
         symbols.managedRecord(e.castType.record))
       fail(e.token, "cannot cast to a pointer to a container with string, name, or big fields");
@@ -3210,9 +3306,17 @@ class Analyzer {
     }
 
     if (op == "IsValid" && !e.receiver) {
+      // IsValid((Day)x) asks whether some member of Day holds x.
+      if (e.args.size() == 1 && e.args[0]->kind == "cast" && enumValue(e.args[0]->castType)) {
+        probingEnumCast = true;
+        expression(*e.args[0]);
+        return Type::Bool;
+      }
+
       // IsValid(a[i]) checks the index without reading the element.
       if (e.args.size() != 1 || e.args[0]->kind != "index")
-        fail(e.token, "IsValid expects one indexed element, as in IsValid(a[i])");
+        fail(e.token, "IsValid expects one indexed element, as in IsValid(a[i]), or an enum conversion, "
+                      "as in IsValid((Day)n)");
 
       expression(*e.args[0]);
       return Type::Bool;
@@ -3247,6 +3351,8 @@ class Analyzer {
 
       if (arrayValue(printed) || collectionValue(printed))
         fail(e.token, "cannot print " + typeName(printed) + " directly; print its elements");
+
+      if (fileValue(printed)) fail(e.token, "cannot print a file; print its IsOpen or ReadText() instead");
 
       if (printed.depth)
         fail(e.token, "cannot print an opaque pointer; compare it with null instead");
@@ -3291,6 +3397,11 @@ class Analyzer {
       return result;
     }
     if (stored && !t.depth && (arrayValue(t) || collectionValue(t))) return checkCollectionClear(e, base, t, constant);
+    if (fileValue(t)) {
+      if (!stored) fail(base.token, "store the file in a variable before calling its methods");
+
+      return checkFileMethod(e, base, constant);
+    }
     if (!recordValue(t)) fail(base.token, "method receiver requires a container");
 
     MemberPath path;
@@ -3324,6 +3435,80 @@ class Analyzer {
     if (!path.indices.empty()) analysis.receiverPaths[&e] = {t.record, path.indices};
 
     return std::nullopt;
+  }
+  // f.Open(path), f.Read(buffer), f.Write(text), and the rest; see FileRuntime.cpp.
+  Type checkFileMethod(const Expr &e, const Expr &base, bool constant) {
+    const auto name = memberName(e.token.text);
+    auto arguments = [&](size_t count, const char *form) {
+      if (e.args.size() != count) fail(e.token, "wrong argument count for '" + name + "'; write " + form);
+    };
+    auto text = [&](const Expr &argument) {
+      if (const auto given = expression(argument); !managedText(given))
+        fail(argument.token, name + " requires a string or name, got " + typeName(given));
+    };
+    // The leaf element of a fixed array of numbers, which is read or written
+    // as raw bytes; Void for anything else.
+    auto numbers = [&](Type type) {
+      while (fixedArray(type)) type = *type.element;
+
+      return numeric(type) && !arbitraryNumber(type) ? type : Type(Type::Void);
+    };
+    Type result = Type::Void;
+
+    if (name == "Open" || name == "Create" || name == "Append") {
+      arguments(1, (name + "(path)").c_str());
+      text(*e.args[0]);
+      result = Type::Bool;
+    } else if (name == "Close") {
+      arguments(0, "Close()");
+    } else if (name == "ReadText") {
+      arguments(0, "ReadText()");
+      result = Type::String;
+    } else if (name == "Read" || name == "Write") {
+      result = Type::Long;
+
+      if (e.args.size() == 2) {
+        // f.Read(&buffer[0], bytes): raw memory, as native code would pass it.
+        const auto pointer = expression(*e.args[0]);
+
+        if (!pointer.depth || pointer.role != Type::Raw)
+          fail(e.args[0]->token, name + "(buffer, bytes) requires a raw pointer such as &chunk[0], got " +
+                                     typeName(pointer));
+
+        expression(*e.args[1], Type::Long);
+      } else if (e.args.size() == 1) {
+        const auto &argument = *e.args[0];
+
+        if (name == "Write" && !storage(argument)) text(argument);
+        else {
+          if (!storage(argument)) fail(argument.token, name + " requires an array variable to " +
+                                                          (name == "Read" ? "fill" : "write from"));
+
+          const auto place = location(argument);
+
+          if (managedText(place.type) && name == "Write") {
+            text(argument);
+          } else {
+            if (numbers(place.type) == Type::Void)
+              fail(argument.token, name + " requires a fixed array of numbers, such as uint8 [4096], got " +
+                                       typeName(place.type) + (name == "Write" ? ", or text" : ""));
+
+            if (name == "Read" && place.constant) constantTarget(argument, e.token);
+
+            analysis.expressionTypes[&argument] = place.type;
+          }
+        }
+      } else
+        fail(e.token, "wrong argument count for '" + name + "'; write " + name + "(array), " + name +
+                          "(&buffer[0], bytes)" + (name == "Write" ? ", or Write(text)" : ""));
+    } else
+      fail(e.token, "file has no method '" + name + "'; a file has Open, Create, Append, Read, ReadText, Write, "
+                    "and Close, and the member IsOpen");
+
+    if (constant) constantTarget(base, e.token);
+
+    analysis.fileCalls[&e] = name;
+    return result;
   }
   Type checkCollectionClear(const Expr &e, const Expr &base, const Type &t, bool constant) {
     const auto &op = e.token.text;
@@ -3611,7 +3796,7 @@ class Analyzer {
     if (e.kind == "text")
       return textType(expected) ? expected : Type::String;
 
-    if (auto info = enumOf(e)) {
+    if (std::string name; auto info = enumOf(e, &name)) {
       const auto index = info->find(e.token.text);
 
       if (index == info->members.size()) {
@@ -3619,15 +3804,17 @@ class Analyzer {
 
         for (const auto &member : info->members) members.push_back(member.text);
 
-        fail(e.token, "unknown member '" + e.token.text + "' in enum '" + e.args[0]->token.text + "'" +
+        fail(e.token, "unknown member '" + e.token.text + "' in enum '" + name + "'" +
                           didYouMean(e.token.text, members));
       }
 
       analysis.enumMembers[&e] = index;
       Type type = Type::Enum;
-      type.record = e.args[0]->token.text;
+      type.record = name;
       return type;
     }
+
+    if (const auto property = enumProperty(e); property != Type::Void) return property;
 
     if (e.kind == "guard" && e.args[0]->kind == "duckCall") return checkGuardedDuckCall(e, expected);
     if (e.kind == "guard" && e.args[0]->kind == "call") return checkGuardedCall(e);
@@ -4022,7 +4209,7 @@ class Analyzer {
 
     // `return local` moves a value with a destructor out of the function.
     if (s.expr && s.expr->kind == "name" &&
-        (collectionValue(result) || (arrayValue(result) && symbols.moveOnly(result)) ||
+        (collectionValue(result) || fileValue(result) || (arrayValue(result) && symbols.moveOnly(result)) ||
          (recordValue(result) && symbols.destructible(result.record)))) {
       const auto *local = findLocal(s.expr->token);
 
@@ -4243,7 +4430,7 @@ class Analyzer {
 
     bind(name, {type, s.constant,
                 s.kind == "own" || s.expr != nullptr || recordValue(type) || collectionValue(type) ||
-                    arrayValue(type)});
+                    fileValue(type) || arrayValue(type)});
 
     if (s.kind == "own" && s.type == Type::Void && method && !scopes.empty())
       if (const auto field = scopes.front().find(s.name);

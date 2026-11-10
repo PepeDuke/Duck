@@ -1,0 +1,56 @@
+// Files: a `file` opens, reads, writes, and closes itself when it goes away.
+
+// A container can keep a file open; the file closes with the container.
+Journal
+{
+    file Output
+
+    bool Start(string path)
+    {
+        return Output.Create(path)
+    }
+
+    Add(string line)
+    {
+        Output.Write(line + "\n")
+    }
+}
+
+// A file is move-only: take it by reference.
+long CountBytes(file& source)
+{
+    uint8 [16] chunk
+    long total = 0
+    long n = source.Read(chunk)
+    while n > 0
+    {
+        total += n
+        n = source.Read(chunk)
+    }
+    return total
+}
+
+Main()
+{
+    {
+        Journal journal
+        if journal.Start("31_Files.txt")
+        {
+            journal.Add("first")
+            journal.Add("second")
+        }
+    }                                       // the journal and its file close here
+
+    file f
+    if f.Open("31_Files.txt")
+    {
+        Print(f.ReadText())                 // first, second
+        f.Close()
+    }
+
+    f.Open("31_Files.txt")
+    Print(CountBytes(f))                    // 13
+
+    Print(f.Open("31_Missing.txt"))         // 0: the file does not exist
+    Print(f.IsOpen)                         // 0
+}

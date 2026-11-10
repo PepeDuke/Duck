@@ -847,9 +847,9 @@ ties, formatting, release of all `big` storage, traps, and diagnostics.
 
 ## Enums
 
-A file-scope `Name : type #@{ ... }` block declares an enum whose members
-carry an integer, `float`, `double`, `string`, or `name` value. Members are
-separated by commas or newlines, and a trailing comma is allowed. See
+A `Name : type #@{ ... }` block declares an enum whose members carry an
+integer, `float`, `double`, `string`, or `name` value. Members are separated
+by commas or newlines, and a trailing comma is allowed. See
 [19_Enums.dk](../Examples/Bootstrap/19_Enums.dk).
 
 ```c++
@@ -861,19 +861,46 @@ Day #@{ Wednesday: 9, Thursday }   // extension: Thursday is 10
 
 Print(Day.Sunday)                  // Sunday
 Print(Day.Thursday + 0)            // 10
+d : (Day)n                         // the member holding n; traps if none does
+Print(d.Name)                      // the member's name, as a name
+Print(d.Value)                     // its underlying value
 ```
 
+- **Where.** An enum is declared at file scope or inside a static `#{ }`
+  block, never in a container's instance body. Inside `Game #{ ... }` it is
+  named `Game.Mode`; code in `Game`, and code that writes `using Game`,
+  can call it `Mode`. The name resolves like other static names, from the
+  innermost container outward, so a nested enum shadows a file-scope one of
+  the same name.
 - **Extension.** Further `Name #@{ ... }` blocks, in the same file or another
-  input file, add members. All fragments of an enum are collected in input
-  order before any implicit value is assigned. The underlying type may be
-  stated on any fragment, must be stated on at least one, and must agree
-  wherever it is stated. Member names must be unique across fragments.
+  input file, add members. A fragment inside a static block extends that
+  block's enum, so `Game #{ Mode #@{ Quit } }` extends `Game.Mode`. All
+  fragments of an enum are collected in input order before any implicit value
+  is assigned. The underlying type may be stated on any fragment, must be
+  stated on at least one, and must agree wherever it is stated. Member names
+  must be unique across fragments.
 - **Implicit values.** An integer member is the previous member's value plus 1,
   starting at 0. A `float` or `double` member is the previous value plus 0.5,
-  starting at 0. A text member defaults to its own name. Explicit values are
-  literals of the enum's kind (an optionally negated integer, a decimal number,
-  or a string). Every value must fit the underlying type, including implicit
-  ones; `byte` stops at 255. Duplicate values are allowed.
+  starting at 0. A text member defaults to its own name. Every value must fit
+  the underlying type, including implicit ones; `byte` stops at 255. Duplicate
+  values are allowed.
+- **Explicit values** are constant expressions: integer, decimal, and string
+  literals; members of the same enum (`Monday`) or of any enum (`Day.Monday`,
+  `Game.Mode.Play`); unary `-` and `~`; and `+ - * / % << >> & | ^`, with
+  parentheses. Integer arithmetic is exact (512-bit) and checked against the
+  underlying type only at the end; `/` and `%` truncate toward zero, as at run
+  time. An integer operand in a decimal expression becomes a decimal number.
+  Text values join with `+`. A member may refer to a later one; a cycle is an
+  error. Function calls, `#` constants, and locals are not constants here.
+
+  ```c++
+  Access : int
+  #@{
+      None, Read: 1 << 0, Write: 1 << 1, All: Read | Write
+  }
+  Greeting : string #@{ Hi, There: Hi + " there" }
+  ```
+
 - **Values.** An enum is a type: it works for locals, constants, parameters,
   returns, container fields, conditional results, and worker tasks. A value is
   stored as its member's index (`i32`), so `Print` writes the member name,
@@ -881,15 +908,88 @@ Print(Day.Thursday + 0)            // 10
   concatenation, and implicit conversions use the underlying value: `int n =
   Day.Monday`, `Names.Bob + " and " + Names.Tom`, and `day == 0` all work.
   Two enum values compare by underlying value.
-- **No conversion into an enum.** `Day d = 0` is a type mismatch, enum members
-  are constants, and compound assignment such as `d += 1` is rejected.
+- **Name and Value.** `d.Name` is the member's name as a `name` (convert with
+  `(string)d.Name` for string text) and `d.Value` its underlying value, for
+  any enum value, including a member (`Day.Monday.Name`). They are read-only.
+  A member called `Name` or `Value` is still reached as `Day.Name`.
+- **Conversion into an enum** is explicit: `(Day)x` gives the first member,
+  in declaration order, whose value equals `x`. An integer enum accepts
+  integers, a `float` or `double` enum any number, and a text enum `string` or
+  `name`; the two are compared in their common type, so mixed signed and
+  unsigned 64-bit values need a cast first. A literal is matched at compile
+  time, so `(Day)7` with no such member is an error, and `(Day)2` is a
+  constant that can be a `case` label. Any other value is looked up at run
+  time, and no matching member traps. `IsValid((Day)x)` gives whether a member
+  holds `x`, without trapping. Implicit conversion stays one way: `Day d = 0`
+  is a type mismatch, enum members are constants, and compound assignment such
+  as `d += 1` is rejected.
+- **Native calls.** An `extern "C"` parameter or result may be an enum whose
+  underlying type is `int`, `uint32`, `long`, `uint64`, `float`, or `double`.
+  The native side sees the underlying value; a result that no member holds
+  traps.
+- **Attributes.** An enum marked `[args]`, at file scope or in a static block,
+  provides attribute tags; see "Reflection system in Duck" in the
+  [language README](../README.md).
 - **Modules.** Each module emits private name and value tables. An importing
   module may use an imported enum, including passing it to the library, but
   cannot extend it; add members in the defining module instead.
-- Not yet supported: enums inside static containers, values computed from
-  expressions or other members, conversion from a value back to a member,
-  enum `name` lookup at run time other than `Print`, `[args]` attribute tags,
-  and native `extern "C"` enum parameters.
+- Not yet supported: iterating an enum's members and looking a member up by
+  its name at run time.
+
+## Files
+
+`file` is a handle to an open file on disk. A new `file` is closed; it is
+move-only, and it closes itself when its variable, field, or temporary dies,
+so `Close()` is only needed to finish early. See
+[31_Files.dk](../Examples/Bootstrap/31_Files.dk).
+
+```c++
+file f
+if f.Open("level.txt")             // false when the file cannot be opened
+{
+    string text = f.ReadText()      // the rest of the file, decoded as UTF-8
+    f.Close()
+}
+
+file log
+log.Create("log.txt")              // replaces any existing file
+log.Write("started\n")             // text is written as UTF-8
+
+uint8 [4096] chunk
+long n = f.Read(chunk)             // how many elements arrived; 0 at the end
+```
+
+| Member | Result | Meaning |
+| --- | --- | --- |
+| `Open(path)` | `bool` | Opens an existing file for reading. |
+| `Create(path)` | `bool` | Creates or empties a file for writing. |
+| `Append(path)` | `bool` | Opens a file for writing at its end, creating it when missing. |
+| `IsOpen` | `bool` | Whether the file is open. |
+| `Read(buffer)` | `long` | Fills a number or a fixed array of numbers from the file's raw bytes; counts the elements read. |
+| `Read(pointer, bytes)` | `long` | Reads up to `bytes` bytes into raw memory such as `&chunk[0]`; counts the bytes. |
+| `ReadText()` | `string` | The rest of the file, decoded as UTF-8. |
+| `Write(buffer)` | `long` | Writes a number or a fixed array of numbers as raw bytes; counts the elements written. |
+| `Write(pointer, bytes)` | `long` | Writes `bytes` bytes from raw memory; counts the bytes. |
+| `Write(text)` | `long` | Writes a `string` or `name` as UTF-8; counts the bytes. |
+| `Close()` | | Closes the file; nothing happens if it is closed already. |
+
+- **Paths** are `string` or `name`, relative to the working directory, and
+  may hold any Unicode text. Opening a file closes whatever the value held
+  before. Files are always binary: line endings are read and written as they
+  are.
+- **A closed file** reads and writes nothing: `Read` and `Write` give 0 and
+  `ReadText()` gives `""`, so a failed `Open` needs no special path.
+- **Ownership.** A `file` cannot be copied. Pass it by reference
+  (`file& f`), return a local to move it out of a function, or keep it in a
+  container field, which makes the container move-only and closes the file
+  with it. Static fields, arrays, and collections cannot hold files yet.
+  Methods are called on a stored file, not on a call's result.
+- **Effects.** File calls are I/O, so the task scheduler keeps them in
+  program order with `Print` and native calls.
+- `file` is a type only where a type can stand, as in `file log` or
+  `file& log`. Elsewhere it is an ordinary name, so `void* file` still works.
+- The runtime uses the C library (`_wfopen`, `fread`, `fwrite`, `fclose`,
+  `_fseeki64`, `_ftelli64`) and is emitted into each module that uses files.
 
 ## Arrays
 
