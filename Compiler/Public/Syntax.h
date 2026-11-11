@@ -505,6 +505,9 @@ struct Function {
   // A test from a T{ } block: its stable name, as in Container.Test. Empty
   // for every other function.
   std::string testName;
+  // The braces of a body written in source, so an interface file can drop
+  // the bodies importers never read. Empty text when there are none.
+  Token bodyOpen{}, bodyClose{};
 };
 struct Record {
   Token name;

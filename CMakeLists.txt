@@ -7,7 +7,8 @@ set(DUCK_COMPILER_SOURCES
   CalendarRuntime.cpp WideRuntime.cpp BigRuntime.cpp
   DecimalRuntime.cpp CollectionRuntime.cpp
   Scheduling.cpp TaskRuntime.cpp FuncRuntime.cpp
-  CompileTime.cpp TestRuntime.cpp MarkupRuntime.cpp ScopeRuntime.cpp FileRuntime.cpp)
+  CompileTime.cpp TestRuntime.cpp MarkupRuntime.cpp ScopeRuntime.cpp FileRuntime.cpp
+  Interface.cpp)
 list(TRANSFORM DUCK_COMPILER_SOURCES PREPEND Compiler/Private/)
 add_library(duck_compiler ${DUCK_COMPILER_SOURCES})
 target_compile_features(duck_compiler PUBLIC cxx_std_17)

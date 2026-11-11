@@ -14,6 +14,8 @@ struct Options {
   bool entry = true;
   bool parallel = true;
   bool test = false;
+  // Where to write this module's interface file, and the key to record in it.
+  std::string interface, interfaceKey;
 };
 
 struct SourceFile {
@@ -86,9 +88,25 @@ size_t tokenLength(const duck::Token &token, const std::string &line, size_t sta
 // Prints the token's source line with a caret under the token. A location
 // with no source text behind it, or on a blank line, prints nothing.
 void printSourceLine(const duck::Token &token, const SourceTexts &sources) {
-  const auto source = sources.find(token.source);
+  if (token.text.empty() || token.line < 1 || token.column < 1) return;
 
-  if (source == sources.end() || token.text.empty() || token.line < 1 || token.column < 1) return;
+  // A dependency read from its interface file was never loaded as text.
+  static SourceTexts imported;
+  auto source = sources.find(token.source);
+
+  if (source == sources.end()) {
+    source = imported.find(token.source);
+
+    if (source == imported.end()) {
+      std::ifstream input(token.source, std::ios::binary);
+
+      if (!input) return;
+
+      std::ostringstream text;
+      text << input.rdbuf();
+      source = imported.emplace(token.source, text.str()).first;
+    }
+  }
 
   bool found = false;
   const auto line = lineAt(source->second, token.line, found);
@@ -130,10 +148,11 @@ void printErrors(const std::vector<duck::CompileError> &errors, const SourceText
 }
 
 void printHelp() {
-  std::cout << "Usage: duckc [--library | --test] [--sequential] [--dependency file.dk] <source.dk> "
-               "[more.dk ...] -o <output.ll>\nEmits "
-               "LLVM IR; "
-               "compile and link with clang output.ll -o program\n"
+  std::cout << "Usage: duckc [--library | --test] [--sequential] [--dependency file.dk] [--import module.dki]\n"
+               "             [--interface module.dki [--interface-key KEY]] <source.dk> [more.dk ...] -o <output.ll>\n"
+               "Emits LLVM IR; compile and link with clang output.ll -o program\n"
+               "--import reads a dependency from its interface file instead of its sources.\n"
+               "--interface also writes this module's interface file, recording KEY in it.\n"
                "--test builds a test runner from the T{ } blocks instead of the "
                "program;\nits executable takes --list and name filters.\n"
                "--sequential keeps every call on the calling thread. At run "
@@ -169,6 +188,24 @@ void addSource(Inputs &inputs, SourceTexts &texts, const std::string &path, bool
   inputs.sources.push_back({dependency, std::move(tokens)});
 }
 
+// A dependency read from its interface file: tokens already lexed and
+// preprocessed, with the bodies importers never read left empty.
+void addImport(Inputs &inputs, const std::string &path) {
+  std::ifstream input(path, std::ios::binary);
+
+  if (!input) throw std::runtime_error(path + ": cannot open interface file");
+
+  std::ostringstream text;
+  text << input.rdbuf();
+  std::string key;
+
+  for (auto &tokens : duck::readInterface(text.str(), path, key)) {
+    duck::collectContainerNames(tokens, inputs.containerNames);
+    duck::collectMacros(tokens, inputs.macros);
+    inputs.sources.push_back({true, std::move(tokens)});
+  }
+}
+
 // Flags and inputs may mix freely; the last two arguments are always -o <path>.
 Inputs readArguments(int argc, char **argv, const fs::path &outputPath, Options &options, SourceTexts &texts) {
   Inputs inputs;
@@ -188,6 +225,16 @@ Inputs readArguments(int argc, char **argv, const fs::path &outputPath, Options 
 
     if (path == "--sequential") {
       options.parallel = false;
+      continue;
+    }
+
+    if (path == "--import" || path == "--interface" || path == "--interface-key") {
+      if (++i >= argc - 2) throw std::runtime_error(path + " requires a value");
+
+      if (path == "--import") addImport(inputs, argv[i]);
+      else if (path == "--interface") options.interface = argv[i];
+      else options.interfaceKey = argv[i];
+
       continue;
     }
 
@@ -212,17 +259,29 @@ void stripDependencyBody(duck::Program &unit) {
   unit.tests.clear();
 }
 
+void writeOutput(const fs::path &outputPath, const std::string &ir);
+
 std::string compileInputs(Inputs inputs, const Options &options) {
   std::vector<duck::Program> units, importedUnits;
+  std::vector<std::vector<duck::Token>> interface;
 
   for (auto &[dependency, tokens] : inputs.sources) {
+    // The interface is made from the tokens the parser sees, before parsing
+    // consumes them, and the parse that tells which bodies importers read.
+    std::vector<duck::Token> copy;
+
+    if (!dependency && !options.interface.empty()) copy = tokens;
+
     auto unit = duck::parse(std::move(tokens), inputs.containerNames, inputs.macros);
 
     if (dependency) {
       stripDependencyBody(unit);
       importedUnits.push_back(std::move(unit));
-    } else
+    } else {
+      if (!options.interface.empty()) interface.push_back(duck::interfaceTokens(copy, unit));
+
       units.push_back(std::move(unit));
+    }
   }
 
   if (units.empty()) throw std::runtime_error("at least one source file is required");
@@ -236,7 +295,16 @@ std::string compileInputs(Inputs inputs, const Options &options) {
   if (options.test) duck::enableTests(program);
 
   duck::phase("combine units");
-  return duck::compileModule(program, imports, options.entry && !options.test, options.parallel, options.test);
+  auto ir = duck::compileModule(program, imports, options.entry && !options.test, options.parallel, options.test);
+
+  // Written only once the module compiles, so a dependent never imports one
+  // that would not.
+  if (!options.interface.empty()) {
+    writeOutput(fs::u8path(options.interface), duck::writeInterface(options.interfaceKey, interface));
+    duck::phase("write interface");
+  }
+
+  return ir;
 }
 
 void writeOutput(const fs::path &outputPath, const std::string &ir) {

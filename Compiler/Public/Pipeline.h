@@ -37,6 +37,15 @@ void collectMacros(const std::vector<Token> &tokens, MacroTable &macros);
 Program parse(std::vector<Token> tokens);
 Program parse(std::vector<Token> tokens, const std::set<std::string> &names);
 Program parse(std::vector<Token> tokens, const std::set<std::string> &names, const MacroTable &macros);
+// Interface files (.dki) let a dependent module skip lexing and most parsing
+// of its dependencies. One holds each source file's preprocessed tokens with
+// the function bodies emptied that an importer never reads; the bodies kept
+// are those an importer derives signature facts from (ownership of a pointer
+// result, non-escaping heap pointer parameters, markup fields). `unit` is
+// the parse of `tokens`. `key` identifies the inputs the file was made from.
+std::vector<Token> interfaceTokens(const std::vector<Token> &tokens, const Program &unit);
+std::string writeInterface(const std::string &key, const std::vector<std::vector<Token>> &files);
+std::vector<std::vector<Token>> readInterface(const std::string &text, const std::string &path, std::string &key);
 // Keep units in input order. Combining is a barrier before declaration
 // collection.
 Program combineUnits(std::vector<Program> units);

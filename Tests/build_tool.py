@@ -335,6 +335,47 @@ class Projects(unittest.TestCase):
         self.assertRegex(output, r"Built Demo in \d+\.\ds: ")
         self.assertNotIn("core.ll", output)
 
+    def test_interfaces_are_reused_until_sources_change(self):
+        (self.root / "core.dk").write_text(
+            "Item\n{\n    int Value = 7\n}\n"
+            "Item* Make()\n{\n    Item* made()\n    return ::made\n}\n"
+            "int Secret()\n{\n    return 12345 + 1\n}\n"
+            "int Add(int a, int b) { return a + b }\n", encoding="utf-8")
+        (self.root / "app.dk").write_text(
+            "Main()\n{\n    owner :: Make()\n    Print(owner.Value + Add(20, 22) + Secret())\n}\n", encoding="utf-8")
+        output = self.root / ".duck/build/debug"
+        exe = output / ("Demo.exe" if os.name == "nt" else "Demo")
+
+        first = self.invoke("--verbose").stdout
+        self.assertIn("0 interface(s) up to date", first)
+        self.assertNotIn("--import", first)
+        self.assertFalse((output / "app.dki").exists())  # The entry module has no importers.
+        interface = (output / "core.dki").read_text(encoding="utf-8")
+        self.assertIn("::", interface)            # Make's body decides who owns its result.
+        self.assertNotIn("12345", interface)      # Secret's body is never read by importers.
+        from_sources = (output / "app.ll").read_bytes()
+
+        second = self.invoke("--verbose").stdout
+        self.assertIn("1 interface(s) up to date", second)
+        self.assertIn("--import", second)
+        self.assertEqual((output / "app.ll").read_bytes(), from_sources)
+        self.assertEqual(subprocess.check_output([str(exe)], text=True).strip(), "12395")
+
+        with open(self.root / "core.dk", "a", encoding="utf-8") as core:
+            core.write("int Sub(int a, int b) { return a - b }\n")
+        third = self.invoke("--verbose").stdout
+        self.assertIn("0 interface(s) up to date", third)
+        self.assertNotIn("--import", third)
+        self.assertIn("Sub", (output / "core.dki").read_text(encoding="utf-8"))
+
+    def test_damaged_interface_is_not_imported(self):
+        self.invoke()
+        interface = self.root / ".duck/build/debug/core.dki"
+        interface.write_text("duck-interface 1\nkey 3 bad\nfiles 0\n", encoding="utf-8")
+        result = self.invoke("--verbose").stdout
+        self.assertIn("0 interface(s) up to date", result)
+        self.assertNotIn("--import", result)
+
     def test_broken_dependency_is_reported_once(self):
         (self.root / "core.dk").write_text("int Add(int a, int b) {", encoding="utf-8")
         result = self.invoke(success=False)

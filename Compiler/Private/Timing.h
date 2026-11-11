@@ -11,6 +11,9 @@ namespace duck {
 inline auto phaseStart = std::chrono::steady_clock::now();
 
 inline bool timingEnabled() {
+#ifdef _MSC_VER
+#pragma warning(suppress : 4996) // Only checks whether the variable is set.
+#endif
   static const bool enabled = std::getenv("DUCKC_TIMINGS") != nullptr;
   return enabled;
 }

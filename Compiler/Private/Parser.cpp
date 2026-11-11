@@ -1428,9 +1428,11 @@ class Parser {
 
     return e;
   }
+  // The braces of the block parsed last, for Function::bodyOpen/bodyClose.
+  Token blockOpen{}, blockClose{};
   std::vector<std::unique_ptr<Stmt>> block() {
     lines();
-    expect("{");
+    const auto open = expect("{");
     lines();
     hygiene.emplace_back();
     std::vector<std::unique_ptr<Stmt>> result;
@@ -1446,7 +1448,8 @@ class Parser {
     }
 
     hygiene.pop_back();
-    expect("}");
+    blockClose = expect("}");
+    blockOpen = open;
     return result;
   }
   using Statements = std::vector<std::unique_ptr<Stmt>>;
@@ -2363,6 +2366,8 @@ class Parser {
       returnsOwner = false;
       const bool outerMarkup = std::exchange(returnsMarkup, markupValue(f.result));
       f.body = block();
+      f.bodyOpen = blockOpen;
+      f.bodyClose = blockClose;
       returnsMarkup = outerMarkup;
 
       if (returnsOwner) {

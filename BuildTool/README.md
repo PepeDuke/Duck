@@ -96,7 +96,8 @@ implementation/declarations. The entry module must be enabled for a full build.
 `--module` builds only the selected module and dependencies, and never links an
 executable, even when selecting the entry module.
 
-Each module produces `<module>.ll` and `<module>.o`. Linking uses the selected
+Each module produces `<module>.ll` and `<module>.o`, and a library module also
+`<module>.dki` (see below). Linking uses the selected
 object list, never a wildcard of output files. Disabled artifacts may remain
 on disk but are excluded. Outputs live under `<build_dir>/debug` or
 `<build_dir>/release`. These profiles select `-O0` and `-O2`; source-level debug
@@ -117,8 +118,20 @@ Public/private exports and module-specific visibility remain future work.
 The compiler accepts `--library` to omit the entry wrapper and repeated
 `--dependency path.dk` options to read signatures without lowering dependency
 bodies. The build tool compiles those bodies into their own module objects.
-Interfaces are currently derived from dependency sources: standalone binary
-interface files and distributing libraries without sources are future work.
+
+Compiling a library module also writes `<module>.dki`, an interface file:
+the module's preprocessed tokens with the function bodies emptied that no
+importer reads (it keeps those that return a pointer, take a heap pointer by
+value, or contain markup, since importers derive ownership, escape and field
+facts from them). It records a key covering the compiler binary, the module's
+source paths and text, and its dependencies' keys. When the published
+interface's key matches, a dependent compiles with `--import <module>.dki`
+instead of the module's sources, which skips lexing them and parsing most of
+them; the build prints how many interfaces were up to date. A stale or missing
+interface is never waited for: the dependent reads the sources, and the
+module's own compile publishes a fresh interface for the next build. Modules
+are still always recompiled, and distributing libraries without sources is
+future work.
 
 `libraries` accepts linker names (`example` becomes `-lexample`) or explicit
 `.lib`, `.a`, `.so`, `.dylib`, `.o`, or `.obj` paths. `library_paths` supplies

@@ -359,14 +359,32 @@ struct WorkDirectory {
 };
 
 using Plan = std::vector<std::pair<std::string, Paths>>;
-// mode is "--library", "--test", or empty for an entry module.
+
+// Interface files (.dki): compiling a library module also writes one, and a
+// dependent reads it in place of the module's sources while its key, which
+// covers everything that shapes it, still matches. A stale one is not waited
+// for: the dependent reads the sources as before, and the module's own compile
+// writes a fresh interface for the next build.
+struct Interfaces {
+    std::map<std::string, std::string> keys; // Every planned module's current key.
+    std::map<std::string, fs::path> fresh;   // Published interfaces whose key matches.
+};
+
+// mode is "--library", "--test", or empty for an entry module. A dependency
+// with a fresh interface is imported from it instead of from its sources.
 static Strings compileCommand(const Project& project, const Plan& sources, const std::string& compiler,
                               const std::string& id, const std::string& mode, const fs::path& ir,
-                              bool sequential = false) {
+                              bool sequential = false, const Interfaces* interfaces = nullptr) {
     Strings command{compiler};
     if (!mode.empty()) command.push_back(mode);
     if (sequential) command.push_back("--sequential");
     for (const auto& dependency : project.modules.at(id).depends) {
+        if (interfaces) {
+            if (auto found = interfaces->fresh.find(dependency); found != interfaces->fresh.end()) {
+                command.insert(command.end(), {"--import", found->second.u8string()});
+                continue;
+            }
+        }
         auto found = std::find_if(sources.begin(), sources.end(), [&](const auto& item) { return item.first == dependency; });
         for (const auto& source : found->second) command.insert(command.end(), {"--dependency", source.u8string()});
     }
@@ -381,6 +399,60 @@ static std::string readFile(const fs::path& path) {
     std::stringstream text;
     text << input.rdbuf();
     return text.str();
+}
+
+// FNV-1a over each part, with each part's length mixed in so parts cannot
+// run together.
+static void mix(uint64_t& hash, const std::string& bytes) {
+    for (unsigned char c : bytes + '\0' + std::to_string(bytes.size())) {
+        hash ^= c;
+        hash *= 1099511628211ull;
+    }
+}
+
+// The key recorded in an interface file, or empty if there is none.
+static std::string storedKey(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    std::string header, keyLine;
+    if (!std::getline(input, header) || header != "duck-interface 1" || !std::getline(input, keyLine)) return "";
+    std::istringstream fields(keyLine);
+    std::string word, key;
+    size_t length = 0;
+    if (!(fields >> word >> length >> key) || word != "key" || key.size() != length) return "";
+    return key;
+}
+
+// A module's key covers the compiler binary, its own sources' paths and text,
+// and its dependencies' keys, which cover theirs: a dependency's container
+// names change how the module's own files parse.
+static Interfaces interfaces(const Project& project, const Plan& sources, const std::string& compiler,
+                             const fs::path& destination) {
+    Interfaces result;
+    std::error_code error;
+    const auto compilerPath = fs::u8path(compiler);
+    const auto stamp = fs::last_write_time(compilerPath, error).time_since_epoch().count();
+    const auto size = error ? 0 : fs::file_size(compilerPath, error);
+    std::function<const std::string&(const std::string&)> key = [&](const std::string& id) -> const std::string& {
+        if (auto found = result.keys.find(id); found != result.keys.end()) return found->second;
+        uint64_t hash = 14695981039346656037ull;
+        for (const auto& part : {std::string("duck-interface 1"), compiler, std::to_string(size), std::to_string(stamp), id})
+            mix(hash, part);
+        const auto own = std::find_if(sources.begin(), sources.end(), [&](const auto& item) { return item.first == id; });
+        for (const auto& file : own->second) {
+            mix(hash, file.u8string());
+            mix(hash, readFile(file));
+        }
+        for (const auto& dependency : project.modules.at(id).depends) mix(hash, key(dependency));
+        char text[17];
+        std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(hash));
+        return result.keys[id] = text;
+    };
+    for (const auto& [id, files] : sources) {
+        (void)files;
+        const auto path = destination / (id + ".dki");
+        if (id != project.entry && storedKey(path) == key(id)) result.fresh[id] = path;
+    }
+    return result;
 }
 
 // Builds each module's tests into its own executable under <build>/<profile>/tests:
@@ -654,7 +726,7 @@ struct ModuleBuild {
 // build and an error in a dependency is not repeated by each of its dependents.
 static void compileModules(const Project& project, const Plan& sources, const std::string& compiler,
                            const std::string& clang, const std::string& optimize, const fs::path& directory,
-                           Progress& progress, bool verbose) {
+                           Progress& progress, bool verbose, const Interfaces& interfaces) {
     std::vector<ModuleBuild> builds(sources.size());
     std::mutex mutex;
     std::condition_variable finished;
@@ -681,7 +753,13 @@ static void compileModules(const Project& project, const Plan& sources, const st
             };
             const auto ir = directory / (id + ".ll"), object = directory / (id + ".o");
             try {
-                step("duckc", compileCommand(project, sources, compiler, id, id != project.entry ? "--library" : "", ir));
+                const bool library = id != project.entry;
+                auto command = compileCommand(project, sources, compiler, id, library ? "--library" : "", ir, false, &interfaces);
+                if (library) {
+                    const auto dki = directory / (id + ".dki");
+                    command.insert(command.end() - 2, {"--interface", dki.u8string(), "--interface-key", interfaces.keys.at(id)});
+                }
+                step("duckc", command);
                 step("clang", {clang, "-c", optimize, ir.u8string(), "-o", object.u8string()});
             } catch (const std::exception& error) {
                 build.error = error.what();
@@ -751,11 +829,12 @@ static void build(const Options& options, const fs::path& bin) {
     size_t width = 0;
     for (const auto& source : sources) width = std::max(width, source.first.size());
     Progress progress(sources.size() * 2 + (linking ? 1 : 0), width);
+    const auto known = interfaces(project, sources, compiler, destination);
     std::cout << "duck build: " << sources.size() << " module(s), " << progress.total << " steps (" << options.profile
-              << ")" << std::endl;
+              << "), " << known.fresh.size() << " interface(s) up to date" << std::endl;
     WorkDirectory work(destination);
     compileModules(project, sources, compiler, clang, options.profile == "debug" ? "-O0" : "-O2", work.path, progress,
-                   options.verbose);
+                   options.verbose, known);
     Paths artifacts;
     Strings objects;
     for (const auto& [id, files] : sources) {
@@ -763,6 +842,7 @@ static void build(const Options& options, const fs::path& bin) {
         (void)files;
         objects.push_back(object.u8string());
         artifacts.insert(artifacts.end(), {ir, object});
+        if (id != project.entry) artifacts.push_back(work.path / (id + ".dki"));
     }
     if (linking) {
         auto output = work.path / project.projectName;
