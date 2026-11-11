@@ -166,9 +166,10 @@ std::string tableSymbol(const DispatchTable &table) {
 }
 std::string tableType(const Symbols &symbols, const std::string &record) {
   std::string type = "{ i64, i64, ptr";
+  const auto names = symbols.dispatchNames(record).size();
 
   for (size_t i = 0; i < symbols.records.at(record).parents.size(); ++i) type += ", ptr";
-  for (size_t i = 0; i < symbols.dispatchNames(record).size(); ++i) type += ", ptr, i64, ptr";
+  for (size_t i = 0; i < names; ++i) type += ", ptr, i64, ptr";
 
   return type + " }";
 }
@@ -217,6 +218,21 @@ class Generator {
   const Symbols &functions;
   const FunctionAnalysis &analysis;
   std::string symbolPrefix;
+  // A container's dispatch names and table layout, built once per function.
+  // Every dynamically dispatched call needs them, and building them walks all
+  // of the container's methods, which dominated lowering for big containers.
+  std::map<std::string, std::vector<std::string>> dispatchNameCache;
+  std::map<std::string, std::string> tableLayoutCache;
+  const std::vector<std::string> &dispatchNames(const std::string &record) {
+    auto found = dispatchNameCache.find(record);
+    if (found == dispatchNameCache.end()) found = dispatchNameCache.emplace(record, functions.dispatchNames(record)).first;
+    return found->second;
+  }
+  const std::string &tableLayout(const std::string &record) {
+    auto found = tableLayoutCache.find(record);
+    if (found == tableLayoutCache.end()) found = tableLayoutCache.emplace(record, tableType(functions, record)).first;
+    return found->second;
+  }
   std::vector<std::map<std::string, Binding>> scopes;
   std::ostringstream globals, code, allocations;
   struct Loop {
@@ -369,7 +385,7 @@ class Generator {
   std::string childTable(std::string vt, std::string record, const std::vector<size_t> &path) {
     for (auto index : path) {
       auto slot = fresh(), child = fresh();
-      emit(slot + " = getelementptr " + tableType(functions, record) + ", ptr " + vt + ", i32 0, i32 " +
+      emit(slot + " = getelementptr " + tableLayout(record) + ", ptr " + vt + ", i32 0, i32 " +
            std::to_string(3 + index));
       emit(child + " = load ptr, ptr " + slot);
       vt = child;
@@ -452,8 +468,8 @@ class Generator {
                                 std::string &callee) {
     if (r.rooted && r.view.empty() && dispatched(target, true)) {
       const auto &record = r.root.type.record;
-      const auto type = tableType(functions, record);
-      const auto names = functions.dispatchNames(record);
+      const auto &type = tableLayout(record);
+      const auto &names = dispatchNames(record);
       const auto first = 3 + functions.records.at(record).parents.size() +
                          3 * (std::find(names.begin(), names.end(), memberName(target)) - names.begin());
       auto field = [&](size_t index, const std::string &ir) {
@@ -612,7 +628,7 @@ class Generator {
     if (binding.table.empty() || binding.table[0] != '%' || !recordValue(binding.type)) return;
 
     auto slot = fresh(), depth = fresh(), whole = fresh();
-    emit(slot + " = getelementptr " + tableType(functions, binding.type.record) + ", ptr " + binding.table +
+    emit(slot + " = getelementptr " + tableLayout(binding.type.record) + ", ptr " + binding.table +
          ", i32 0, i32 1");
     emit(depth + " = load i64, ptr " + slot);
     emit(whole + " = icmp eq i64 " + depth + ", 0");
@@ -4486,7 +4502,7 @@ class Generator {
       emit(descriptor + " = call ptr @duck.markup$descriptor(ptr " + r.address + ")");
       emit(object + " = call ptr @duck.markup$payload(ptr " + r.address + ")");
     } else if (r.rooted && r.view.empty()) {
-      const auto layout = tableType(functions, r.root.type.record);
+      const auto &layout = tableLayout(r.root.type.record);
       auto ownSlot = fresh(), own = fresh(), typeSlot = fresh(), back = fresh();
       descriptor = fresh();
       object = fresh();

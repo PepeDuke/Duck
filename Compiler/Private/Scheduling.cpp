@@ -186,20 +186,30 @@ class EffectWalker {
 
     if (alsoRead) current.reads.insert(found->resource);
   }
+  // Cached per method for this walker: the answer scans every container, and
+  // a function calls the same methods over and over.
+  mutable std::map<std::string, bool> overridableCache;
   bool overridable(const std::string &key) const {
     if (!dispatched(key, true)) return false;
     if (library) return true;
 
+    if (auto cached = overridableCache.find(key); cached != overridableCache.end()) return cached->second;
+
     const auto owner = key.substr(0, key.rfind('.'));
     const auto member = memberName(key);
+    bool result = false;
 
     for (const auto &[record, info] : symbols.records) {
       (void)info;
 
-      if (record != owner && symbols.derivesFrom(record, owner) && symbols.count(methodKey(record, member))) return true;
+      if (record != owner && symbols.derivesFrom(record, owner) && symbols.count(methodKey(record, member))) {
+        result = true;
+        break;
+      }
     }
 
-    return false;
+    overridableCache.emplace(key, result);
+    return result;
   }
   // Rewrites a callee's parameter-relative effects in the caller's terms.
   EffectSet apply(const EffectSummary &callee, const std::map<size_t, std::optional<Place>> &bound) {

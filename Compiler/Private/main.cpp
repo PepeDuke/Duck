@@ -1,4 +1,5 @@
 #include "Pipeline.h"
+#include "Timing.h"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -228,11 +229,13 @@ std::string compileInputs(Inputs inputs, const Options &options) {
 
   if (options.test && !options.entry) throw std::runtime_error("--test and --library cannot be combined");
 
+  duck::phase("parse");
   auto program = duck::combineUnits(std::move(units));
   auto imports = duck::combineUnits(std::move(importedUnits));
 
   if (options.test) duck::enableTests(program);
 
+  duck::phase("combine units");
   return duck::compileModule(program, imports, options.entry && !options.test, options.parallel, options.test);
 }
 
@@ -262,7 +265,10 @@ int main(int argc, char **argv) {
     const fs::path outputPath(argv[argc - 1]);
     Options options;
     auto inputs = readArguments(argc, argv, outputPath, options, texts);
-    writeOutput(outputPath, compileInputs(std::move(inputs), options));
+    duck::phase("read, lex, preprocess");
+    const auto ir = compileInputs(std::move(inputs), options);
+    writeOutput(outputPath, ir);
+    duck::phase("write output");
     return 0;
   } catch (const duck::CompileErrors &e) {
     printErrors(e.errors, texts);

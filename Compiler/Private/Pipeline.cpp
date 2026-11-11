@@ -1,4 +1,5 @@
 #include "Pipeline.h"
+#include "Timing.h"
 #include <algorithm>
 
 namespace duck {
@@ -405,7 +406,9 @@ std::string compileModule(const Program &program, const Program &imports,
   // A native declaration spells an enum as its underlying type.
   declarations.enums.insert(symbols.enums.begin(), symbols.enums.end());
 
+  phase("symbols");
   const auto generated = generateInitializers(symbols, declarations);
+  phase("generate initializers");
   std::vector<FunctionAnalysis> analyses;
   // Signatures are settled and each body is checked on its own, so an error
   // in one function cannot cause a false one in another: report them all.
@@ -431,20 +434,25 @@ std::string compileModule(const Program &program, const Program &imports,
 
   if (!errors.empty()) throw CompileErrors(std::move(errors));
 
+  phase("analyze functions");
   evaluateCompileTimeCalls(evaluatedFunctions, analyses);
   markUnwinders(analyses, evaluatedFunctions, imports);
   // Exec paths are literals, so a file nothing runs is known here. Its
   // statements would otherwise be dead code that looks like it executes.
   rejectUnusedScripts(program, analyses);
+  phase("compile-time calls");
   {
     // Imported bodies are not visible, so their effects stay unknown.
     const auto effects = summarizeEffects(program, analyses, symbols, entry);
+    phase("summarize effects");
 
     for (size_t i = 0; i < program.size(); ++i) planOrderedBlocks(program[i], effects, symbols, analyses[i], entry);
+    phase("plan ordered blocks");
 
     if (parallel)
       for (size_t i = 0; i < program.size(); ++i)
         scheduleTasks(program, i, effects, symbols, analyses, entry);
+    phase("schedule tasks");
   }
   std::set<std::string> nativeSymbols;
 
@@ -456,13 +464,26 @@ std::string compileModule(const Program &program, const Program &imports,
 
   std::vector<FunctionIR> fragments;
 
-  for (size_t i = 0; i < program.size(); ++i)
+  std::vector<std::pair<double, const Function *>> lowering;
+
+  for (size_t i = 0; i < program.size(); ++i) {
+    const auto start = std::chrono::steady_clock::now();
     fragments.push_back(lowerFunction(program[i], symbols, analyses[i]));
+    if (timingEnabled())
+      lowering.push_back({std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(), &program[i]});
+  }
+
+  // The functions that took longest to lower, since that phase usually dominates.
+  std::sort(lowering.begin(), lowering.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+  for (size_t i = 0; i < lowering.size() && i < 10; ++i)
+    std::fprintf(stderr, "duckc:   lower %-40s %8.3fs  %s:%d\n", lowering[i].second->name.text.c_str(), lowering[i].first,
+                 lowering[i].second->name.source.c_str(), lowering[i].second->name.line);
 
   // Generated initializers run sequentially; they are never task candidates.
   for (size_t i = 0; i < generated.size(); ++i)
     fragments.push_back(lowerFunction(generated[i], symbols, analyses[program.size() + i]));
 
+  phase("lower functions");
   // A heap cleanup can release a func field in a function that never touches one.
   markFieldRuntimes(symbols, fragments);
   std::set<std::string> cleanups, destroys;
@@ -496,6 +517,9 @@ std::string compileModule(const Program &program, const Program &imports,
       assembleModule(fragments, entry, nativeSymbols,
                      entry && !symbols.at("Main").parameters.empty(), fileFields(symbols)) +
       runner;
-  return emitNativeMathTypes(symbols, module) + module;
+  phase("emit module");
+  auto result = emitNativeMathTypes(symbols, module) + module;
+  phase("emit native math types");
+  return result;
 }
 } // namespace duck
