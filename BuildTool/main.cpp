@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -141,7 +142,7 @@ struct Options {
     fs::path project;
     std::string module, profile = "debug", compiler, clang;
     Strings enable, disable, filters;
-    bool list = false, compareSchedules = false;
+    bool list = false, compareSchedules = false, verbose = false;
     int samples = 5;
 };
 struct Link {
@@ -610,10 +611,40 @@ static int test(const Options& options, const fs::path& bin) {
     return 0;
 }
 
+using Clock = std::chrono::steady_clock;
+
+static std::string seconds(Clock::duration took) {
+    char text[32];
+    std::snprintf(text, sizeof(text), "%.1fs", std::chrono::duration<double>(took).count());
+    return text;
+}
+
+// Prints a "[N/X] tool subject time" line as each build step finishes, so a
+// long build shows how far along it is. Steps finish in any order, so these
+// lines are live; diagnostics are still replayed in build order. The lock is
+// shared by every build print so lines from worker threads never interleave.
+struct Progress {
+    size_t total, done = 0, width;
+    std::mutex print;
+
+    Progress(size_t total, size_t width) : total(total), width(width) {}
+
+    void finished(const std::string& tool, const std::string& subject, Clock::duration took) {
+        std::lock_guard<std::mutex> lock(print);
+        const auto digits = std::to_string(total).size();
+        auto count = std::to_string(++done);
+        count.insert(0, digits - count.size(), ' ');
+        auto name = subject;
+        if (name.size() < width) name.append(width - name.size(), ' ');
+        std::cout << '[' << count << '/' << total << "] " << tool << ' ' << name << "  " << seconds(took) << std::endl;
+    }
+};
+
 struct ModuleStep { std::string command, output; };
 struct ModuleBuild {
     std::vector<ModuleStep> steps;
-    std::string error;
+    std::string error, running;
+    Clock::time_point since;
     bool finished = false;
 };
 
@@ -622,7 +653,8 @@ struct ModuleBuild {
 // in build order and stop at the first failure, so output matches a serial
 // build and an error in a dependency is not repeated by each of its dependents.
 static void compileModules(const Project& project, const Plan& sources, const std::string& compiler,
-                           const std::string& clang, const std::string& optimize, const fs::path& directory) {
+                           const std::string& clang, const std::string& optimize, const fs::path& directory,
+                           Progress& progress, bool verbose) {
     std::vector<ModuleBuild> builds(sources.size());
     std::mutex mutex;
     std::condition_variable finished;
@@ -635,15 +667,22 @@ static void compileModules(const Project& project, const Plan& sources, const st
             const size_t index = next++;
             if (index >= sources.size()) return;
             auto& build = builds[index];
-            const auto step = [&](const Strings& command) {
-                build.steps.push_back({duckbuild::commandLine(command), {}});
-                run(command, build.steps.back().output);
-            };
             const auto& id = sources[index].first;
+            const auto step = [&](const char* tool, const Strings& command) {
+                build.steps.push_back({duckbuild::commandLine(command), {}});
+                const auto start = Clock::now();
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    build.running = tool;
+                    build.since = start;
+                }
+                run(command, build.steps.back().output);
+                if (!stop) progress.finished(tool, id, Clock::now() - start);
+            };
             const auto ir = directory / (id + ".ll"), object = directory / (id + ".o");
             try {
-                step(compileCommand(project, sources, compiler, id, id != project.entry ? "--library" : "", ir));
-                step({clang, "-c", optimize, ir.u8string(), "-o", object.u8string()});
+                step("duckc", compileCommand(project, sources, compiler, id, id != project.entry ? "--library" : "", ir));
+                step("clang", {clang, "-c", optimize, ir.u8string(), "-o", object.u8string()});
             } catch (const std::exception& error) {
                 build.error = error.what();
                 stop = true;
@@ -660,13 +699,31 @@ static void compileModules(const Project& project, const Plan& sources, const st
     for (size_t i = 0; i < count; ++i) workers.emplace_back(worker);
     std::string failure;
     for (const auto& build : builds) {
-        {
-            std::unique_lock<std::mutex> lock(mutex);
-            finished.wait(lock, [&] { return build.finished; });
+        // While a step runs long, say which ones are still going, so a slow
+        // or stuck tool is visible instead of a silent pause.
+        for (;;) {
+            std::string running;
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                if (finished.wait_for(lock, std::chrono::seconds(15), [&] { return build.finished; })) break;
+                const auto now = Clock::now();
+                for (size_t i = 0; i < builds.size(); ++i) {
+                    if (builds[i].finished || builds[i].running.empty()) continue;
+                    if (!running.empty()) running += ", ";
+                    running += builds[i].running + " " + sources[i].first + " (" + seconds(now - builds[i].since) + ")";
+                }
+            }
+            if (!running.empty() && !stop) {
+                std::lock_guard<std::mutex> lock(progress.print);
+                std::cout << "      still running: " << running << std::endl;
+            }
         }
-        for (const auto& step : build.steps) {
-            std::cout << step.command << std::endl;
-            std::cerr << step.output << std::flush;
+        {
+            std::lock_guard<std::mutex> lock(progress.print);
+            for (const auto& step : build.steps) {
+                if (verbose) std::cout << step.command << std::endl;
+                std::cerr << step.output << std::flush;
+            }
         }
         if (!build.error.empty()) {
             failure = build.error;
@@ -689,8 +746,16 @@ static void build(const Options& options, const fs::path& bin) {
         project.linkFlags(project.link, flags);
     }
     const auto destination = project.buildDir / options.profile;
+    const bool linking = options.module.empty() && !project.entry.empty();
+    const auto started = Clock::now();
+    size_t width = 0;
+    for (const auto& source : sources) width = std::max(width, source.first.size());
+    Progress progress(sources.size() * 2 + (linking ? 1 : 0), width);
+    std::cout << "duck build: " << sources.size() << " module(s), " << progress.total << " steps (" << options.profile
+              << ")" << std::endl;
     WorkDirectory work(destination);
-    compileModules(project, sources, compiler, clang, options.profile == "debug" ? "-O0" : "-O2", work.path);
+    compileModules(project, sources, compiler, clang, options.profile == "debug" ? "-O0" : "-O2", work.path, progress,
+                   options.verbose);
     Paths artifacts;
     Strings objects;
     for (const auto& [id, files] : sources) {
@@ -699,7 +764,7 @@ static void build(const Options& options, const fs::path& bin) {
         objects.push_back(object.u8string());
         artifacts.insert(artifacts.end(), {ir, object});
     }
-    if (options.module.empty() && !project.entry.empty()) {
+    if (linking) {
         auto output = work.path / project.projectName;
 #ifdef _WIN32
         output += ".exe";
@@ -708,19 +773,22 @@ static void build(const Options& options, const fs::path& bin) {
         command.insert(command.end(), objects.begin(), objects.end());
         command.insert(command.end(), flags.begin(), flags.end());
         command.insert(command.end(), {"-o", output.u8string()});
-        run(command);
+        const auto start = Clock::now();
+        run(command, options.verbose);
+        progress.finished("link ", output.filename().u8string(), Clock::now() - start);
         artifacts.push_back(output);
     }
     for (const auto& artifact : artifacts) duckbuild::publish(artifact, destination / artifact.filename());
     std::cout << "Built " << (options.module.empty() ? project.projectName : "module " + options.module)
-              << ": " << destination.u8string() << '\n';
+              << " in " << seconds(Clock::now() - started) << ": " << destination.u8string() << '\n';
 }
 
 static void help() {
     std::cout << "Build modular Duck projects (.dkp, TOML syntax)\n"
         "Usage: duck build PROJECT [--module MODULE] [--enable MODULE] [--disable MODULE]\n"
-        "                        [--profile debug|release] [--compiler PATH] [--clang PATH]\n"
+        "                        [--profile debug|release] [--compiler PATH] [--clang PATH] [--verbose]\n"
         "--module builds objects for the module and its dependencies without linking.\n"
+        "Each step prints [done/total] as it finishes; --verbose also prints every tool command.\n"
         "--enable and --disable may be repeated. Tool overrides resolve from the working directory.\n"
         "\n"
         "Usage: duck test PROJECT [--module MODULE] [--filter TEXT] [--list] [build options above]\n"
@@ -748,6 +816,10 @@ static int mainImpl(const Strings& arguments) {
             }
             if (testing && argument == "--list") {
                 options.list = true;
+                continue;
+            }
+            if (!testing && argument == "--verbose") {
+                options.verbose = true;
                 continue;
             }
             if (testing && argument == "--compare-schedules") {

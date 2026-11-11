@@ -322,9 +322,18 @@ class Projects(unittest.TestCase):
         self.assertIn("library module cannot define Main", result.stderr)
 
     def test_modules_report_in_build_order(self):
-        output = self.invoke().stdout
+        output = self.invoke("--verbose").stdout
         positions = [output.index(name) for name in ("core.ll", "core.o", "app.ll", "app.o", "Demo")]
         self.assertEqual(positions, sorted(positions), output)
+
+    def test_progress_counts_steps(self):
+        output = self.invoke().stdout
+        self.assertIn("2 module(s), 5 steps (debug)", output)
+        for step in range(1, 6):
+            self.assertIn(f"[{step}/5] ", output)
+        self.assertRegex(output, r"\[5/5\] link  Demo")
+        self.assertRegex(output, r"Built Demo in \d+\.\ds: ")
+        self.assertNotIn("core.ll", output)
 
     def test_broken_dependency_is_reported_once(self):
         (self.root / "core.dk").write_text("int Add(int a, int b) {", encoding="utf-8")

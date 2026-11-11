@@ -1061,13 +1061,38 @@ class Generator {
   // the others in a fresh handle, adding the entries in order.
   Value literal(const Expr &e, const Type &type) {
     if (fixedArray(type)) {
-      std::string value = "zeroinitializer";
+      std::vector<Value> elements;
+      elements.reserve(e.args.size());
+      for (const auto &arg : e.args) elements.push_back(expression(*arg));
 
-      for (size_t i = 0; i < e.args.size(); ++i) {
-        const auto element = expression(*e.args[i]);
+      // Constant elements go into one constant aggregate and only the others
+      // are inserted. A chain of one insertvalue per element copies the whole
+      // array each step, and clang -O0 takes minutes on a few thousand of them
+      // (embedded SPIR-V, for example).
+      const auto constant = [](const std::string &v) { return !v.empty() && v.find('%') == std::string::npos; };
+      const auto elementType = irType(*type.element);
+      std::string aggregate = "[";
+      bool anyConstant = false;
+
+      for (size_t i = 0; i < type.extent; ++i) {
+        if (i) aggregate += ", ";
+
+        if (i < elements.size() && constant(elements[i].value)) {
+          aggregate += irType(elements[i].type) + " " + elements[i].value;
+          anyConstant = true;
+        } else {
+          aggregate += elementType + " zeroinitializer";
+        }
+      }
+
+      std::string value = anyConstant ? aggregate + "]" : "zeroinitializer";
+
+      for (size_t i = 0; i < elements.size(); ++i) {
+        if (constant(elements[i].value)) continue;
+
         auto next = fresh();
-        emit(next + " = insertvalue " + irType(type) + " " + value + ", " + irType(element.type) + " " +
-             element.value + ", " + std::to_string(i));
+        emit(next + " = insertvalue " + irType(type) + " " + value + ", " + irType(elements[i].type) + " " +
+             elements[i].value + ", " + std::to_string(i));
         value = next;
       }
 
