@@ -328,7 +328,7 @@ class Projects(unittest.TestCase):
 
     def test_progress_counts_steps(self):
         output = self.invoke().stdout
-        self.assertIn("2 module(s), 5 steps (debug)", output)
+        self.assertIn("2 module(s), 0 up to date, 5 steps (debug)", output)
         for step in range(1, 6):
             self.assertIn(f"[{step}/5] ", output)
         self.assertRegex(output, r"\[5/5\] link  Demo")
@@ -355,7 +355,9 @@ class Projects(unittest.TestCase):
         self.assertNotIn("12345", interface)      # Secret's body is never read by importers.
         from_sources = (output / "app.ll").read_bytes()
 
+        (output / "app.stamp").unlink()  # Rebuild app alone, from core's interface this time.
         second = self.invoke("--verbose").stdout
+        self.assertIn("1 up to date", second)
         self.assertIn("1 interface(s) up to date", second)
         self.assertIn("--import", second)
         self.assertEqual((output / "app.ll").read_bytes(), from_sources)
@@ -373,8 +375,38 @@ class Projects(unittest.TestCase):
         interface = self.root / ".duck/build/debug/core.dki"
         interface.write_text("duck-interface 1\nkey 3 bad\nfiles 0\n", encoding="utf-8")
         result = self.invoke("--verbose").stdout
+        self.assertIn("1 up to date", result)  # core rebuilds to replace it; app is unaffected.
         self.assertIn("0 interface(s) up to date", result)
         self.assertNotIn("--import", result)
+        self.assertIn("duck-interface 1\nkey 16 ", (self.root / ".duck/build/debug/core.dki").read_text(encoding="utf-8"))
+
+    def test_unchanged_modules_are_skipped(self):
+        output = self.root / ".duck/build/debug"
+        exe = output / ("Demo.exe" if os.name == "nt" else "Demo")
+        run = lambda: subprocess.check_output([str(exe)], text=True).strip()
+        self.assertIn("0 up to date, 5 steps", self.invoke().stdout)
+        core_object = (output / "core.o").stat().st_mtime_ns
+
+        self.assertIn("2 module(s), 2 up to date, 0 steps", self.invoke().stdout)
+        self.assertEqual(run(), "42")
+
+        (self.root / "app.dk").write_text("Main() { Print(Add(40, 2) + 1) }", encoding="utf-8")
+        changed_app = self.invoke("--verbose").stdout
+        self.assertIn("1 up to date, 3 steps", changed_app)     # app's duckc and clang, then the link
+        self.assertIn("--import", changed_app)                   # core unchanged: read from its interface
+        self.assertEqual((output / "core.o").stat().st_mtime_ns, core_object)
+        self.assertEqual(run(), "43")
+
+        exe.unlink()
+        self.assertIn("2 up to date, 1 steps", self.invoke().stdout)  # only the link
+        self.assertEqual(run(), "43")
+
+        (self.root / "core.dk").write_text("int Add(int a, int b) { return a * b }", encoding="utf-8")
+        self.assertIn("0 up to date, 5 steps", self.invoke().stdout)   # app depends on core: both rebuild
+        self.assertEqual(run(), "81")
+
+        self.assertIn("0 up to date", self.invoke("--profile", "release").stdout)
+        self.assertIn("2 up to date, 0 steps", self.invoke().stdout)    # debug outputs were left alone
 
     def test_broken_dependency_is_reported_once(self):
         (self.root / "core.dk").write_text("int Add(int a, int b) {", encoding="utf-8")

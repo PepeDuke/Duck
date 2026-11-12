@@ -129,9 +129,19 @@ interface's key matches, a dependent compiles with `--import <module>.dki`
 instead of the module's sources, which skips lexing them and parsing most of
 them; the build prints how many interfaces were up to date. A stale or missing
 interface is never waited for: the dependent reads the sources, and the
-module's own compile publishes a fresh interface for the next build. Modules
-are still always recompiled, and distributing libraries without sources is
-future work.
+module's own compile publishes a fresh interface for the next build.
+Distributing libraries without sources is future work.
+
+Builds are incremental. Each compiled module also publishes `<module>.stamp`,
+and the executable `<name>.stamp`, recording a key of everything the output
+was built from: the module's interface key (its sources, its dependencies'
+keys, and the compiler), clang, the optimization level, and whether it is the
+entry module; for the link, every object's key, the link flags, the identity
+of library files given by path, and clang. A module whose outputs and stamp
+match is skipped, and the link is skipped when every module was and the
+executable's stamp matches. A change to a module rebuilds it and every module
+that depends on it, directly or not. The build prints how many modules were up
+to date. Deleting the build directory forces a full rebuild.
 
 `libraries` accepts linker names (`example` becomes `-lexample`) or explicit
 `.lib`, `.a`, `.so`, `.dylib`, `.o`, or `.obj` paths. `library_paths` supplies

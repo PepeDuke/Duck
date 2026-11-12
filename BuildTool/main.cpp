@@ -410,6 +410,36 @@ static void mix(uint64_t& hash, const std::string& bytes) {
     }
 }
 
+static std::string hashOf(const Strings& parts) {
+    uint64_t hash = 14695981039346656037ull;
+    for (const auto& part : parts) mix(hash, part);
+    char text[17];
+    std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(hash));
+    return text;
+}
+
+// A tool binary's identity for keys: rebuilding or replacing it changes these.
+static Strings toolIdentity(const std::string& tool) {
+    std::error_code error;
+    const auto path = fs::u8path(tool);
+    const auto stamp = fs::last_write_time(path, error).time_since_epoch().count();
+    const auto size = error ? 0 : fs::file_size(path, error);
+    return {tool, std::to_string(size), std::to_string(stamp)};
+}
+
+// The key in a stamp file, which records what an output was built from.
+static std::string stampKey(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    std::string key;
+    std::getline(input, key);
+    return key;
+}
+
+static void writeStamp(const fs::path& path, const std::string& key) {
+    std::ofstream output(path, std::ios::binary);
+    if (!(output << key << '\n') || !output.flush()) fail("cannot write " + path.u8string());
+}
+
 // The key recorded in an interface file, or empty if there is none.
 static std::string storedKey(const fs::path& path) {
     std::ifstream input(path, std::ios::binary);
@@ -428,29 +458,21 @@ static std::string storedKey(const fs::path& path) {
 static Interfaces interfaces(const Project& project, const Plan& sources, const std::string& compiler,
                              const fs::path& destination) {
     Interfaces result;
-    std::error_code error;
-    const auto compilerPath = fs::u8path(compiler);
-    const auto stamp = fs::last_write_time(compilerPath, error).time_since_epoch().count();
-    const auto size = error ? 0 : fs::file_size(compilerPath, error);
+    const auto tool = toolIdentity(compiler);
     std::function<const std::string&(const std::string&)> key = [&](const std::string& id) -> const std::string& {
         if (auto found = result.keys.find(id); found != result.keys.end()) return found->second;
-        uint64_t hash = 14695981039346656037ull;
-        for (const auto& part : {std::string("duck-interface 1"), compiler, std::to_string(size), std::to_string(stamp), id})
-            mix(hash, part);
+        Strings parts{"duck-interface 1", id};
+        parts.insert(parts.end(), tool.begin(), tool.end());
         const auto own = std::find_if(sources.begin(), sources.end(), [&](const auto& item) { return item.first == id; });
-        for (const auto& file : own->second) {
-            mix(hash, file.u8string());
-            mix(hash, readFile(file));
-        }
-        for (const auto& dependency : project.modules.at(id).depends) mix(hash, key(dependency));
-        char text[17];
-        std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(hash));
-        return result.keys[id] = text;
+        for (const auto& file : own->second) parts.insert(parts.end(), {file.u8string(), readFile(file)});
+        for (const auto& dependency : project.modules.at(id).depends) parts.push_back(key(dependency));
+        return result.keys[id] = hashOf(parts);
     };
     for (const auto& [id, files] : sources) {
         (void)files;
         const auto path = destination / (id + ".dki");
-        if (id != project.entry && storedKey(path) == key(id)) result.fresh[id] = path;
+        const auto& current = key(id); // Every module needs one; only libraries have interfaces.
+        if (id != project.entry && storedKey(path) == current) result.fresh[id] = path;
     }
     return result;
 }
@@ -720,13 +742,15 @@ struct ModuleBuild {
     bool finished = false;
 };
 
-// Compiles the modules concurrently, which is safe because a module's compile
-// reads only source files, never another module's output. Results are printed
+// Compiles the modules not up to date concurrently, which is safe because a
+// module's compile reads only source files and interfaces published by an
+// earlier build, never another module's output from this one. Results are printed
 // in build order and stop at the first failure, so output matches a serial
 // build and an error in a dependency is not repeated by each of its dependents.
 static void compileModules(const Project& project, const Plan& sources, const std::string& compiler,
                            const std::string& clang, const std::string& optimize, const fs::path& directory,
-                           Progress& progress, bool verbose, const Interfaces& interfaces) {
+                           Progress& progress, bool verbose, const Interfaces& interfaces,
+                           const std::set<std::string>& upToDate) {
     std::vector<ModuleBuild> builds(sources.size());
     std::mutex mutex;
     std::condition_variable finished;
@@ -752,7 +776,9 @@ static void compileModules(const Project& project, const Plan& sources, const st
                 if (!stop) progress.finished(tool, id, Clock::now() - start);
             };
             const auto ir = directory / (id + ".ll"), object = directory / (id + ".o");
-            try {
+            // An up-to-date module's published outputs already match its
+            // sources and tools, so it has no steps.
+            if (!upToDate.count(id)) try {
                 const bool library = id != project.entry;
                 auto command = compileCommand(project, sources, compiler, id, library ? "--library" : "", ir, false, &interfaces);
                 if (library) {
@@ -828,27 +854,74 @@ static void build(const Options& options, const fs::path& bin) {
     const auto started = Clock::now();
     size_t width = 0;
     for (const auto& source : sources) width = std::max(width, source.first.size());
-    Progress progress(sources.size() * 2 + (linking ? 1 : 0), width);
+    const auto optimize = options.profile == "debug" ? "-O0" : "-O2";
     const auto known = interfaces(project, sources, compiler, destination);
-    std::cout << "duck build: " << sources.size() << " module(s), " << progress.total << " steps (" << options.profile
-              << "), " << known.fresh.size() << " interface(s) up to date" << std::endl;
+
+    // A module is skipped when its published outputs carry the key of what
+    // they would be built from now: its interface key (its sources, its
+    // dependencies' keys and the compiler), clang, the optimization level,
+    // and whether it is the entry module. A changed dependency changes the
+    // key of every module above it, so those rebuild too.
+    const auto clangTool = toolIdentity(clang);
+    std::map<std::string, std::string> objectKeys;
+    std::set<std::string> upToDate;
+    for (const auto& [id, files] : sources) {
+        (void)files;
+        const bool library = id != project.entry;
+        Strings parts{"duck-object 1", known.keys.at(id), optimize, library ? "library" : "entry"};
+        parts.insert(parts.end(), clangTool.begin(), clangTool.end());
+        objectKeys[id] = hashOf(parts);
+        if (fs::exists(destination / (id + ".o")) && fs::exists(destination / (id + ".ll")) &&
+            (!library || known.fresh.count(id)) && stampKey(destination / (id + ".stamp")) == objectKeys[id])
+            upToDate.insert(id);
+    }
+    auto executable = fs::u8path(project.projectName);
+#ifdef _WIN32
+    executable += ".exe";
+#endif
+    std::string linkKey;
+    if (linking) {
+        Strings parts{"duck-link 1"};
+        for (const auto& [id, files] : sources) {
+            (void)files;
+            parts.push_back(objectKeys[id]);
+        }
+        // A native library given by path relinks when the file changes.
+        for (const auto& flag : flags) {
+            std::error_code error;
+            if (!fs::is_regular_file(fs::u8path(flag), error)) parts.push_back(flag);
+            else for (auto& part : toolIdentity(flag)) parts.push_back(part);
+        }
+        parts.insert(parts.end(), clangTool.begin(), clangTool.end());
+        linkKey = hashOf(parts);
+    }
+    const bool link = linking && (upToDate.size() < sources.size() || !fs::exists(destination / executable) ||
+                                  stampKey(destination / (executable.u8string() + ".stamp")) != linkKey);
+
+    Progress progress((sources.size() - upToDate.size()) * 2 + (link ? 1 : 0), width);
+    std::cout << "duck build: " << sources.size() << " module(s), " << upToDate.size() << " up to date, "
+              << progress.total << " steps (" << options.profile << "), " << known.fresh.size()
+              << " interface(s) up to date" << std::endl;
     WorkDirectory work(destination);
-    compileModules(project, sources, compiler, clang, options.profile == "debug" ? "-O0" : "-O2", work.path, progress,
-                   options.verbose, known);
+    compileModules(project, sources, compiler, clang, optimize, work.path, progress, options.verbose, known, upToDate);
     Paths artifacts;
     Strings objects;
     for (const auto& [id, files] : sources) {
-        auto ir = work.path / (id + ".ll"), object = work.path / (id + ".o");
         (void)files;
+        if (upToDate.count(id)) {
+            objects.push_back((destination / (id + ".o")).u8string());
+            continue;
+        }
+        auto ir = work.path / (id + ".ll"), object = work.path / (id + ".o"), stamp = work.path / (id + ".stamp");
         objects.push_back(object.u8string());
         artifacts.insert(artifacts.end(), {ir, object});
         if (id != project.entry) artifacts.push_back(work.path / (id + ".dki"));
+        // Published last, so a stamp never describes outputs it did not replace.
+        writeStamp(stamp, objectKeys[id]);
+        artifacts.push_back(stamp);
     }
-    if (linking) {
-        auto output = work.path / project.projectName;
-#ifdef _WIN32
-        output += ".exe";
-#endif
+    if (link) {
+        const auto output = work.path / executable;
         Strings command{clang};
         command.insert(command.end(), objects.begin(), objects.end());
         command.insert(command.end(), flags.begin(), flags.end());
@@ -856,7 +929,9 @@ static void build(const Options& options, const fs::path& bin) {
         const auto start = Clock::now();
         run(command, options.verbose);
         progress.finished("link ", output.filename().u8string(), Clock::now() - start);
-        artifacts.push_back(output);
+        const auto stamp = work.path / (executable.u8string() + ".stamp");
+        writeStamp(stamp, linkKey);
+        artifacts.insert(artifacts.end(), {output, stamp});
     }
     for (const auto& artifact : artifacts) duckbuild::publish(artifact, destination / artifact.filename());
     std::cout << "Built " << (options.module.empty() ? project.projectName : "module " + options.module)
