@@ -769,6 +769,55 @@ reject(static_reads_later "Game #{ int B = A + 1\nint A = 1 }\nMain() {}" "stati
 reject(static_reads_itself "Game #{ int A = A + 1 }\nMain() {}" "static field 'Game.A' cannot read itself")
 reject(static_out_of_range "Game #{ byte A = 300 }\nMain() {}" "out of range")
 reject(static_managed "Game #{ cstring Title }\nMain() {}" "static fields of type cstring are not supported yet")
+run_program(static_arrays [=[
+Cell
+{
+    int A
+    float B
+}
+Board #{
+ int [4] Cells
+ int [] Items
+ float [3] Weights = {1.0, 2.0, 3.0}
+ int [2][3] Grid
+ Cell [2] Pair
+ Cell [] Many
+ #int [3] Primes = {2, 3, 5}
+ Fill()
+ {
+  Cells[3] = 9
+  Items += 7
+ }
+}
+Main()
+{
+ Board.Cells[1] = 5
+ Board.Fill()
+ Print(Board.Cells[1] + Board.Cells[3])
+ Board.Items += 3
+ Print(Board.Items.Len)
+ Print(Board.Weights[2])
+ Board.Grid[1][2] = 6
+ Print(Board.Grid[1][2])
+ Board.Pair[1].B = 2.5
+ Print(Board.Pair[1].B)
+ Cell c
+ c.A = 4
+ Board.Many += c
+ Print(Board.Many[0].A)
+ for x : Board.Items
+  x *= 2
+ Print(Board.Items[0])
+ Print(Board.Primes[2])
+ Board.Items -= [0]
+ Print(Board.Items.Len)
+}
+]=] "14\n2\n3\n6\n2.5\n4\n14\n5\n1\n")
+reject(static_array_constant "Game #{ #int [2] Max = {1, 2} }\nMain() { Game.Max[0] = 3 }" "cannot modify constant 'Game.Max'")
+reject(static_array_text "Game #{ string [] Names }\nMain() {}" "static field 'Game.Names' cannot hold string \\[\\] yet")
+reject(static_array_fixed_text "Game #{ string [2] Names }\nMain() {}" "static field 'Game.Names' cannot hold string \\[2\\] yet")
+reject(static_array_nested "Game #{ int [][] Rows }\nMain() {}" "static field 'Game.Rows' cannot hold int \\[\\]\\[\\] yet")
+reject(static_array_copy "Game #{ int [] Items }\nMain() { copy : Game.Items }" "dynamic arrays are move-only")
 run_program(field_defaults [=[
 Named
 {

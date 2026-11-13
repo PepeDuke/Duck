@@ -658,11 +658,12 @@ static void declareStatics(Symbols &symbols, const Program &program) {
 
     const auto &t = field.type;
 
+    // Array elements are checked once every container is known.
     if (field.scope.empty() && !(numeric(t) || t == Type::Bool || enumValue(t) || t == Type::Pointer || recordValue(t) ||
-          managedValue(t)))
+          managedValue(t) || arrayValue(t)))
       fail(field.name, "static fields of type " + typeName(t) +
                            " are not supported yet; use a number, bool, enum, string, name, big, "
-                           "void*, or container");
+                           "void*, container, or array");
   }
 }
 // vecN and friends are ordinary containers from here on, so copies, fields,
@@ -1470,9 +1471,25 @@ void validateLifetimes(const Symbols &symbols) {
                              " yet: a container field holds nested arrays only with fixed, plain "
                              "dimensions, as in int [3][4]");
 
-  for (const auto &[name, info] : symbols.statics)
-    if (arrayValue(info.type) && info.scope.empty())
-      fail(info.declaration, "static field '" + name + "' cannot hold an array yet");
+  // A static array starts as zero bits and is never destroyed, so its
+  // elements must be valid as zero bits and own nothing to release.
+  for (const auto &[name, info] : symbols.statics) {
+    if (!arrayValue(info.type) || !info.scope.empty()) continue;
+
+    auto element = *info.type.element;
+
+    while (fixedArray(element)) element = *element.element;
+
+    const bool plain = element == Type::Pointer || (!arrayValue(element) && symbols.zeroDefault(element));
+
+    if (dynamicArray(info.type) && plain && !arrayValue(*info.type.element) && !symbols.needsCleanup(element)) continue;
+    if (fixedArray(info.type) && plain) continue;
+
+    fail(info.declaration, "static field '" + name + "' cannot hold " + typeName(info.type) +
+                               " yet: a static array's elements must start as zero and own nothing, since static "
+                               "storage is never destroyed; use numbers, bool, char, enums, void*, or plain "
+                               "containers");
+  }
 
   for (const auto &[name, info] : symbols.statics)
     if (collectionValue(info.type))

@@ -518,9 +518,16 @@ field has one storage location, defined in the module that declares it and
 declared `external` in modules that import it. Read and write a field by its
 qualified name (`Game.Score`, `Game.Level.Number`); functions in the block and
 in blocks nested inside it can also use the bare name, which locals shadow.
-Fields hold numbers, `bool`, enums, `string`, `name`, `big`, `void*`, or
-containers, with any initializer of the field's type; a container-typed field
-without one starts from the container's defaults. Constant initializers become
+Fields hold numbers, `bool`, enums, `string`, `name`, `big`, `void*`,
+containers, or arrays, with any initializer of the field's type; a
+container-typed field without one starts from the container's defaults. A
+static array, fixed (`int [4] Cells`, `int [2][3] Grid`) or dynamic
+(`int [] Items`), starts zeroed or empty, takes a literal initializer, and is
+indexed, appended to, iterated, and measured with `Len` like any other. Since
+static storage is never destroyed, its elements must be valid as zero bits and
+own nothing: numbers, `bool`, `char`, enums, `void*`, and containers without
+constructors, defaults, or cleanup. A dynamic array cannot nest another array.
+A `#` constant array rejects writes to its elements. Constant initializers become
 the storage's initial value. The others run before `Main` in this order: every
 static of the imported modules, then this module's statics in declaration
 order (input file order, then source order). An initializer may read any

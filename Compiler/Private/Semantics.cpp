@@ -1334,10 +1334,6 @@ class Analyzer {
 
     const auto &base = *e.args[0];
 
-    // Static storage holds no collections, except through a named scope.
-    if (const auto path = staticPath(base); staticStorage(base) && (path.empty() || symbols.statics.at(path).scope.empty()))
-      return Type::Void;
-
     if (!storage(base)) return Type::Void;
 
     const auto type = location(base).type;
@@ -1723,7 +1719,13 @@ class Analyzer {
   [[noreturn]] void constantTarget(const Expr &target, const Token &token) const {
     const Expr *root = &target;
 
-    while ((root->kind == "." || root->kind == "index") && !root->args.empty()) root = root->args[0].get();
+    // Stop at a static field, so `G.P[0]` names G.P rather than G.
+    while ((root->kind == "." || root->kind == "index") && !root->args.empty()) {
+      if (const auto field = analysis.staticFields.find(root); field != analysis.staticFields.end())
+        fail(token, "cannot modify constant '" + field->second + "'");
+
+      root = root->args[0].get();
+    }
 
     fail(token, "cannot modify constant '" + root->token.text + "'");
   }
