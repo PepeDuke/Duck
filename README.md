@@ -1921,6 +1921,30 @@ Bank
     }
 }
 ``` 
+### Explicit parallel branches
+
+`P` groups two or more branches into one statement. Each pair of braces encloses one branch, which can contain several statements. Each pair of parentheses takes a zero-argument callable, which the group invokes once. The forms can be mixed in any order.
+
+```c++
+// Four ways to run the same two branches
+P{ X() }{ Y() }
+P(X)(Y)
+P{ X() }(Y)
+P(X){ Y() }
+```
+
+A branch can also be a lambda. The next statement runs after every branch has finished.
+
+```c++
+P{
+    UpdatePhysics(dt)
+    ResolveContacts()
+}(MixAudio)(@ () { Animate(dt) })
+SubmitFrame()
+```
+
+Here the physics branch resolves contacts after updating physics. Audio and animation can overlap that work. The explicit group overrides the compiler's cost estimate. The compiler must still establish that the branches can safely overlap, including their use of captured variables and resources accessed by their callees. If it cannot, it reports a compile-time error. The runtime worker limit still applies.
+
 ## Reflection system in Duck
 The main reason for reflection system in duck is to allow for the creation of Game Engine visualizations based on the code. the reflection system can be accessed using this keyword and the name of the container.
 
