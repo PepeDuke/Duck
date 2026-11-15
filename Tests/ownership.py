@@ -98,6 +98,34 @@ class Ownership(unittest.TestCase):
         self.assertIn(message, result.stderr)
         self.assertFalse(ir.exists())
 
+    def test_large_native_output_buffer(self):
+        body = '''extern "C" void* memset(void* dst, int byteValue, long bytes)
+Readback { int [270851] Words }
+Read() {
+    Readback back
+    Print(Live())
+    Print(back.Words[270850])
+    memset(&back.Words[0], 1, 270851 * (long)4)
+    Print(back.Words[270850])
+    if back.Words[0] != 0 { return }
+}
+Scenario() {
+    Read()
+    for int i = 0; i < 3; i++ {
+        int [270851] words
+        Print(Live())
+        if i == 0 { continue }
+        break
+    }
+}'''
+        result, ir = self.compile(PRELUDE + body + ENTRY)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        code = ir.read_text()
+        self.assertNotIn('alloca %struct.Readback', code)
+        self.assertNotIn('alloca [270851 x i32]', code)
+        self.assertIn('call void @llvm.memset.p0.i64', code)
+        self.check(body, 1, 0, 16843009, 1, 1)
+
     # Owning fields ----------------------------------------------------------
 
     def test_eager_field_is_built_and_destroyed_with_its_container(self):

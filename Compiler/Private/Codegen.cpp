@@ -213,6 +213,7 @@ struct Binding {
   bool pin = false; // Not a variable: an active use, ended when its scope exits.
   bool lent = false; // Received from a function that may lend; it may not own its object.
   bool orderedLock = false; // Not a variable: a `${ }` block's locks, released when its scope exits.
+  bool heapLocal = false; // Free the backing storage after ordinary scope-exit cleanup.
 };
 class Generator {
   const Symbols &functions;
@@ -696,6 +697,38 @@ class Generator {
   // The allocation size of a type, as a constant.
   static std::string sizeOf(const Type &type) {
     return "ptrtoint (ptr getelementptr (" + irType(type) + ", ptr null, i32 1) to i64)";
+  }
+  // Estimate inline payload only to choose storage. LLVM's data layout
+  // supplies the actual allocation size, including alignment and padding.
+  static constexpr size_t StackLocalLimit = 64 * 1024;
+  std::map<std::string, size_t> recordPayloadSizes;
+  size_t inlinePayload(const Type &type) {
+    if (fixedArray(type))
+      return std::min<unsigned long long>(StackLocalLimit, std::min<unsigned long long>(type.extent, StackLocalLimit) *
+                                                           inlinePayload(*type.element));
+    if (recordValue(type)) {
+      if (auto known = recordPayloadSizes.find(type.record); known != recordPayloadSizes.end()) return known->second;
+      size_t bytes = 0;
+      for (const auto &field : functions.records.at(type.record).fields) {
+        bytes += inlinePayload(field.type);
+        if (bytes >= StackLocalLimit) break;
+      }
+      return recordPayloadSizes[type.record] = std::min(bytes, StackLocalLimit);
+    }
+    if (integral(type)) return integerWidth(type) / 8;
+    if (type == Type::Bool) return 1;
+    if (type == Type::Float || type == Type::Char || type == Type::Date || enumValue(type)) return 4;
+    if (type == Type::DateTime) return 12;
+    if (decimalValue(type)) return 36;
+    return 8; // double, time, and pointer-sized handles on the bootstrap target.
+  }
+  bool largeAggregate(const Type &type) {
+    return (recordValue(type) || fixedArray(type)) && inlinePayload(type) >= StackLocalLimit;
+  }
+  void initializeStorage(const Type &type, const std::string &value, const std::string &address) {
+    if (value == "zeroinitializer" && largeAggregate(type)) {
+      emit("call void @llvm.memset.p0.i64(ptr " + address + ", i8 0, i64 " + sizeOf(type) + ", i1 false)");
+    } else emit("store " + irType(type) + " " + value + ", ptr " + address);
   }
   // The release function for collection slots of a type, or null.
   std::string slotRelease(const Type &type) {
@@ -1394,7 +1427,7 @@ class Generator {
     usesHeapRuntime = true;
     auto word = fresh();
     emit(word + " = call ptr @duck.heap$alloc(i64 " + sizeOf(type) + ")");
-    emit("store " + irType(type) + " " + value + ", ptr " + word);
+    initializeStorage(type, value, word);
     return word;
   }
   // @duck$reach.<record>(object, slot): whether slot lies inside the object
@@ -1647,7 +1680,10 @@ class Generator {
       std::sort(owned.begin(), owned.end(),
                 [](const Binding *a, const Binding *b) { return a->order > b->order; });
 
-      for (const auto *binding : owned) releaseBinding(*binding, binding->value != moved);
+      for (const auto *binding : owned) {
+        releaseBinding(*binding, binding->value != moved);
+        if (binding->heapLocal) emit("call void @free(ptr " + binding->value + ")");
+      }
     }
   }
   // Loads the underlying value of an enum member index. A constant index
@@ -2396,6 +2432,8 @@ class Generator {
   void declare(const Token &t, Value value, bool constant = false, bool scopedBorrow = false) {
     auto address = fresh();
     std::string boxSlot;
+    bool heapLocal = false;
+    if (recordValue(value.type) && value.value.empty()) value.value = defaultValue(value.type);
 
     if (analysis.captured.count(captureKey(t))) {
       // Lambdas share this local, so it lives in a box that outlives the scope.
@@ -2406,10 +2444,12 @@ class Generator {
       emit(box + " = call ptr @duck.box$new(i64 " + sizeOf(value.type) + ", ptr " + elementCleanup(value.type) + ")");
       emit("store ptr " + box + ", ptr " + boxSlot);
       emit(address + " = getelementptr i8, ptr " + box + ", i64 32");
+    } else if (largeAggregate(value.type)) {
+      heapLocal = true;
+      usesHeapRuntime = true;
+      emit(address + " = call ptr @duck.heap$alloc(i64 " + sizeOf(value.type) + ")");
     } else
       allocations << "  " << address << " = alloca " << irType(value.type) << '\n';
-
-    if (recordValue(value.type) && value.value.empty()) value.value = defaultValue(value.type);
 
     if ((managedValue(value.type) || funcValue(value.type) || collectionValue(value.type) ||
          fileValue(value.type) || dynamicArray(value.type)) &&
@@ -2420,14 +2460,13 @@ class Generator {
 
     if (defaults) value.value = "zeroinitializer";
 
-    if (!value.value.empty())
-      emit("store " + irType(value.type) + " " + value.value + ", ptr " +
-           address);
+    if (!value.value.empty()) initializeStorage(value.type, value.value, address);
 
     if (defaults) fillDefaults(address, value.type);
 
     Binding binding{value.type, address, constant, true, scopedBorrow};
     binding.box = boxSlot;
+    binding.heapLocal = heapLocal;
     bind(t, binding);
   }
   std::string textConstant(const std::string &value) {

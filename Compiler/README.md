@@ -1622,6 +1622,21 @@ stored as raw addresses, which is why those lambdas stay in a local of the frame
 Fixed and dynamic arrays hold `func` values, releasing each closure with its
 element. Queues, stacks, pairs, and static fields cannot hold them yet.
 
+### Large local buffers
+
+An ordinary local such as `Readback back` can hold a fixed-size native output buffer. For local records and fixed arrays with at least 64 KiB of estimated inline payload, the bootstrap allocates the local’s backing storage on the heap. The local keeps its usual value semantics and scope lifetime. Duck releases the storage on scope exit, including early returns. Large zero-initialized buffers use a bulk clear.
+
+```duck
+Readback { int [270851] Words }
+
+Read() {
+    Readback back
+    FillBuffer(&back.Words[0], back.Words.Len)
+}
+```
+
+Here `FillBuffer` takes a destination pointer and a word count. It must finish using the pointer before `back` goes out of scope. The storage decision applies to the local itself. Constructors and whole-value copies can still require temporary storage.
+
 ### Owned heap locals
 
 ```duck
@@ -2166,7 +2181,7 @@ order. Diagnostics should likewise be collected in source order when workers
 are introduced. Tokenizing arbitrary chunks within a file needs extra handling
 because strings and comments can span chunk boundaries.
 
-Locals use entry-block allocations, allowing later LLVM optimization to
+Small, uncaptured locals use entry-block allocations, allowing later LLVM optimization to
 promote them to registers. A native `main` wrapper calls Duck's `Main`, building
 and then freeing the argument array for `Main(string [] args)`.
 

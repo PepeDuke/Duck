@@ -8,7 +8,7 @@ namespace duck {
 // Every operation returns new storage; operands are never modified.
 std::string bigRuntimeIR() {
   return R"IR(
-declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)
+
 @duck.big.zero = private unnamed_addr constant [3 x i8] c"0\0A\00"
 
 define internal ptr @duck.big.alloc(i64 %count) {
