@@ -3918,6 +3918,18 @@ class Generator {
     return {Type::Bool, id};
   }
   Value lowerExpression(const Expr &e) {
+    if (analysis.threadQueries.count(&e)) {
+      usesTaskRuntime = true;
+      const auto result = fresh();
+      if (e.token.text == "Status") {
+        auto index = expression(*e.args[0]->args[1]);
+        emit(result + " = call i32 @duck.thread$status(i32 " + index.value + ")");
+      } else {
+        const auto mode = e.token.text == "ThreadSlots" ? "0" : e.token.text == "ThreadCount" ? "1" : "2";
+        emit(result + " = call i32 @duck.thread$count(i32 " + std::string(mode) + ")");
+      }
+      return {Type::Int, result};
+    }
     const auto &op = e.token.text;
 
     if (e.kind == "compileTime") {
@@ -4241,6 +4253,8 @@ class Generator {
     usesScopeRuntime = usesScopeRuntime || inner.usesScopeRuntime;
     usesFileRuntime = usesFileRuntime || inner.usesFileRuntime;
     usesLockRuntime = usesLockRuntime || inner.usesLockRuntime;
+    usesFuncRuntime = usesFuncRuntime || inner.usesFuncRuntime;
+    usesTaskRuntime = usesTaskRuntime || inner.usesTaskRuntime;
     scopeNames.insert(inner.scopeNames.begin(), inner.scopeNames.end());
     mathImports.insert(inner.mathImports.begin(), inner.mathImports.end());
     cleanups.insert(inner.cleanups.begin(), inner.cleanups.end());
@@ -4421,7 +4435,7 @@ class Generator {
     if (call.field) {
       auto count = fresh(), bound = fresh();
       env = fresh();
-      emit(count + " = load i64, ptr " + closureValue);
+      emit(count + " = load atomic i64, ptr " + closureValue + " monotonic, align 8");
       emit(bound + " = icmp eq i64 " + count + ", -2");
       emit(env + " = select i1 " + bound + ", ptr " + self + ", ptr " + closureValue);
     }
@@ -4879,8 +4893,33 @@ class Generator {
     declare(name, {analysis.localTypes.at(&s), ""}, s.constant);
     pending.back().push_back({s.name, record, layout, result, f.result, &call, variable(name), &s});
   }
-  // Takes the block's locks before its first statement. They are held like a
-  // local of the block, so every way out of it releases them.
+  bool parallelGroup(const Stmt &s) {
+    std::vector<Value> closures;
+    for (const auto &branch : s.labels) closures.push_back(expression(*branch));
+
+    // Construct and dispose every closure on the caller. Workers only borrow
+    // their environment, and the caller keeps it alive through the join.
+    std::vector<std::string> handles;
+    for (size_t i = 0; i < closures.size(); ++i) {
+      const auto &closure = closures[i];
+      const auto result = irType(closure.type.signature->result);
+      const auto entry = "@duck$parallel." + symbolPrefix + "." + std::to_string(tasks++);
+      thunks << "define internal i32 " << entry << "(ptr %env) {\nentry:\n"
+             << "  %slot = getelementptr i8, ptr %env, i64 16\n"
+             << "  %fn = load ptr, ptr %slot\n  call " << result << " %fn(ptr %env)\n"
+             << "  ret i32 0\n}\n\n";
+      if (analysis.parallelWorkers.value() && i + 1 < closures.size()) {
+        usesTaskRuntime = true;
+        auto handle = fresh();
+        emit(handle + " = call ptr @duck.task$spawn(ptr " + entry + ", ptr " + closure.value + ")");
+        handles.push_back(handle);
+      } else emit("call i32 " + entry + "(ptr " + closure.value + ")");
+    }
+    for (const auto &handle : handles) emit("call void @duck.task$join(ptr " + handle + ")");
+    for (const auto &closure : closures) release(closure);
+    return false;
+  }
+  // Hold the locks as a local of the block, so every exit releases them.
   bool orderedBlock(const Stmt &s) {
     const auto found = analysis.orderedLocks.find(&s);
     const FunctionAnalysis::OrderedLocks locks = found != analysis.orderedLocks.end()
@@ -5236,6 +5275,7 @@ class Generator {
     if (s.kind == "block")
       return block(s.body);
 
+    if (s.kind == "parallel") return parallelGroup(s);
     if (s.kind == "ordered") return orderedBlock(s);
     if (s.kind == "switch") return switchStatement(s);
 
@@ -5618,6 +5658,9 @@ public:
 FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
                          const FunctionAnalysis &analysis) {
   if (!function.nativeSymbol.empty()) return {};
+
+  if (!analysis.parallelGroups.empty() && !analysis.parallelWorkers.has_value())
+    throw std::logic_error("lowering P requires validated branch effects");
 
   return Generator(symbols, analysis, function.name.text).generate(function);
 }
@@ -6071,7 +6114,8 @@ std::string emitStatics(const Symbols &symbols) {
   }
 
   if (!own.empty())
-    ir += "define internal void @duck$startup() {\nentry:\n  call void @duck$static." + own.back().second +
+    ir += "define internal void @duck$startup() {\nentry:\n  store ptr @duck$thread.main, ptr @duck$thread.self\n"
+          "  call void @duck$static." + own.back().second +
           "$init()\n  ret void\n}\n@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] "
           "[{ i32, ptr, ptr } { i32 65535, ptr @duck$startup, ptr null }]\n";
 

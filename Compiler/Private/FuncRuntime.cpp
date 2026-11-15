@@ -15,12 +15,11 @@ define internal void @duck.cell$retain(ptr %c) {
   %nil = icmp eq ptr %c, null
   br i1 %nil, label %done, label %check
 check:
-  %count = load i64, ptr %c
+  %count = load atomic i64, ptr %c monotonic, align 8
   %immortal = icmp slt i64 %count, 0
   br i1 %immortal, label %done, label %bump
 bump:
-  %next = add i64 %count, 1
-  store i64 %next, ptr %c
+  %old = atomicrmw add ptr %c, i64 1 monotonic
   br label %done
 done:
   ret void
@@ -30,13 +29,12 @@ define internal void @duck.cell$release(ptr %c) {
   %nil = icmp eq ptr %c, null
   br i1 %nil, label %done, label %check
 check:
-  %count = load i64, ptr %c
+  %count = load atomic i64, ptr %c monotonic, align 8
   %immortal = icmp slt i64 %count, 0
   br i1 %immortal, label %done, label %drop
 drop:
-  %next = sub i64 %count, 1
-  store i64 %next, ptr %c
-  %last = icmp eq i64 %next, 0
+  %old = atomicrmw sub ptr %c, i64 1 acq_rel
+  %last = icmp eq i64 %old, 1
   br i1 %last, label %dispose, label %done
 dispose:
   %slot = getelementptr i8, ptr %c, i64 8

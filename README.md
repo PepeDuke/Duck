@@ -1945,6 +1945,22 @@ SubmitFrame()
 
 Here the physics branch resolves contacts after updating physics. Audio and animation can overlap that work. The explicit group overrides the compiler's cost estimate. The compiler must still establish that the branches can safely overlap, including their use of captured variables and resources accessed by their callees. If it cannot, it reports a compile-time error. The runtime worker limit still applies.
 
+See [the runnable parallel-branch example](Examples/Concurrency/11_ParallelBranches.dk) and [the bootstrap compiler’s scheduling rules](Compiler/README.md#explicit-parallel-groups).
+
+### Inspecting scheduler threads
+
+`P.ThreadCount` reports live Duck scheduler threads, including threads waiting on a join or an ordered block. `P.RunningThreads` counts those outside either wait. Slot zero belongs to the main thread. Use `P.ThreadSlots` to enumerate slots, since a finished worker leaves an idle slot that a later worker can reuse.
+
+```c++
+int slots = P.ThreadSlots
+for int i = 0; i < slots; i++ {
+    int status = P.Thread[i].Status
+    if status == P.WaitingForJoin { Print(i) }
+}
+```
+
+The read-only integer states are `P.Idle`, `P.Starting`, `P.Running`, `P.WaitingForJoin`, and `P.WaitingForLock`. A wait observed across several samples can help locate a stall. Each read samples current state. By the time execution continues past a `P` group, all its branches have finished. [Runtime details](Compiler/README.md#thread-inspection)
+
 ## Reflection system in Duck
 The main reason for reflection system in duck is to allow for the creation of Game Engine visualizations based on the code. the reflection system can be accessed using this keyword and the name of the container.
 

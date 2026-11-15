@@ -1,0 +1,23 @@
+Scores #{
+    int Left = 0
+    int Right = 0
+    AddLeft() { Left++ }
+    AddRight() { Right++ }
+}
+
+Main() {
+    int bonus = 0
+    func addBonus = @ () { bonus += 10 }
+
+    P(Scores.AddLeft)(Scores.AddRight)
+    P{ Scores.AddLeft() }(addBonus)
+    P(Scores.AddRight){ bonus++ }
+    P{
+        Scores.AddLeft()
+        Scores.AddLeft()
+    }{ Scores.AddRight() }(@ () { bonus++ })
+
+    Print(Scores.Left)   // 4
+    Print(Scores.Right)  // 3
+    Print(bonus)         // 12
+}

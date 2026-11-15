@@ -420,6 +420,9 @@ inline std::string captureKey(const Token &t) {
 // Expression pointers refer to the input AST, which must outlive this artifact.
 // Each function gets its own analysis, suitable for independent worker tasks.
 struct FunctionAnalysis {
+  std::set<const Expr *> threadQueries; // Read-only P scheduler properties.
+  std::set<const Stmt *> parallelGroups;
+  std::optional<bool> parallelWorkers; // Set after validating all explicit groups, including in sequential builds.
   std::map<const Expr *, Type> expressionTypes;
   std::map<const Expr *, Type> conversions;
   // Field position, through parent views for an inherited field.
@@ -650,7 +653,7 @@ EffectTable summarizeEffects(const Program &program, const std::vector<FunctionA
 // Decides what each `${ }` block locks. This is part of the program's meaning,
 // so it runs for sequential builds as well.
 void planOrderedBlocks(const Function &function, const EffectTable &effects, const Symbols &symbols,
-                       FunctionAnalysis &analysis, bool entry = true);
+                       FunctionAnalysis &analysis, bool entry = true, bool parallel = true);
 void scheduleTasks(const Program &program, size_t index, const EffectTable &effects, const Symbols &symbols,
                    std::vector<FunctionAnalysis> &analyses, bool entry = true);
 

@@ -58,6 +58,14 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
   std::string module =
       "; Duck bootstrap LLVM IR\ndeclare i32 @printf(ptr, ...)\n"
       "declare double @llvm.floor.f64(double)\ndeclare void @llvm.trap()\n";
+  // All entry points register slot zero, even when only an imported module
+  // uses the scheduler. Native-created threads keep their null TLS slot.
+  module += R"IR(%duck.thread.slot = type { i32, ptr, ptr, ptr }
+$duck$thread.main = comdat any
+$duck$thread.self = comdat any
+@duck$thread.main = linkonce_odr global %duck.thread.slot { i32 1, ptr null, ptr null, ptr null }, comdat
+@duck$thread.self = linkonce_odr thread_local global ptr null, comdat
+)IR";
   bool needsText = false, needsBig = false, needsDecimal = false, needsCollections = mainArguments;
   bool needsFunc = false, needsMeta = false, needsMarkup = false, needsScope = false;
   std::map<std::string, std::string> mathImports;
@@ -96,7 +104,11 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
   bool needsHeap = needsMarkup;
 
   for (const auto &f : functions) needsHeap = needsHeap || f.usesHeapRuntime;
-  if (needsText || needsHeap || needsFunc || needsScope) module += "declare ptr @malloc(i64)\ndeclare void @free(ptr)\n";
+  const bool needsTasks = std::any_of(functions.begin(), functions.end(), [](const auto &f) { return f.usesTaskRuntime; });
+  if (needsText || needsHeap || needsFunc || needsScope || needsTasks) {
+    if (!nativeSymbols.count("malloc")) module += "declare ptr @malloc(i64)\n";
+    if (!nativeSymbols.count("free")) module += "declare void @free(ptr)\n";
+  }
 
   if (needsScope) {
     module += scopeRuntimeIR(nativeSymbols);
@@ -112,13 +124,7 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
   if (needsMeta) module += metaRuntimeIR();
   if (needsHeap) module += heapRuntimeIR();
 
-  bool needsTasks = false;
-  bool needsLocks = false;
-
-  for (const auto &f : functions) {
-    needsTasks = needsTasks || f.usesTaskRuntime;
-    needsLocks = needsLocks || f.usesLockRuntime;
-  }
+  const bool needsLocks = std::any_of(functions.begin(), functions.end(), [](const auto &f) { return f.usesLockRuntime; });
 
   if (needsTasks || needsLocks) module += lockRuntimeIR(nativeSymbols);
   if (needsTasks) module += taskRuntimeIR(nativeSymbols);
@@ -154,7 +160,7 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
   if (mainArguments)
     return module + entryArgumentsIR();
 
-  return module + "define i32 @main() {\nentry:\n  call void @duck.Main()\n  "
+  return module + "define i32 @main() {\nentry:\n  store ptr @duck$thread.main, ptr @duck$thread.self\n  call void @duck.Main()\n  "
                   "ret i32 0\n}\n";
 }
 std::string compile(const Program &program, bool parallel) {
@@ -446,7 +452,9 @@ std::string compileModule(const Program &program, const Program &imports,
     const auto effects = summarizeEffects(program, analyses, symbols, entry);
     phase("summarize effects");
 
-    for (size_t i = 0; i < program.size(); ++i) planOrderedBlocks(program[i], effects, symbols, analyses[i], entry);
+    for (size_t i = 0; i < evaluatedFunctions.size(); ++i)
+      if (i < program.size() || !analyses[i].parallelGroups.empty())
+        planOrderedBlocks(*evaluatedFunctions[i], effects, symbols, analyses[i], entry, parallel);
     phase("plan ordered blocks");
 
     if (parallel)

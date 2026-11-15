@@ -172,6 +172,7 @@ done:
 
 define i32 @main(i32 %argc, ptr %argv) {
 entry:
+  store ptr @duck$thread.main, ptr @duck$thread.self
   %index = alloca i32
   %selected = alloca i32
   %passed = alloca i32

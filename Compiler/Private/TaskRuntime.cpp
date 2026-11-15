@@ -24,8 +24,12 @@ std::string taskRuntimeIR(const std::set<std::string> &nativeSymbols) {
     if (!nativeSymbols.count(symbol)) ir += declaration;
 
   return ir + R"IR(
-@duck.task.limit = internal global i32 0
-@duck.task.active = internal global i32 0
+$duck.task.limit = comdat any
+$duck.task.active = comdat any
+$duck.thread.registryLock = comdat any
+@duck.task.limit = linkonce_odr global i32 0, comdat
+@duck.task.active = linkonce_odr global i32 0, comdat
+@duck.thread.registryLock = linkonce_odr global ptr null, comdat
 @duck.task.variable = private unnamed_addr constant [13 x i8] c"DUCK_WORKERS\00"
 
 define internal i32 @duck.task$limit() {
@@ -54,6 +58,109 @@ done:
   ret i32 %cached
 }
 
+; Slots stay at stable addresses until process exit. Only allocation and reuse
+; take the registry lock. Readers follow atomically published next links.
+define internal ptr @duck.thread$reserve(ptr %function, ptr %task) {
+entry:
+  call void @AcquireSRWLockExclusive(ptr @duck.thread.registryLock)
+  br label %scan
+scan:
+  %previous = phi ptr [ @duck$thread.main, %entry ], [ %next, %inspect ]
+  %link = getelementptr %duck.thread.slot, ptr %previous, i32 0, i32 1
+  %next = load atomic ptr, ptr %link acquire, align 8
+  %end = icmp eq ptr %next, null
+  br i1 %end, label %allocate, label %inspect
+inspect:
+  %state = load atomic i32, ptr %next acquire, align 4
+  %idle = icmp eq i32 %state, 0
+  br i1 %idle, label %reuse, label %scan
+allocate:
+  %size = ptrtoint ptr getelementptr (%duck.thread.slot, ptr null, i32 1) to i64
+  %new = call ptr @malloc(i64 %size)
+  %failed = icmp eq ptr %new, null
+  br i1 %failed, label %done, label %publish
+publish:
+  store %duck.thread.slot { i32 4, ptr null, ptr null, ptr null }, ptr %new
+  store atomic ptr %new, ptr %link release, align 8
+  br label %bind
+reuse:
+  store atomic i32 4, ptr %next release, align 4
+  br label %bind
+bind:
+  %slot = phi ptr [ %new, %publish ], [ %next, %reuse ]
+  %fn = getelementptr %duck.thread.slot, ptr %slot, i32 0, i32 2
+  %arg = getelementptr %duck.thread.slot, ptr %slot, i32 0, i32 3
+  store ptr %function, ptr %fn
+  store ptr %task, ptr %arg
+  br label %done
+done:
+  %result = phi ptr [ null, %allocate ], [ %slot, %bind ]
+  call void @ReleaseSRWLockExclusive(ptr @duck.thread.registryLock)
+  ret ptr %result
+}
+
+define internal i32 @duck.thread$run(ptr %slot) {
+  store ptr %slot, ptr @duck$thread.self
+  %f = getelementptr %duck.thread.slot, ptr %slot, i32 0, i32 2
+  %a = getelementptr %duck.thread.slot, ptr %slot, i32 0, i32 3
+  %fn = load ptr, ptr %f
+  %arg = load ptr, ptr %a
+  store atomic i32 1, ptr %slot release, align 4
+  %result = call i32 %fn(ptr %arg)
+  store ptr null, ptr @duck$thread.self
+  store atomic i32 0, ptr %slot release, align 4
+  ret i32 %result
+}
+
+; Sample each slot once. Mode 0 counts slots, 1 live threads, 2 running.
+define internal i32 @duck.thread$count(i32 %mode) {
+entry:
+  br label %scan
+scan:
+  %slot = phi ptr [ @duck$thread.main, %entry ], [ %next, %scan ]
+  %count = phi i32 [ 0, %entry ], [ %total, %scan ]
+  %state = load atomic i32, ptr %slot acquire, align 4
+  %running = icmp eq i32 %state, 1
+  %positive = icmp uge i32 %state, 1
+  %started = icmp ule i32 %state, 3
+  %live = and i1 %positive, %started
+  %all = icmp eq i32 %mode, 0
+  %onlyLive = icmp eq i32 %mode, 1
+  %matched = select i1 %onlyLive, i1 %live, i1 %running
+  %included = or i1 %all, %matched
+  %add = zext i1 %included to i32
+  %total = add i32 %count, %add
+  %link = getelementptr %duck.thread.slot, ptr %slot, i32 0, i32 1
+  %next = load atomic ptr, ptr %link acquire, align 8
+  %end = icmp eq ptr %next, null
+  br i1 %end, label %done, label %scan
+done:
+  ret i32 %total
+}
+
+define internal i32 @duck.thread$status(i32 %index) {
+entry:
+  %negative = icmp slt i32 %index, 0
+  br i1 %negative, label %invalid, label %scan
+scan:
+  %i = phi i32 [ 0, %entry ], [ %following, %advance ]
+  %slot = phi ptr [ @duck$thread.main, %entry ], [ %next, %advance ]
+  %found = icmp eq i32 %i, %index
+  br i1 %found, label %read, label %advance
+advance:
+  %link = getelementptr %duck.thread.slot, ptr %slot, i32 0, i32 1
+  %next = load atomic ptr, ptr %link acquire, align 8
+  %end = icmp eq ptr %next, null
+  %following = add i32 %i, 1
+  br i1 %end, label %invalid, label %scan
+read:
+  %state = load atomic i32, ptr %slot acquire, align 4
+  ret i32 %state
+invalid:
+  call void @llvm.trap()
+  unreachable
+}
+
 ; Returns the thread handle, or null when the task already ran inline.
 define internal ptr @duck.task$spawn(ptr %function, ptr %task) {
 entry:
@@ -77,9 +184,16 @@ claim:
   %allowed = icmp sle i32 %running, %limit
   br i1 %allowed, label %create, label %inline
 create:
-  %handle = call ptr @CreateThread(ptr null, i64 0, ptr %function, ptr %task, i32 0, ptr null)
+  %slot = call ptr @duck.thread$reserve(ptr %function, ptr %task)
+  %reserved = icmp ne ptr %slot, null
+  br i1 %reserved, label %launch, label %inline
+launch:
+  %handle = call ptr @CreateThread(ptr null, i64 0, ptr @duck.thread$run, ptr %slot, i32 0, ptr null)
   %created = icmp ne ptr %handle, null
-  br i1 %created, label %started, label %inline
+  br i1 %created, label %started, label %cancel
+cancel:
+  store atomic i32 0, ptr %slot release, align 4
+  br label %inline
 started:
   ret ptr %handle
 inline:
@@ -94,7 +208,9 @@ entry:
   %inline = icmp eq ptr %handle, null
   br i1 %inline, label %done, label %wait
 wait:
+  call void @duck.thread$mark(i32 2)
   %status = call i32 @WaitForSingleObject(ptr %handle, i32 -1)
+  call void @duck.thread$mark(i32 1)
   %failed = icmp ne i32 %status, 0
   br i1 %failed, label %trap, label %close
 trap:
@@ -141,6 +257,17 @@ $duck$lock.held = comdat any
 ; 0 outside any block, 1 holding stripes under the shared lock, 2 exclusive.
 @duck$lock.mode = linkonce_odr thread_local global i32 0, comdat
 @duck$lock.held = linkonce_odr thread_local global i64 0, comdat
+
+define internal void @duck.thread$mark(i32 %state) {
+  %slot = load ptr, ptr @duck$thread.self
+  %tracked = icmp ne ptr %slot, null
+  br i1 %tracked, label %mark, label %done
+mark:
+  store atomic i32 %state, ptr %slot release, align 4
+  br label %done
+done:
+  ret void
+}
 
 define internal i64 @duck.lock$bit(ptr %address) {
 entry:
@@ -197,15 +324,18 @@ entry:
 covered:
   ret i32 0
 outermost:
+  call void @duck.thread$mark(i32 3)
   br i1 %exclusive, label %alone, label %named
 alone:
   call void @AcquireSRWLockExclusive(ptr @duck$lock.global)
+  call void @duck.thread$mark(i32 1)
   store i32 2, ptr @duck$lock.mode
   ret i32 1
 named:
   call void @AcquireSRWLockShared(ptr @duck$lock.global)
   store i32 1, ptr @duck$lock.mode
   call void @duck.lock$acquire(i64 %mask)
+  call void @duck.thread$mark(i32 1)
   store i64 %mask, ptr @duck$lock.held
   ret i32 1
 within:
@@ -221,7 +351,9 @@ subset:
   %none = icmp eq i64 %needed, 0
   br i1 %none, label %covered, label %grow
 grow:
+  call void @duck.thread$mark(i32 3)
   call void @duck.lock$acquire(i64 %needed)
+  call void @duck.thread$mark(i32 1)
   %wider = or i64 %held, %needed
   store i64 %wider, ptr @duck$lock.held
   ret i32 0

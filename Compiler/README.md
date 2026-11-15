@@ -1869,6 +1869,32 @@ starts a Windows thread (`CreateThread`), so the runtime targets Windows x64.
 For-loop initializers and steps, assignments to existing variables, and calls
 inside larger expressions still run on the caller.
 
+### Explicit parallel groups
+
+`P` starts a statement with at least two branches. Braces enclose a branch body and parentheses take a zero-argument callable. Both forms can appear in the same group. Each branch runs once, and the caller joins all workers before the next statement. A branch may return early from its own body. The group discards callable return values.
+
+```c++
+P{ tally.FillEvens(n) }{ tally.FillOdds(n) }
+Print(tally.Evens)
+```
+
+Explicit groups bypass the task cost threshold. The caller runs the final branch and uses the existing worker limit and inline fallback for the others. `--sequential` preserves the join semantics and compile-time safety checks. A single `P(x)` still parses as an ordinary call.
+
+The bootstrap checks reads and writes through the branch body, captures, and known callees. It rejects conflicting accesses, external or unknown effects, and callable targets it cannot establish. A named function, inline lambda, or local with a known callable initializer can serve as a branch. A function parameter of type `func` has an unknown target. See [the runnable mixed-branch example](../Examples/Concurrency/11_ParallelBranches.dk).
+
+### Thread inspection
+
+| Expression | What it samples |
+| --- | --- |
+| `P.ThreadCount` | Live Duck scheduler participants, including the main thread and workers waiting at joins or ordered locks. |
+| `P.RunningThreads` | Participants outside the scheduler’s join and lock-acquisition paths. |
+| `P.ThreadSlots` | Number of inspectable slots. Slot zero is main. Worker slots are allocated on demand and reused. |
+| `P.Thread[i].Status` | Read-only integer state of slot `i`. An index outside `0 <= i < P.ThreadSlots` traps. |
+
+A worker slot moves from `P.Starting` to `P.Running` on worker entry and becomes `P.Idle` as soon as the branch finishes, even if its caller has yet to join it. Inline fallback executes on the caller’s slot. `P.WaitingForJoin` covers the scheduler’s wait on a task handle. `P.WaitingForLock` covers acquisition of the locks behind `${ ... }`. Either state can be brief when the operation completes immediately.
+
+Automatic tasks and explicit branches share the linked program’s registry. Each query samples slots as it reads them, so successive reads can observe different states. Native-created threads are outside this registry. OS descheduling, I/O, and time spent in native calls are invisible to the scheduler and can appear as `P.Running`. Capture a sample while work is in flight to inspect overlap. `Print` itself joins earlier automatic work.
+
 ### The cost model
 
 A task must pay for its thread, so the scheduler estimates how many simple

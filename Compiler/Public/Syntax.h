@@ -423,7 +423,7 @@ struct Stmt {
   // back through `target`, runs macro argument bindings from `alternate`, and
   // has one "case" statement per section in `body`. A section's labels are
   // here; stacked labels and `default` share one section.
-  std::vector<std::unique_ptr<Expr>> labels;
+  std::vector<std::unique_ptr<Expr>> labels; // Also holds the callable operands of a P group.
   bool isDefault = false;
 };
 // A `using Name.Space` directive. It applies to the declarations after it in

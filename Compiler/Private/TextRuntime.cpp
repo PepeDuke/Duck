@@ -134,6 +134,7 @@ end:
 )IR";
   ir += std::string("define i32 @") + (wideEntry ? "wmain" : "main") + R"IR((i32 %argc, ptr %argv) {
 entry:
+  store ptr @duck$thread.main, ptr @duck$thread.self
   %args = alloca ptr
   store ptr null, ptr %args
   br label %loop

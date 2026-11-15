@@ -1291,6 +1291,7 @@ class Analyzer {
   // with a protected field, which it then exposes to outside code. Sets
   // owner to the receiver's container.
   bool propertyOf(const Expr &e, std::string &owner) {
+    if (threadProperty(e)) return false;
     auto has = [&](const std::string &record, const std::string &name) {
       MemberPath path;
       return symbols.findMethod(record, "get-" + name, path) != symbols.end() ||
@@ -1731,6 +1732,7 @@ class Analyzer {
   }
   // Existing storage: an addressable expression that is not a property.
   bool storage(const Expr &e) {
+    if (threadProperty(e)) return false;
     if (childrenCall(e)) return true;
     if (enumProperty(e) != Type::Void) return false;
 
@@ -2047,6 +2049,7 @@ class Analyzer {
   // An addressable expression denotes existing storage. Dot inherits the
   // mutability of its base; dereferencing borrows the pointed-to storage.
   Local location(const Expr &e, bool read = true) {
+    if (threadProperty(e)) fail(e.token, "thread inspection properties are read-only");
     Local local{Type::Void, false};
 
     if (childrenCall(e)) return childrenLocation(e);
@@ -2061,7 +2064,7 @@ class Analyzer {
       if (!local.scope.empty()) analysis.scopedPlaces[&e] = {local.scope, local.type};
       if (read && local.memberLambda) notFuncValue(e.token);
 
-      if (read && local.callOnly)
+      if (read && local.callOnly && scopedLambda != &e)
         fail(e.token, "'" + e.token.text + "' holds a lambda that uses this frame's storage; it can only be called here");
 
       if (local.receiver) analysis.receiverStorage.insert(&e);
@@ -3776,7 +3779,35 @@ class Analyzer {
     convert(*e.args[1], second, type);
     return comparison ? Type::Bool : type;
   }
+  bool threadProperty(const Expr &e) {
+    if (e.kind != ".") return false;
+    const auto &base = *e.args[0];
+    const Expr *root = &base;
+    if (e.token.text == "Status" && base.kind == "index") {
+      const auto &threads = *base.args[0];
+      if (threads.kind != "." || threads.token.text != "Thread") return false;
+      root = threads.args[0].get();
+      if (!staticPath(threads).empty()) return false;
+    } else {
+      static const std::set<std::string> properties{"ThreadCount", "RunningThreads", "ThreadSlots",
+          "Idle", "Running", "WaitingForJoin", "WaitingForLock", "Starting"};
+      if (!properties.count(e.token.text)) return false;
+    }
+    return root->kind == "name" && root->token.text == "P" && !findLocal(root->token) &&
+           staticPath(e).empty() && staticPath(*root).empty();
+  }
   Type checkExpression(const Expr &e, Type expected) {
+    if (threadProperty(e)) {
+      static const std::map<std::string, std::string> states{{"Idle", "0"}, {"Running", "1"},
+          {"WaitingForJoin", "2"}, {"WaitingForLock", "3"}, {"Starting", "4"}};
+      if (const auto state = states.find(e.token.text); state != states.end())
+        analysis.integerConstants[&e] = state->second;
+      else {
+        if (e.token.text == "Status") expression(*e.args[0]->args[1], Type::Int);
+        analysis.threadQueries.insert(&e);
+      }
+      return Type::Int;
+    }
     if (e.kind == "compileTime") return expression(*e.args[0], expected);
 
     if (e.kind == "scopeActive") {
@@ -4660,6 +4691,18 @@ class Analyzer {
     return false;
   }
   bool statement(const Stmt &s) {
+    if (s.kind == "parallel") {
+      analysis.parallelGroups.insert(&s);
+      for (const auto &branch : s.labels) {
+        scopedLambda = branch.get();
+        const auto type = expression(*branch);
+        scopedLambda = nullptr;
+        scopedLambdaBorrowed = false;
+        if (!funcValue(type) || !type.signature || !type.signature->parameters.empty())
+          fail(branch->token, "P requires a callable with zero parameters");
+      }
+      return false;
+    }
     if (s.kind == "block" || s.kind == "ordered")
       return block(s.body);
 

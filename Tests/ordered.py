@@ -80,6 +80,183 @@ class Ordered(unittest.TestCase):
         return re.findall(r'call i32 @duck\.lock\$enter\(i64 [^,]+, i1 (true|false)\)', self.ir(source))
 
     # Examples ---------------------------------------------------------------
+    def test_thread_inspection(self):
+        source = '''Main() {
+    int live = 0
+    int running = 0
+    for i : 1...3 {
+        P{
+            live = P.ThreadCount
+            if live > 1 {
+                while P.Thread[0].Status != P.WaitingForJoin {}
+            }
+            running = P.RunningThreads
+        }{}
+    }
+    Print(live)
+    Print(running)
+    Print(P.ThreadCount)
+    Print(P.ThreadSlots)
+    if P.ThreadSlots > 1 { Print(P.Thread[1].Status == P.Idle) }
+}'''
+        for level in ('-O0', '-O2'):
+            exe = self.build(source, level)
+            self.assertEqual(self.run_exe(exe, 2), (0, '2\n1\n1\n2\n1\n'))
+            self.assertEqual(self.run_exe(exe, 1), (0, '1\n1\n1\n1\n'))
+            self.assertEqual(self.run_exe(self.build(source, level, '--sequential'), 2),
+                             (0, '1\n1\n1\n1\n'))
+
+    def test_inspection_during_startup_and_automatic_tasks(self):
+        source = '''int Observe() {
+    int live = P.ThreadCount
+    if live > 1 {
+        while P.Thread[0].Status != P.WaitingForJoin {}
+    }
+    return live
+}
+State #{ int Initial = Init() }
+int Init() {
+    int count = 0
+    P{ count = Observe() }{}
+    return count
+}
+Main() {
+    int count = Observe()
+    int slots = P.ThreadSlots
+    Print(count)
+    Print(State.Initial)
+}'''
+        exe = self.build(source, '-O2')
+        self.assertEqual(self.run_exe(exe, 2), (0, '2\n2\n'))
+        self.assertEqual(self.run_exe(exe, 1), (0, '1\n1\n'))
+
+    def test_thread_inspection_bounds_and_storage(self):
+        for index in (-1, 1):
+            exe = self.build(f'Main() {{ Print(P.Thread[{index}].Status) }}', '-O2')
+            self.assertNotEqual(self.run_exe(exe, 1)[0], 0)
+        self.rejected('Main() { P.Thread[0].Status = 0 }', 'read-only')
+        self.rejected('Main() { P.RunningThreads++ }', 'read-only')
+        self.check('Stats { int ThreadCount = 7 }\nMain() { Stats P()\n Print(P.ThreadCount) }', '7\n')
+
+    def test_thread_inspection_across_modules(self):
+        library = self.write('''int Observe() {
+    int count = 0
+    P{ count = P.ThreadCount
+       if count > 1 {
+           while P.Thread[0].Status != P.WaitingForJoin {}
+       }
+    }{}
+    return count
+}''', 'observer.dk')
+        interface = self.root / 'observer.dki'
+        lib_ir, app_ir = self.root / 'observer.ll', self.root / 'app.ll'
+        self.duckc('--library', library, '--interface', interface, '-o', lib_ir)
+        main = self.write('Main(string [] args) { Print(Observe())\n Print(P.ThreadSlots) }')
+        self.duckc('--import', interface, main, '-o', app_ir)
+        exe = self.root / 'app.exe'
+        subprocess.run([options.clang, '-O2', str(lib_ir), str(app_ir), '-o', str(exe)], check=True,
+                       capture_output=True, timeout=60)
+        self.assertEqual(self.run_exe(exe, 2), (0, '2\n2\n'))
+
+    def test_thread_inspection_lock_wait(self):
+        source = THREADS + '''extern "C" void* CreateEventA(void* security, int manual, int initial, void* label)
+extern "C" int SetEvent(void* event)
+extern "C" int abs(int n)
+int Observer(void* ready) {
+    ${ SetEvent(ready)
+       while P.Thread[0].Status != P.WaitingForLock {}
+       Print(P.RunningThreads)
+       Print(P.ThreadCount) }
+    return 0
+}
+Main() {
+    ready : CreateEventA(null, 0, 0, null)
+    observer : CreateThread(null, 0, &Observer, ready, 0, null)
+    WaitForSingleObject(ready, -1)
+    ${ abs(1) }
+    WaitForSingleObject(observer, -1)
+    CloseHandle(observer)
+    CloseHandle(ready)
+    Print(P.Thread[0].Status == P.Running)
+}'''
+        self.assertEqual(self.run_exe(self.build(source, '-O2'), 2), (0, '0\n1\n1\n'))
+
+    def test_explicit_parallel_branches(self):
+        source = (REPOSITORY / 'Examples/Concurrency/11_ParallelBranches.dk').read_text()
+        self.assertEqual(self.ir(source).count('call ptr @duck.task$spawn('), 5)
+        self.assertNotIn('call ptr @duck.task$spawn(', self.ir(source, '--sequential'))
+        self.check(source, '4\n3\n12\n')
+
+    def test_parallel_conflicts_and_unknown_effects(self):
+        for source, reason in [
+            ('Main() { int x = 0\n P{ x++ }(@ () { x++ }) }', 'P branches 1 and 2'),
+            ('Add(int& n) { n++ }\nMain() { int n = 0\n P{ Add(n) }{ Add(n) } }', 'P branches 1 and 2'),
+            ('Main() { int x = 0\n func f = @ () { x++ }\n P(f)(f) }', 'P branches 1 and 2'),
+            ('F(int& x, int& y) { P{ x++ }{ y++ } }\nMain() {}', 'P branches 1 and 2'),
+            ("Main() { int x = 1\n P{ x++ }{ int y = x } }", "conflicting accesses to 'x'"),
+            ('Main() { int x = 0\n func f = @ () {}\n f = @ () { x++ }\n P(f){ x++ } }', 'safe for a worker'),
+            ('Main() { P{ Print(1) }{} }', 'safe for a worker'),
+            ('F(func void() f) { P(f){} }\nMain() {}', 'safe for a worker'),
+            ('F(int x) {}\nMain() { P(F){} }', 'zero parameters'),
+            ('Main() { P{} }', 'at least two branches'),
+        ]:
+            for flags in ((), ('--sequential',)):
+                with self.subTest(source=source, flags=flags):
+                    self.assertIn(reason, self.duckc(*flags, self.write(source), '-o', self.root / 'x.ll',
+                                                     success=False))
+
+    def test_parallel_returns_and_ordinary_p_call(self):
+        self.check('''int P(int x) { return x + 1 }
+int Answer() { return 42 }
+Main() {
+    int n = 0
+    P{ n = P(4)
+       return }(Answer)
+    func localWork = @ int() { int x = 5
+                               return x }
+    P(localWork)(localWork)
+    Print(n)
+}''', '5\n')
+
+    def test_parallel_methods_and_nested_lambdas(self):
+        self.check('''Totals {
+    int X = 0
+    int Y = 0
+    AddX() { X++ }
+    AddY() { Y++ }
+    Both() { P{ AddX() }{ AddY() } }
+}
+Main() {
+    Totals t()
+    int delta = 2
+    func run = @ () {
+        P{ t.X += delta }{ t.Y += delta }
+    }
+    run()
+    t.Both()
+    P{ P{ t.X += delta }{} }{ t.Y += delta }
+    Print(t.X)
+    Print(t.Y)
+}''', '5\n5\n')
+
+    def test_parallel_capture_scope_and_repeated_group(self):
+        self.check('''Work(int& total) {
+    int a = 0
+    func increment = @ () { a++ }
+    {
+        int a = 0
+        for i : 1...10 {
+            P(increment){ a++ }
+        }
+        total += a
+    }
+    total += a
+}
+Main() { int total = 0
+    Work(total)
+    Print(total)
+}''', '20\n')
+
     def test_existing_concurrency_examples(self):
         self.example('Concurrency/01_ReadWaitsForWork.dk', '2\n')
         self.example('Concurrency/02_AtomicWithdrawal.dk', '0\n')

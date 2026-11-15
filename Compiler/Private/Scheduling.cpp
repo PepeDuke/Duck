@@ -80,6 +80,13 @@ class EffectWalker {
   std::map<std::string, std::pair<Token, Type>> locals; // By unique id.
   std::vector<std::set<std::string> *> activeBlocks;    // Locals declared inside each open `${ }`.
   std::set<std::string> lockedLocals;                   // Locals some inner block locks by address.
+  // A stored closure's resources are resolved at its declaration, before shadowing.
+  bool checkingGroups = false;
+  bool inBranch = false;
+  std::set<const Stmt *> checkedGroups;
+  std::set<std::string> branchNames, otherUses;
+  std::set<size_t> boxedParameters; // Separate captured locals own distinct boxes.
+  std::map<std::string, EffectSet> callableLocals;
   unsigned counter = 0;
   EffectSet current;
 
@@ -131,13 +138,14 @@ class EffectWalker {
     }
 
     if (e.kind == "name") {
-      if (captured(e.token.text)) return std::nullopt;
+      if (!checkingGroups && captured(e.token.text)) return std::nullopt;
       if (auto *local = find(e.token.text)) return *local;
-      if (!f.method) return std::nullopt;
+      const auto *receiver = find("this");
+      if (!receiver) return std::nullopt;
 
       MemberPath member;
 
-      if (!symbols.findField(f.params[0].type.record, e.token.text, member) || !member.field->scope.empty()) return std::nullopt;
+      if (!symbols.findField(receiver->type.record, e.token.text, member) || !member.field->scope.empty()) return std::nullopt;
 
       auto self = *find("this");
       extend(self, member);
@@ -171,13 +179,14 @@ class EffectWalker {
     return std::nullopt;
   }
   void read(const Expr &e) {
-    if (auto found = place(e)) current.reads.insert(found->resource);
+    if (auto found = place(e); found && (!inBranch || taskData(found->type, symbols))) current.reads.insert(found->resource);
     else current.unknown = true;
   }
   void write(const Expr &e, bool alsoRead) {
     auto found = place(e);
 
-    if (!found || (recordValue(found->type) && symbols.destructible(found->type.record))) {
+    if (!found || (inBranch && !taskData(found->type, symbols)) ||
+        (recordValue(found->type) && symbols.destructible(found->type.record))) {
       current.unknown = true;
       return;
     }
@@ -309,7 +318,7 @@ class EffectWalker {
       for (const auto &part : built->second) {
         const auto callee = table.find(part.key);
 
-        if (callee == table.end()) {
+        if (callee == table.end() || (inBranch && !callee->second.threadSafe)) {
           current.unknown = true;
           continue;
         }
@@ -370,6 +379,7 @@ class EffectWalker {
       return;
     }
 
+    if (inBranch && !callee->second.threadSafe) current.unknown = true;
     const auto &signature = symbols.at(target->second);
 
     if (signature.method) {
@@ -404,6 +414,14 @@ class EffectWalker {
     current.merge(mapped);
   }
   void expression(const Expr &e) {
+    if (a.threadQueries.count(&e)) {
+      if (e.token.text == "Status") expression(*e.args[0]->args[1]);
+      return;
+    }
+    if (inBranch) {
+      const auto type = a.expressionTypes.find(&e);
+      if (type != a.expressionTypes.end() && !taskData(type->second, symbols)) current.unknown = true;
+    }
     static const std::set<std::string> constants{"int", "real", "bool", "char", "text", "null", "typeMember", "compileTime"};
 
     if (constants.count(e.kind)) return;
@@ -569,7 +587,13 @@ class EffectWalker {
 
     auto name = s.token;
     name.text = s.name;
+    std::optional<EffectSet> callable;
+    if (checkingGroups && funcValue(type) && s.expr && branchNames.count(s.name) &&
+        (s.constant || !otherUses.count(s.name)))
+      callable = branchEffects(*s.expr);
+    if (inBranch && !taskData(type, symbols)) current.unknown = true;
     const auto local = declare(name, type);
+    if (callable) callableLocals.emplace(local.root, std::move(*callable));
     current.writes.insert(local);
 
     if (recording) recording->declared[&s] = local;
@@ -651,10 +675,117 @@ class EffectWalker {
 
     scopes.pop_back();
   }
+  EffectSet branchEffects(const Expr &e) {
+    EffectSet effects;
+    effects.unknown = true;
+    if (const auto target = a.functionValues.find(&e); target != a.functionValues.end()) {
+      const auto found = table.find(target->second);
+      if (found != table.end() && found->second.threadSafe) return found->second;
+      return effects;
+    }
+    if (e.kind == "name") {
+      if (auto *p = find(e.token.text)) {
+        const auto known = callableLocals.find(p->resource.root);
+        if (known != callableLocals.end()) return known->second;
+      }
+    }
+    if (!e.lambda || !e.lambda->params.empty() ||
+        !(e.lambda->result == Type::Void || plainValue(e.lambda->result))) return effects;
+
+    std::map<std::string, Place> captures;
+    for (const auto &capture : a.lambdas.at(&e).captures) {
+      auto *p = find(capture.token.text);
+      if (!p || !taskData(capture.type, symbols)) return effects;
+      captures.emplace(capture.token.text, *p);
+    }
+    std::set<std::string> outerLocals;
+    for (const auto &[name, place] : captures)
+      if (place.resource.kind == Resource::Local) outerLocals.insert(place.resource.root);
+    auto enclosing = std::move(scopes);
+    scopes = {std::move(captures)};
+    auto outer = std::move(current);
+    current = {};
+    const bool previous = std::exchange(inBranch, true);
+    list(e.lambda->body);
+    inBranch = previous;
+    effects = std::move(current);
+    for (auto *set : {&effects.reads, &effects.writes})
+      for (auto it = set->begin(); it != set->end();)
+        it = it->kind == Resource::Local && !outerLocals.count(it->root) ? set->erase(it) : std::next(it);
+    current = std::move(outer);
+    scopes = std::move(enclosing);
+    return effects;
+  }
+  // Distinct reference parameters can designate the same storage, including
+  // a static or a subobject passed by the caller.
+  std::string conflict(const EffectSet &first, const EffectSet &second) const {
+    auto meets = [&](const auto &left, const auto &right) -> std::string {
+      for (const auto &x : left)
+        for (const auto &y : right) {
+          if (x.overlaps(y)) {
+            const auto &r = x.path.size() >= y.path.size() ? x : y;
+            std::string name;
+            Type type;
+            if (r.kind == Resource::Local) {
+              const auto &local = locals.at(r.root);
+              name = local.first.text;
+              type = local.second;
+            } else if (r.kind == Resource::Static) {
+              name = r.root;
+              type = symbols.statics.at(r.root).type;
+            } else {
+              if (r.parameter >= f.params.size()) return "a captured reference";
+              name = f.params[r.parameter].name.text;
+              type = f.params[r.parameter].type;
+            }
+            for (auto index : r.path) {
+              const auto &field = symbols.records.at(type.record).fields.at(index);
+              name += "." + field.name.text;
+              type = field.type;
+            }
+            return "'" + name + "'";
+          }
+          const bool xBox = x.kind == Resource::Parameter && boxedParameters.count(x.parameter);
+          const bool yBox = y.kind == Resource::Parameter && boxedParameters.count(y.parameter);
+          if ((xBox && (yBox || y.kind == Resource::Static)) || (yBox && x.kind == Resource::Static)) continue;
+          if (x.kind != Resource::Local && y.kind != Resource::Local &&
+              (x.kind == Resource::Parameter || y.kind == Resource::Parameter) &&
+              (x.kind != y.kind || x.parameter != y.parameter)) return "potentially aliased references";
+        }
+      return {};
+    };
+    auto resource = meets(first.writes, second.reads);
+    if (resource.empty()) resource = meets(first.reads, second.writes);
+    if (resource.empty()) resource = meets(first.writes, second.writes);
+    return resource;
+  }
+  void parallelGroup(const Stmt &s) {
+    if (!checkingGroups) {
+      current.unknown = true; // Synchronize with any automatic tasks on entry.
+      return;
+    }
+    checkedGroups.insert(&s);
+    std::vector<EffectSet> branches;
+    for (const auto &branch : s.labels) {
+      auto effects = branchEffects(*branch);
+      if (effects.unknown || effects.external)
+        fail(branch->token, "cannot prove P branch " + std::to_string(branches.size() + 1) + " is safe for a worker");
+      for (size_t i = 0; i < branches.size(); ++i)
+        if (auto resource = conflict(branches[i], effects); !resource.empty())
+          fail(branch->token, "P branches " + std::to_string(i + 1) + " and " +
+                              std::to_string(branches.size() + 1) + " have conflicting accesses to " + resource);
+      current.merge(effects);
+      branches.push_back(std::move(effects));
+    }
+  }
   void effects(const Stmt &s) {
+    if (s.kind == "parallel") return parallelGroup(s);
     static const std::set<std::string> mutations{"assign", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "++", "--"};
 
-    if (s.kind == "ordered") return ordered(s);
+    if (s.kind == "ordered") {
+      if (checkingGroups) return list(s.body);
+      return ordered(s);
+    }
     if (s.kind == "block") return list(s.body);
 
     if (s.kind == "return") {
@@ -711,6 +842,62 @@ public:
   EffectWalker(const Function &f, const FunctionAnalysis &a, const Symbols &symbols, const EffectTable &table,
                bool library, Recording *recording)
       : f(f), a(a), symbols(symbols), table(table), library(library), recording(recording) {}
+  void validateGroups() {
+    checkingGroups = true;
+    std::set<const Expr *> operands;
+    for (auto *group : a.parallelGroups)
+      for (const auto &branch : group->labels) {
+        operands.insert(branch.get());
+        if (branch->kind == "name") branchNames.insert(branch->token.text);
+      }
+    // A mutable local used only as a branch operand still has its initializer.
+    // Any other use can pass it by reference or replace the callable.
+    auto expr = [&](const Expr &e) {
+      if (e.kind == "name" && !operands.count(&e)) otherUses.insert(e.token.text);
+    };
+    auto stmt = [](const Stmt &) {};
+    for (const auto &s : f.body) visitStatement(*s, expr, stmt);
+    for (const auto &[lambda, info] : a.lambdas)
+      for (const auto &s : lambda->lambda->body) visitStatement(*s, expr, stmt);
+    run();
+    // Lambdas outside a group are opaque to the automatic scheduler. Check
+    // groups in their bodies too, treating borrowed inputs as possible aliases.
+    for (const auto &[lambda, info] : a.lambdas) {
+      bool needed = false;
+      auto group = [&](const Stmt &s) {
+        if (s.kind == "parallel" && !checkedGroups.count(&s)) needed = true;
+      };
+      auto ignore = [](const Expr &) {};
+      for (const auto &s : lambda->lambda->body) visitStatement(*s, ignore, group);
+      if (!needed) continue;
+      EffectWalker inner(*lambda->lambda, a, symbols, table, library, nullptr);
+      inner.checkingGroups = true;
+      inner.branchNames = branchNames;
+      inner.otherUses = otherUses;
+      inner.scopes.emplace_back();
+      size_t index = lambda->lambda->params.size();
+      for (const auto &capture : info.captures) {
+        Place p;
+        p.resource.kind = Resource::Parameter;
+        if (capture.kind == FunctionAnalysis::Capture::Box) inner.boxedParameters.insert(index);
+        p.resource.parameter = index++;
+        p.type = capture.type;
+        inner.declareAlias(capture.token, p);
+      }
+      if (info.bound) {
+        Place self;
+        self.resource.kind = Resource::Parameter;
+        self.resource.parameter = index;
+        self.type = Type::Record;
+        self.type.record = info.record;
+        inner.scopes.back()["this"] = self;
+      }
+      inner.run();
+      checkedGroups.insert(inner.checkedGroups.begin(), inner.checkedGroups.end());
+    }
+    for (auto *group : a.parallelGroups)
+      if (!checkedGroups.count(group)) fail(group->token, "cannot establish the capture effects of this P group");
+  }
   EffectSet run() {
     scopes.emplace_back();
 
@@ -1109,12 +1296,16 @@ EffectTable summarizeEffects(const Program &program, const std::vector<FunctionA
 }
 
 void planOrderedBlocks(const Function &function, const EffectTable &effects, const Symbols &symbols,
-                       FunctionAnalysis &analysis, bool entry) {
+                       FunctionAnalysis &analysis, bool entry, bool parallel) {
   if (!function.nativeSymbol.empty()) return;
 
   Recording recording;
   EffectWalker(function, analysis, symbols, effects, !entry, &recording).run();
   analysis.orderedLocks = std::move(recording.ordered);
+  if (!analysis.parallelGroups.empty()) {
+    EffectWalker(function, analysis, symbols, effects, !entry, nullptr).validateGroups();
+    analysis.parallelWorkers = parallel;
+  }
 }
 
 void scheduleTasks(const Program &program, size_t index, const EffectTable &effects, const Symbols &symbols,

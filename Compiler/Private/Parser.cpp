@@ -994,11 +994,11 @@ class Parser {
     expect(")");
   }
   // `@ result(parameters) { body }`, after the '@'.
-  void lambdaExpression(Expr &e) {
+  void lambdaExpression(Expr &e, bool blockBranch = false) {
     e.kind = "lambda";
     Type result = Type::Void;
 
-    if (!at("(")) result = type();
+    if (!blockBranch && !at("(")) result = type();
 
     requireFuncSignature(result, "a func result");
     Token name = e.token;
@@ -1006,7 +1006,7 @@ class Parser {
     Function f{name, result, {}, {}, false, {}};
     f.usings = usings;
     hygiene.emplace_back();
-    parameterList(f);
+    if (!blockBranch) parameterList(f);
     const bool outerOwner = returnsOwner;
     returnsOwner = false;
     // An assertion leaves its test, and a lambda body cannot do that.
@@ -1982,12 +1982,42 @@ class Parser {
 
     return s;
   }
+  // A single P(...) remains an ordinary function call.
+  bool parallelAhead() const {
+    if (!at("P")) return false;
+    size_t k = pos + 1;
+    if (punctuation(tokens.at(k), "{")) return true;
+    if (!punctuation(tokens.at(k), "(") || !skipToCloseParen(k)) return false;
+    return punctuation(tokens.at(k + 1), "(") || punctuation(tokens.at(k + 1), "{");
+  }
+  std::unique_ptr<Stmt> parallelGroup() {
+    auto group = std::make_unique<Stmt>();
+    group->token = pop();
+    group->kind = "parallel";
+    do {
+      if (at("{")) {
+        auto branch = std::make_unique<Expr>();
+        branch->token = peek();
+        lambdaExpression(*branch, true);
+        group->labels.push_back(std::move(branch));
+      } else {
+        expect("(");
+        lines();
+        group->labels.push_back(expression());
+        lines();
+        expect(")");
+      }
+    } while (at("{") || at("("));
+    if (group->labels.size() < 2) fail(group->token, "P requires at least two branches");
+    return group;
+  }
   std::unique_ptr<Stmt> statement() {
     expandStatementMacro();
 
     if (scopeMarkAhead()) return scopedLoop();
     if (scopeStatementAhead()) return scopeStatement();
     if (at("Switch")) return switchStatement();
+    if (parallelAhead()) return parallelGroup();
 
     if (at("macro") && word(tokens.at(pos + 1)) && punctuation(tokens.at(pos + 2), "("))
       fail(peek(), "a macro cannot be declared inside a function; declare it at file scope or in a container");
