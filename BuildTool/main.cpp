@@ -144,7 +144,7 @@ struct Options {
     std::string module, profile = "debug", compiler, clang;
     Strings enable, disable, filters;
     bool list = false, compareSchedules = false, verbose = false;
-    int samples = 5, jobs = 1;
+    int samples = 5, jobs = 0; // Unspecified until the test mode is known.
 };
 struct Link {
     Strings libraries, directories;
@@ -1048,7 +1048,7 @@ static void help() {
         "\n"
         "Usage: duck test PROJECT [--module MODULE] [--filter TEXT] [--jobs N] [--list] [build options above]\n"
         "Builds each module's T{ } tests into its own executable, separate from the program, and runs them.\n"
-        "--jobs N runs up to N test cases in separate processes (default 1).\n"
+        "--jobs N runs up to N test cases in separate processes (default 8, or 1 for --compare-schedules).\n"
         "--module tests one module. --filter runs tests whose name contains TEXT and may be repeated.\n"
         "--list prints test names without running them.\n"
         "--compare-schedules runs the tests repeatedly under the sequential schedule and each\n"
@@ -1112,6 +1112,7 @@ static int mainImpl(const Strings& arguments) {
             else options.clang = value;
         }
         if (options.project.empty()) fail("a .dkp project is required");
+        if (options.jobs == 0) options.jobs = options.compareSchedules ? 1 : 8;
         if (options.jobs > 1 && options.compareSchedules) fail("--compare-schedules requires serial test execution");
         if (options.list && options.compareSchedules) fail("--list and --compare-schedules cannot be combined");
         if (options.profile != "debug" && options.profile != "release") fail("profile must be debug or release");
