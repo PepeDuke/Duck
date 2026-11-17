@@ -115,7 +115,7 @@ int execute(const std::vector<std::string>& arguments) {
 // unrelated child exited.
 static std::mutex launching;
 
-int capture(const std::vector<std::string>& arguments, std::string& output, bool mergeErrors) {
+static int captureRaw(const std::vector<std::string>& arguments, std::string& output, bool mergeErrors) {
     std::cout.flush();
     output.clear();
     char buffer[4096];
@@ -219,15 +219,19 @@ void run(const std::vector<std::string>& arguments, bool echo) {
     requireSuccess(execute(arguments), arguments);
 }
 
-void run(const std::vector<std::string>& arguments, std::string& output) {
-    const int status = capture(arguments, output, true);
+int capture(const std::vector<std::string>& arguments, std::string& output, bool mergeErrors) {
+    const int status = captureRaw(arguments, output, mergeErrors);
     // Tools write CRLF into the pipe on Windows, and the stream this is
     // replayed through would turn each LF into CRLF again.
     size_t kept = 0;
     for (size_t i = 0; i < output.size(); ++i)
         if (output[i] != '\r' || i + 1 == output.size() || output[i + 1] != '\n') output[kept++] = output[i];
     output.resize(kept);
-    requireSuccess(status, arguments);
+    return status;
+}
+
+void run(const std::vector<std::string>& arguments, std::string& output) {
+    requireSuccess(capture(arguments, output, true), arguments);
 }
 
 void publish(const fs::path& source, const fs::path& destination) {

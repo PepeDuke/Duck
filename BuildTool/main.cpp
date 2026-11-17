@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <map>
 #include <mutex>
@@ -143,7 +144,7 @@ struct Options {
     std::string module, profile = "debug", compiler, clang;
     Strings enable, disable, filters;
     bool list = false, compareSchedules = false, verbose = false;
-    int samples = 5;
+    int samples = 5, jobs = 1;
 };
 struct Link {
     Strings libraries, directories;
@@ -455,24 +456,29 @@ static std::string storedKey(const fs::path& path) {
 // A module's key covers the compiler binary, its own sources' paths and text,
 // and its dependencies' keys, which cover theirs: a dependency's container
 // names change how the module's own files parse.
+using ModuleKeys = std::map<std::string, std::string>;
+
+static ModuleKeys moduleKeys(const Project& project, const Plan& sources, const std::string& compiler) {
+    ModuleKeys keys;
+    const auto tool = toolIdentity(compiler);
+    // The plan lists dependencies before the modules which use them.
+    for (const auto& [id, files] : sources) {
+        Strings parts{"duck-interface 1", id};
+        parts.insert(parts.end(), tool.begin(), tool.end());
+        for (const auto& file : files) parts.insert(parts.end(), {file.u8string(), readFile(file)});
+        for (const auto& dependency : project.modules.at(id).depends) parts.push_back(keys.at(dependency));
+        keys[id] = hashOf(parts);
+    }
+    return keys;
+}
+
 static Interfaces interfaces(const Project& project, const Plan& sources, const std::string& compiler,
                              const fs::path& destination) {
     Interfaces result;
-    const auto tool = toolIdentity(compiler);
-    std::function<const std::string&(const std::string&)> key = [&](const std::string& id) -> const std::string& {
-        if (auto found = result.keys.find(id); found != result.keys.end()) return found->second;
-        Strings parts{"duck-interface 1", id};
-        parts.insert(parts.end(), tool.begin(), tool.end());
-        const auto own = std::find_if(sources.begin(), sources.end(), [&](const auto& item) { return item.first == id; });
-        for (const auto& file : own->second) parts.insert(parts.end(), {file.u8string(), readFile(file)});
-        for (const auto& dependency : project.modules.at(id).depends) parts.push_back(key(dependency));
-        return result.keys[id] = hashOf(parts);
-    };
-    for (const auto& [id, files] : sources) {
-        (void)files;
+    result.keys = moduleKeys(project, sources, compiler);
+    for (const auto& [id, key] : result.keys) {
         const auto path = destination / (id + ".dki");
-        const auto& current = key(id); // Every module needs one; only libraries have interfaces.
-        if (id != project.entry && storedKey(path) == current) result.fresh[id] = path;
+        if (id != project.entry && storedKey(path) == key) result.fresh[id] = path;
     }
     return result;
 }
@@ -485,13 +491,75 @@ class TestBuilder {
     std::string compiler, clang, optimize;
     fs::path destination;
     WorkDirectory work;
-    std::map<std::pair<std::string, bool>, fs::path> dependencies;
+    ModuleKeys keys;
+    Strings clangIdentity;
+
+    struct Object {
+        fs::path path;
+        bool scheduled = false;
+    };
+    std::map<fs::path, Object> objects;
+
+    Object compile(const Plan& sources, const std::string& id, bool test, bool sequential) {
+        const auto name = id + (sequential ? ".sequential" : "") + (test ? ".test" : ".library");
+        const auto cache = destination / (name + ".cache");
+        if (auto hit = objects.find(cache); hit != objects.end()) return hit->second;
+        Strings parts{"duck-test-object 1", keys.at(id), name, optimize};
+        parts.insert(parts.end(), clangIdentity.begin(), clangIdentity.end());
+        const auto key = hashOf(parts);
+        Object object{work.path / (name + ".o")};
+
+        // Keep the key, scheduling metadata and bytes in one atomically replaced
+        // entry. A concurrent build can never pair a stamp with another object.
+        {
+            std::ifstream cached(cache, std::ios::binary);
+            std::string header;
+            if (std::getline(cached, header) && header == key) {
+                const int kind = cached.get();
+                if (kind == '0') return objects[cache] = {};
+                if (kind == '1' || kind == '2') {
+                    std::ofstream copy(object.path, std::ios::binary);
+                    copy << cached.rdbuf();
+                    copy.close();
+                    if (copy && !cached.bad()) {
+                        object.scheduled = kind == '2';
+                        return objects[cache] = object;
+                    }
+                }
+            }
+        }
+
+        const auto ir = work.path / (name + ".ll");
+        run(compileCommand(project, sources, compiler, id, test ? "--test" : "--library", ir, sequential), false);
+        const auto text = readFile(ir);
+        if (test && text.find("; duck-tests: 0\n") != std::string::npos) object = {};
+        else {
+            object.scheduled = text.find("@duck.task.limit") != std::string::npos;
+            run({clang, "-c", optimize, ir.u8string(), "-o", object.path.u8string()}, false);
+        }
+
+        // A source may have been saved while the compiler was running. Leave
+        // this invocation's object private if its input snapshot has changed.
+        if (moduleKeys(project, sources, compiler).at(id) != keys.at(id)) return objects[cache] = object;
+
+        const auto pending = work.path / cache.filename();
+        std::ofstream out(pending, std::ios::binary);
+        out << key << '\n' << (object.path.empty() ? '0' : object.scheduled ? '2' : '1');
+        if (!object.path.empty()) {
+            std::ifstream bytes(object.path, std::ios::binary);
+            out << bytes.rdbuf();
+        }
+        out.close();
+        if (!out) fail("cannot write " + pending.u8string());
+        duckbuild::publish(pending, cache);
+        return objects[cache] = object;
+    }
 
 public:
-    TestBuilder(const Project& p, std::string compilerPath, std::string clangPath, const Options& options)
+    TestBuilder(const Project& p, std::string compilerPath, std::string clangPath, const Options& options, const Plan& selected)
         : project(p), compiler(std::move(compilerPath)), clang(std::move(clangPath)),
           optimize(options.profile == "debug" ? "-O0" : "-O2"), destination(p.buildDir / options.profile / "tests"),
-          work(destination) {}
+          work(destination), keys(moduleKeys(p, selected, compiler)), clangIdentity(toolIdentity(clang)) {}
 
     struct Result {
         fs::path executable;
@@ -502,28 +570,17 @@ public:
         const auto sources = project.plan(id);
         const std::string tag = sequential ? ".sequential" : "";
         Result result;
-        const auto ir = work.path / (id + tag + ".test.ll"), object = work.path / (id + tag + ".test.o");
-        run(compileCommand(project, sources, compiler, id, "--test", ir, sequential), false);
-        const auto text = readFile(ir);
-        if (text.find("; duck-tests: 0\n") != std::string::npos) return result;
+        const auto object = compile(sources, id, true, sequential);
+        if (object.path.empty()) return result;
         result.tests = true;
-        result.scheduledWork = text.find("@duck.task.limit") != std::string::npos;
-        run({clang, "-c", optimize, ir.u8string(), "-o", object.u8string()}, false);
-        Strings link{clang, object.u8string()}, flags;
+        result.scheduledWork = object.scheduled;
+        Strings link{clang, object.path.u8string()}, flags;
         for (const auto& [dependency, unused] : sources) {
             (void)unused;
             if (dependency == id) continue;
-            const auto key = std::make_pair(dependency, sequential);
-            auto known = dependencies.find(key);
-            if (known == dependencies.end()) {
-                const auto library = work.path / (dependency + tag + ".ll"), output = work.path / (dependency + tag + ".o");
-                run(compileCommand(project, sources, compiler, dependency, "--library", library, sequential), false);
-                run({clang, "-c", optimize, library.u8string(), "-o", output.u8string()}, false);
-                known = dependencies.emplace(key, output).first;
-            }
-            result.scheduledWork = result.scheduledWork ||
-                readFile(known->second.parent_path() / (dependency + tag + ".ll")).find("@duck.task.limit") != std::string::npos;
-            link.push_back(known->second.u8string());
+            const auto library = compile(sources, dependency, false, sequential);
+            result.scheduledWork = result.scheduledWork || library.scheduled;
+            link.push_back(library.path.u8string());
         }
         for (auto it = sources.rbegin(); it != sources.rend(); ++it) project.linkFlags(project.modules.at(it->first), flags);
         project.linkFlags(project.link, flags);
@@ -643,12 +700,55 @@ static bool compareModule(const std::string& id, const TestBuilder::Result& sequ
     return true;
 }
 
+// Each worker claims the next case when its child exits. Keep diagnostics
+// together, including the last RUN line of a child which traps.
+static int parallelTests(const Strings& command, int jobs) {
+    auto list = command;
+    list.insert(list.begin() + 1, "--list");
+    std::string listing;
+    const int status = duckbuild::capture(list, listing);
+    if (status != 0) {
+        std::cout << listing;
+        return status;
+    }
+    Strings names;
+    std::istringstream lines(listing);
+    for (std::string name; std::getline(lines, name);) {
+        if (!name.empty()) names.push_back(name);
+    }
+
+    std::atomic<size_t> next{0};
+    std::mutex reporting;
+    size_t failed = 0;
+    auto worker = [&] {
+        for (;;) {
+            const auto index = next.fetch_add(1);
+            if (index >= names.size()) return;
+            std::string output;
+            const int code = duckbuild::capture({command.front(), "--case", names[index]}, output, true);
+            std::lock_guard<std::mutex> lock(reporting);
+            std::cout << output;
+            if (code != 0) {
+                ++failed;
+                if (code != 1) std::cout << names[index] << " stopped with exit code " << code << '\n';
+            }
+            std::cout.flush();
+        }
+    };
+    std::vector<std::future<void>> workers;
+    const auto count = std::min<size_t>(jobs, names.size());
+    for (size_t i = 0; i < count; ++i) workers.push_back(std::async(std::launch::async, worker));
+    for (auto& result : workers) result.get();
+    std::cout << names.size() - failed << " passed, " << failed << " failed, " << names.size() << " total" << std::endl;
+    return failed ? 1 : 0;
+}
+
 static int test(const Options& options, const fs::path& bin) {
     Project project(options);
     const auto selected = project.plan(options.module);
     auto compiler = project.tool("compiler", options.compiler, bin);
     auto clang = project.tool("clang", options.clang, bin);
-    TestBuilder builder(project, compiler, clang, options);
+    TestBuilder builder(project, compiler, clang, options, selected);
     int passed = 0, failed = 0, unmatched = 0;
     bool compared = false;
     if (options.compareSchedules)
@@ -675,7 +775,7 @@ static int test(const Options& options, const fs::path& bin) {
         Strings command{built.executable.u8string()};
         if (options.list) command.push_back("--list");
         command.insert(command.end(), options.filters.begin(), options.filters.end());
-        const int status = duckbuild::execute(command);
+        const int status = options.jobs > 1 && !options.list ? parallelTests(command, options.jobs) : duckbuild::execute(command);
         if (status == 0) ++passed;
         else if (status == 2 && !options.filters.empty()) ++unmatched;
         else {
@@ -946,8 +1046,9 @@ static void help() {
         "Each step prints [done/total] as it finishes; --verbose also prints every tool command.\n"
         "--enable and --disable may be repeated. Tool overrides resolve from the working directory.\n"
         "\n"
-        "Usage: duck test PROJECT [--module MODULE] [--filter TEXT] [--list] [build options above]\n"
+        "Usage: duck test PROJECT [--module MODULE] [--filter TEXT] [--jobs N] [--list] [build options above]\n"
         "Builds each module's T{ } tests into its own executable, separate from the program, and runs them.\n"
+        "--jobs N runs up to N test cases in separate processes (default 1).\n"
         "--module tests one module. --filter runs tests whose name contains TEXT and may be repeated.\n"
         "--list prints test names without running them.\n"
         "--compare-schedules runs the tests repeatedly under the sequential schedule and each\n"
@@ -984,7 +1085,7 @@ static int mainImpl(const Strings& arguments) {
             auto equals = argument.find('=');
             auto key = argument.substr(0, equals);
             if (key != "--module" && key != "--enable" && key != "--disable" && key != "--profile" && key != "--compiler" && key != "--clang" &&
-                !(testing && (key == "--filter" || key == "--samples")))
+                !(testing && (key == "--filter" || key == "--samples" || key == "--jobs")))
                 fail("unknown option: " + key);
             std::string value;
             if (equals != std::string::npos) value = argument.substr(equals + 1);
@@ -995,10 +1096,11 @@ static int mainImpl(const Strings& arguments) {
             if (value.empty()) fail("missing value for " + key);
             if (key == "--enable") options.enable.push_back(value);
             else if (key == "--disable") options.disable.push_back(value);
-            else if (key == "--samples") {
+            else if (key == "--samples" || key == "--jobs") {
                 if (!std::regex_match(value, std::regex("[0-9]{1,5}")) || std::stoi(value) < 1)
-                    fail("--samples requires a positive whole number");
-                options.samples = std::stoi(value);
+                    fail(key + " requires a positive whole number");
+                if (key == "--jobs") options.jobs = std::stoi(value);
+                else options.samples = std::stoi(value);
             }
             else if (key == "--filter") {
                 if (value.front() == '-') fail("a test filter cannot start with '-': " + value);
@@ -1010,6 +1112,7 @@ static int mainImpl(const Strings& arguments) {
             else options.clang = value;
         }
         if (options.project.empty()) fail("a .dkp project is required");
+        if (options.jobs > 1 && options.compareSchedules) fail("--compare-schedules requires serial test execution");
         if (options.list && options.compareSchedules) fail("--list and --compare-schedules cannot be combined");
         if (options.profile != "debug" && options.profile != "release") fail("profile must be debug or release");
 #ifdef _WIN32

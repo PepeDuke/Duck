@@ -181,6 +181,10 @@ same way, and the entry module's `Main` is not called. `--filter` selects tests
 whose stable name contains the text. `--module`, `--enable`, `--disable`,
 `--profile`, `--compiler`, and `--clang` behave as they do for `duck build`.
 
+Use `--jobs 4` to run up to four cases at once within each module. Each case runs in a fresh process with the same working directory. The runner prints the output of each case together as it finishes and reports failures in the module total. The default is serial. Use serial execution for tests that depend on shared files or process state.
+
+Duck caches compiled test and dependency objects under the test output directory. Repeating a run or changing the filter reuses matching objects. Editing a module rebuilds its affected dependents. Each invocation links against the current native libraries and executes the selected tests.
+
 `--compare-schedules` evaluates scheduling with those same tests. Each module is
 built with its tasks and with `--sequential`, and the tests run `--samples` times
 (default 5) under the sequential baseline and at `DUCK_WORKERS` 2, 4, and the

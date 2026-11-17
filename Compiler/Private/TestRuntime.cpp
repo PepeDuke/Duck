@@ -83,6 +83,7 @@ entry:
 )IR";
 #endif
   ir += "@duck$test.failed = internal global i1 false\n";
+  ir += constant("@duck$test.case", "--case");
   ir += constant("@duck$test.list", "--list");
   ir += constant("@duck$test.timing", "--timing");
   ir += constant("@duck$test.time", "TIME %lld %s\n");
@@ -181,7 +182,26 @@ entry:
   store i32 0, ptr %selected
   store i32 0, ptr %passed
   store i32 0, ptr %failed
-  %mode = call i32 @duck$test.mode(i32 %argc, ptr %argv)
+  ; Workers select one exact name, even when another test has it as a prefix.
+  %pair = icmp eq i32 %argc, 3
+  br i1 %pair, label %checkCase, label %options
+checkCase:
+  %firstSlot = getelementptr ptr, ptr %argv, i32 1
+  %firstArg = load ptr, ptr %firstSlot
+  %caseCmp = call i32 @strcmp(ptr %firstArg, ptr @duck$test.case)
+  %isCase = icmp eq i32 %caseCmp, 0
+  br i1 %isCase, label %single, label %options
+single:
+  %targetSlot = getelementptr ptr, ptr %argv, i32 2
+  %target = load ptr, ptr %targetSlot
+  br label %dispatch
+options:
+  %parsed = call i32 @duck$test.mode(i32 %argc, ptr %argv)
+  br label %dispatch
+dispatch:
+  %mode = phi i32 [ 4, %single ], [ %parsed, %options ]
+  %exactName = phi ptr [ %target, %single ], [ null, %options ]
+  %exact = icmp eq i32 %mode, 4
   %badUsage = icmp eq i32 %mode, 2
   br i1 %badUsage, label %usage, label %start
 usage:
@@ -198,6 +218,12 @@ loop:
 body:
   %nameSlot = getelementptr TABLE, ptr @duck$test.names, i32 0, i32 %current
   %name = load ptr, ptr %nameSlot
+  br i1 %exact, label %matchCase, label %matchFilters
+matchCase:
+  %cmp = call i32 @strcmp(ptr %name, ptr %exactName)
+  %same = icmp eq i32 %cmp, 0
+  br i1 %same, label %act, label %advance
+matchFilters:
   %chosen = call i1 @duck$test.selected(ptr %name, i32 %argc, ptr %argv)
   br i1 %chosen, label %act, label %advance
 act:
@@ -259,8 +285,12 @@ listed:
 summary:
   %passes = load i32, ptr %passed
   %failures = load i32, ptr %failed
+  br i1 %exact, label %statusCode, label %printSummary
+printSummary:
   call i32 (ptr, ...) @printf(ptr @duck$test.summary, i32 %passes, i32 %failures, i32 %total)
   call i32 @fflush(ptr null)
+  br label %statusCode
+statusCode:
   %anyFailed = icmp ne i32 %failures, 0
   %status = zext i1 %anyFailed to i32
   ret i32 %status

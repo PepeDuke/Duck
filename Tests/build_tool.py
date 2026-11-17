@@ -493,6 +493,30 @@ class Projects(unittest.TestCase):
         # Testing leaves the program's own output alone.
         self.assertFalse((self.root / f".duck/build/debug/Demo{suffix}").exists())
 
+    def test_incremental_test_objects_follow_module_changes(self):
+        self.add_tests()
+        self.duck_test()
+        directory = self.root / ".duck/build/debug/tests"
+
+        def stamps():
+            return {p.name: p.stat().st_mtime_ns for p in directory.glob("*.cache")}
+
+        original = stamps()
+        self.assertEqual(set(original), {"core.test.cache", "core.library.cache", "app.test.cache"})
+        self.assertIn("PASS App.Doubles", self.duck_test("--filter", "Doubles"))
+        self.assertEqual(stamps(), original)
+
+        app = self.root / "app.dk"
+        app.write_text(app.read_text().replace("Doubles()", "TwiceAsMuch()"), encoding="utf-8")
+        self.assertIn("App.TwiceAsMuch", self.duck_test("--list"))
+        updated = stamps()
+        self.assertNotEqual(updated.pop("app.test.cache"), original.pop("app.test.cache"))
+        self.assertEqual(updated, original)
+
+        core = self.root / "core.dk"
+        core.write_text(core.read_text().replace("return a + b", "return 0"), encoding="utf-8")
+        self.assertIn("FAIL App.TwiceAsMuch", self.duck_test("--module", "app", status=1))
+
     def test_program_build_is_independent_of_tests(self):
         self.add_tests()
         self.invoke()
@@ -531,6 +555,20 @@ class Projects(unittest.TestCase):
         self.assertIn("test App.Bad: T.Fail", output)
         self.assertIn("PASS Core.Adds\n", output)
         self.assertIn("1 module(s) failed, 1 passed", output)
+
+    def test_parallel_jobs_run_selected_cases_once_and_report_failures(self):
+        self.add_tests()
+        (self.root / "app.dk").write_text(
+            'App #{ Noop() {} }\nT{\n Hit() { T.Fail() }\n HitAgain() {}\n Miss() {}\n}\nMain() {}\n',
+            encoding="utf-8")
+        output = self.duck_test("--jobs", "4", "--filter", "Hit", status=1)
+        self.assertCountEqual([s for s in output.splitlines() if s.startswith("RUN ")],
+                              ["RUN  App.Hit", "RUN  App.HitAgain"])
+        self.assertIn("FAIL App.Hit\n", output)
+        self.assertIn("PASS App.HitAgain\n", output)
+        self.assertIn("1 passed, 1 failed, 2 total", output)
+        self.assertIn("no test matches", self.run_failing("--jobs=4", "--filter", "Missing"))
+        self.assertIn("--jobs requires a positive whole number", self.run_failing("--jobs", "0"))
 
     def test_duck_test_without_tests(self):
         self.assertIn("no tests found", self.duck_test())
