@@ -3768,6 +3768,11 @@ class Generator {
     return {op == "Length" ? Type::Long : Type::UInt32, id};
   }
   Value lowerPrint(const Expr &e) {
+    if (e.token.text == "Print" && e.args[0]->kind == "null") {
+      emit("call i32 @fflush(ptr null)");
+      return {Type::Void, ""};
+    }
+
     auto v = expression(*e.args[0]);
 
     if (nativeMath(v.type)) return printNative(v);

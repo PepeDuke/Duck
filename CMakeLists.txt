@@ -31,6 +31,30 @@ else()
   endif()
 endif()
 
+if(WIN32)
+  find_program(DUCK_CLANG NAMES clang HINTS "C:/Program Files/LLVM/bin" REQUIRED)
+  add_executable(duck_std_compiler Standard/Compile.cpp)
+  target_link_libraries(duck_std_compiler PRIVATE duck_compiler)
+  set(net_src "${CMAKE_CURRENT_SOURCE_DIR}/Standard/Net")
+  set(net_gen "${CMAKE_CURRENT_BINARY_DIR}/standard/$<CONFIG>")
+  add_custom_command(OUTPUT "${net_gen}/Net.obj" "${net_gen}/Net.dki"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${net_gen}"
+    COMMAND duck_std_compiler "${net_src}/Net.dk" "${net_gen}/Net.ll" "${net_gen}/Net.dki"
+    COMMAND "${DUCK_CLANG}" -O2 -c "${net_gen}/Net.ll" -o "${net_gen}/Net.obj"
+    DEPENDS duck_std_compiler "${net_src}/Net.dk"
+    VERBATIM)
+  add_library(duck_net STATIC Standard/Net/Windows.cpp "${net_gen}/Net.obj")
+  set_property(TARGET duck_net PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
+  add_custom_command(OUTPUT "${net_gen}/NetInterface.h"
+    COMMAND ${CMAKE_COMMAND} "-DINPUT=${net_gen}/Net.dki" "-DLIBRARY=$<TARGET_FILE:duck_net>"
+      "-DTEMPLATE=${net_src}/Interface.h.in" "-DOUTPUT=${net_gen}/NetInterface.h" -P "${net_src}/Embed.cmake"
+    DEPENDS duck_net "${net_gen}/Net.dki" "${net_src}/Interface.h.in" "${net_src}/Embed.cmake"
+    VERBATIM)
+  target_sources(duckc PRIVATE "${net_gen}/NetInterface.h")
+  target_include_directories(duckc PRIVATE "${net_gen}")
+  target_compile_definitions(duckc PRIVATE DUCK_NET_LIBRARY="$<TARGET_FILE_NAME:duck_net>")
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
   add_executable(duck_stage_tests Tests/stages.cpp)
@@ -39,6 +63,10 @@ if(BUILD_TESTING)
   find_program(DUCK_CLANG NAMES clang HINTS "C:/Program Files/LLVM/bin" REQUIRED)
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_FOUND)
+    if(WIN32)
+      add_test(NAME compiler.net COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/Tests/net.py --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})
+    endif()
     add_test(NAME compiler.compile_time COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/Tests/compile_time.py
       --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})

@@ -56,6 +56,15 @@ endfunction()
 
 file(READ "${SOURCE}/Examples/Tutorial/01_HelloWorld.dk" hello)
 run_program(hello "${hello}" "Hello world\n")
+run_program(print_flush [=[
+Main() {
+ Print(null)
+ Print("first")
+ Print(null)
+ Print("second")
+ Print(null)
+}
+]=] "first\nsecond\n")
 file(READ "${SOURCE}/Examples/Bootstrap/01_Core.dk" core)
 run_program(core "${core}" "42\n0\n1\n2\n120\n1\n100% Duck\n")
 run_program(scopes [=[

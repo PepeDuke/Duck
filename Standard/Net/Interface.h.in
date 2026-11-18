@@ -1,0 +1,2 @@
+inline constexpr char netInterface[] = @NET_INTERFACE@;
+inline constexpr char netRuntimeHash[] = "@NET_HASH@";

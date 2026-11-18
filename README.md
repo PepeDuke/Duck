@@ -1637,6 +1637,129 @@ Game
 Game.Mode mode = Game.Mode.Play
 ```
 
+`Print(null)` flushes buffered output immediately and writes no characters or
+newline.
+
+## TCP networking
+
+On Windows, Duck provides `Net`, `TcpListener`, and `TcpConnection`. The compiler
+links the networking runtime automatically. Keep `duck_net.lib` beside `duckc.exe`
+when moving the toolchain.
+
+```c++
+listener : Net.ListenTcp("127.0.0.1", 0)
+if !listener { return }
+client : Net.ConnectTcp("localhost", listener.Port())
+if !client { return }
+```
+
+- `ListenTcp(address, port)` binds a local address. Port zero selects an available
+  port. `Port()` returns the actual port. Listener setup resolves its address synchronously.
+- `ConnectTcp(host, port)` starts hostname lookup and connection establishment
+  asynchronously. Poll `client.Status()` for 0 (pending), 1 (connected), or
+  -1 (failed or locally closed). Either factory can return null on setup failure.
+- `listener.Accept()` returns an owning `TcpConnection*` when a client is ready.
+  A null result with `listener.AcceptStatus == 0` means try again later.
+  A status of -1 means the accept failed.
+- `connection.Read(buffer)` and `connection.Write(buffer)` take a nonempty
+  dynamic `byte []`. A positive result counts bytes transferred, -2 means try
+  again later, and -1 indicates an error. A zero-byte read means the peer ended
+  its send stream. Read into a buffer sized before the call. TCP is a stream,
+  so accumulate partial reads and writes. `ReadAt(buffer, offset)` and
+  `WriteAt(buffer, offset)` resume at a byte offset. Each call transfers up to 4096 bytes.
+- Both handle types close on destruction. Call `Close()` to release one early.
+  An accepted connection remains usable after its listener closes.
+
+
+## UDP networking
+
+On Windows, `Net.BindUdp(address, port)` returns an owning `UdpSocket*`.
+Bind to a numeric IPv4 or IPv6 address. Port zero assigns a free local port,
+available through `Port()`. A failed bind returns null.
+
+```c++
+socket : Net.BindUdp("127.0.0.1", 0)
+if !socket { return }
+UdpEndpoint peer = Net.UdpAddress("127.0.0.1", 9000)
+byte [] message = {1, 2, 3}
+int sent = socket.SendTo(message, peer)
+```
+
+Each `SendTo(data, destination)` sends one datagram. Each
+`ReceiveFrom(buffer, sender)` reads one datagram into a presized dynamic
+`byte []`. On success it also fills the `UdpEndpoint` with the sender's address
+and port. Pass that endpoint directly to `SendTo` to reply. Both operations
+are nonblocking.
+
+| Result | Meaning |
+|---|---|
+| 0 or greater | Datagram size in bytes. Zero is a valid empty datagram. |
+| -2 | Would block. Try again later. |
+| -3 | Datagram too large. On receive, the socket discards that packet and leaves the buffer and sender unchanged. |
+| -1 | Closed socket, invalid destination, or another socket error. |
+
+`Net.UdpAddress(address, port)` accepts numeric addresses, including IPv6
+scope IDs such as `fe80::1%13`. A valid endpoint has `Family` 4 or 6,
+`Address` bytes in network order (4 or 16 bytes), `Port` in host order, and
+an IPv6 `ScopeId`. Family zero indicates a parse failure. Use a destination
+of the same family as the bound socket. Call `Close()` to release the socket
+early, or let its owner go out of scope.
+
+## Networking callbacks
+
+Register a handler on a socket to start its standard-library receive worker.
+The first registration creates one background thread for that socket. Handlers
+on the same socket run in sequence. Handlers on different sockets can overlap
+each other and the game thread.
+
+```c++
+settings : Net.ReceiveSettings()
+settings.SleepMs = 2
+settings.TcpChunkBytes = 8192
+Net.SetReceiveSettings(settings)
+
+socket : Net.BindUdp("127.0.0.1", 9000)
+if !socket { return }
+socket.OnReceive(@ (NetReceiveEvent& packet) {
+    Print(packet.Status)
+})
+// Keep the socket owner alive while the application wants callbacks.
+```
+
+| Registration | Handler argument | Delivery |
+|---|---|---|
+| `connection.OnConnect(handler)` | `int status` | Once, with 1 on success or -1 on failure. Works when registered after the connection has completed. |
+| `listener.OnConnect(handler)` | `NetIncoming& incoming` | Once per accepted connection. Use `client :: incoming.Connection` to transfer ownership if the connection should outlive the handler. |
+| `connection.OnReceive(handler)` | `NetReceiveEvent& packet` | Each available TCP chunk. A final status of 0 means peer shutdown and -1 means failure. |
+| `socket.OnReceive(handler)` on UDP | `NetReceiveEvent& packet` | One datagram, including empty datagrams. `packet.Sender` holds its endpoint. A negative status ends delivery. |
+
+`packet.Data` is a dynamic byte array and `packet.Status` gives the number of
+bytes on a successful receive. Callback arguments are valid for the duration of
+the call. Registration returns a boolean. A closed socket, null handler,
+duplicate registration, or failure to start the worker returns false.
+A registered receive or accept handler owns that operation until close.
+Writes and UDP sends can still be made from another thread.
+
+`Net.ReceiveSettings()` returns a snapshot of the process-wide settings.
+`Net.SetReceiveSettings(settings)` applies both fields together and returns
+false for an invalid value. `SleepMs` controls the idle retry interval
+(default 5 ms, range 1 to 60000). `TcpChunkBytes` controls the largest TCP callback
+payload (default 4096, range 1 to 65536). Workers read the settings on their
+next iteration and drain available data before sleeping.
+
+The library synchronizes socket operations and keeps the registered Duck
+closure alive. Use Duck's `${ ... }` blocks or another synchronization method
+for application data shared with a callback. `Close()` wakes the worker and,
+when called outside a networking callback, waits for it to finish. Release
+locks needed by the callback before calling `Close()` or dropping the last
+socket owner. Inside a networking callback, closing a socket requests shutdown
+and allows an in-flight handler to finish.
+
+The [ping server](Examples/Networking/PingServer.dk) and [ping client](Examples/Networking/PingClient.dk)
+are separate programs. Build each with [Ping.dk](Examples/Networking/Ping.dk),
+start the server, and pass its printed port to the client. Both use two-byte
+TCP receive chunks to assemble the four-byte messages across callbacks.
+
 ## Files in Duck
 `file` is a built-in type for reading and writing files on disk. A file starts closed, cannot be copied, and closes itself when it goes away, so `Close()` is only needed to finish early.
 ``` c++

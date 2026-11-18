@@ -1,0 +1,260 @@
+DuckNetNative
+#{
+    extern "C" void* Open(string host, int port, int listener) = "duck_tcp_open"
+    extern "C" void Close(void* handle) = "duck_net_close"
+    extern "C" int Status(void* handle) = "duck_tcp_status"
+    extern "C" int Port(void* handle) = "duck_net_port"
+    extern "C" void* Accept(void* listener, int& status) = "duck_tcp_accept"
+    extern "C" int Transfer(void* handle, byte* buffer, int size, int writing) = "duck_tcp_transfer"
+    extern "C" void* BindUdp(string address, int port) = "duck_udp_bind"
+    extern "C" int Endpoint(string address, int port, UdpEndpoint* endpoint) = "duck_udp_endpoint"
+    extern "C" int SendTo(void* handle, byte* data, int size, UdpEndpoint* peer) = "duck_udp_send"
+    extern "C" int ReceiveFrom(void* handle, byte* data, int size, UdpEndpoint* peer) = "duck_udp_receive"
+    extern "C" void Release(void* handle) = "duck_net_release"
+    extern "C" int Watch(void* handle, int kind, DuckNetHandler* handler, void* copy, void* dispatch, void* drop) = "duck_net_watch"
+    extern "C" void Copy(void* data, int offset, byte* buffer, int count) = "duck_net_copy"
+    extern "C" void Settings(NetReceiveSettings* settings) = "duck_net_get_settings"
+    extern "C" int Configure(NetReceiveSettings* settings) = "duck_net_set_settings"
+}
+
+// The owning field in each public type prevents copying the socket.
+DuckNetHandle
+{
+    void* Value
+    Close() { DuckNetNative.Close(Value) }
+    ~DuckNetHandle() { DuckNetNative.Release(Value) }
+}
+
+TcpConnection
+{
+    -DuckNetHandle* Socket()
+    TcpConnection(void* handle) { Socket.Value = handle }
+    int Status() { return DuckNetNative.Status(Socket.Value) }
+    bool OnReceive(func (NetReceiveEvent&) handler)
+    {
+        if handler == null { return false }
+        DuckNetHandler entry()
+        entry.Receive = handler
+        return DuckNetEvents.Watch(Socket.Value, 1, entry)
+    }
+
+    bool OnConnect(func (int) handler)
+    {
+        if handler == null { return false }
+        DuckNetHandler entry()
+        entry.Connect = handler
+        return DuckNetEvents.Watch(Socket.Value, 2, entry)
+    }
+
+    Close() { Socket.Close() }
+
+    int Read(byte []& buffer) { return ReadAt(buffer, 0) }
+    int ReadAt(byte []& buffer, int offset)
+    {
+        if offset < 0 || offset >= buffer.Len { return -1 }
+        byte [4096] chunk
+        int size = (int)((buffer.Len - offset) > 4096 ? 4096 | buffer.Len - offset)
+        int count = DuckNetNative.Transfer(Socket.Value, &chunk[0], size, 0)
+        for i : 0; i < count; i++ { buffer[offset + i] = chunk[i] }
+        return count
+    }
+
+    int Write(byte []& buffer) { return WriteAt(buffer, 0) }
+    int WriteAt(byte []& buffer, int offset)
+    {
+        if offset < 0 || offset >= buffer.Len { return -1 }
+        byte [4096] chunk
+        int size = (int)((buffer.Len - offset) > 4096 ? 4096 | buffer.Len - offset)
+        for i : 0; i < size; i++ { chunk[i] = buffer[offset + i] }
+        return DuckNetNative.Transfer(Socket.Value, &chunk[0], size, 1)
+    }
+}
+
+TcpListener
+{
+    -DuckNetHandle* Socket()
+    int AcceptStatus
+    TcpListener(void* handle) { Socket.Value = handle }
+    int Port() { return DuckNetNative.Port(Socket.Value) }
+    bool OnConnect(func (NetIncoming&) handler)
+    {
+        if handler == null { return false }
+        DuckNetHandler entry()
+        entry.Incoming = handler
+        return DuckNetEvents.Watch(Socket.Value, 3, entry)
+    }
+
+    Close() { Socket.Close() }
+    TcpConnection* Accept()
+    {
+        int status = 0
+        void* handle = DuckNetNative.Accept(Socket.Value, status)
+        AcceptStatus = status
+        if !handle { return null }
+        TcpConnection* connection(handle)
+        return ::connection
+    }
+}
+
+// A copyable numeric endpoint. Address bytes are in network order.
+UdpEndpoint
+{
+    int Family
+    byte [16] Address
+    int Port
+    uint ScopeId
+}
+
+UdpSocket
+{
+    -DuckNetHandle* Socket()
+    UdpSocket(void* handle) { Socket.Value = handle }
+    int Port() { return DuckNetNative.Port(Socket.Value) }
+    bool OnReceive(func (NetReceiveEvent&) handler)
+    {
+        if handler == null { return false }
+        DuckNetHandler entry()
+        entry.Receive = handler
+        return DuckNetEvents.Watch(Socket.Value, 4, entry)
+    }
+
+    Close() { Socket.Close() }
+
+    int SendTo(byte []& data, UdpEndpoint& destination)
+    {
+        byte [65527] packet
+        if data.Len > packet.Len { return -3 }
+        for i : 0; i < data.Len; i++ { packet[i] = data[i] }
+        return DuckNetNative.SendTo(Socket.Value, &packet[0], (int)data.Len, &destination)
+    }
+
+    int ReceiveFrom(byte []& buffer, UdpEndpoint& sender)
+    {
+        byte [65527] packet
+        int size = (int)(buffer.Len < packet.Len ? buffer.Len | packet.Len)
+        int count = DuckNetNative.ReceiveFrom(Socket.Value, &packet[0], size, &sender)
+        for i : 0; i < count; i++ { buffer[i] = packet[i] }
+        return count
+    }
+}
+
+NetReceiveSettings
+{
+    int SleepMs
+    int TcpChunkBytes
+}
+
+NetReceiveEvent
+{
+    byte [] Data
+    int Status
+    UdpEndpoint Sender
+}
+
+NetIncoming
+{
+    TcpConnection* Connection :: null
+}
+
+DuckNetHandler
+{
+    func (NetReceiveEvent&) Receive
+    func (int) Connect
+    func (NetIncoming&) Incoming
+}
+
+// Only Duck assigns and releases the managed callback fields. The worker
+// keeps this registration alive until its last dispatch has returned.
+DuckNetEvents
+#{
+    Store(DuckNetHandler* target, DuckNetHandler* source)
+    {
+        target.Receive = source.Receive
+        target.Connect = source.Connect
+        target.Incoming = source.Incoming
+    }
+
+    Drop(DuckNetHandler* handler)
+    {
+        handler.Receive = null
+        handler.Connect = null
+        handler.Incoming = null
+    }
+
+    Dispatch(DuckNetHandler* handler, int kind, void* data, int size, UdpEndpoint* sender)
+    {
+        if kind == 2 {
+            handler.Connect(size)
+            return
+        }
+        if kind == 3 {
+            NetIncoming incoming()
+            incoming.Connection :: TcpConnection(data)
+            handler.Incoming(incoming)
+            return
+        }
+        NetReceiveEvent event()
+        event.Status = size
+        if sender { event.Sender = *sender }
+        byte [512] chunk
+        int offset = 0
+        while offset < size {
+            int count = size - offset
+            if count > 512 { count = 512 }
+            DuckNetNative.Copy(data, offset, &chunk[0], count)
+            for i : 0; i < count; i++ { event.Data += chunk[i] }
+            offset += count
+        }
+        handler.Receive(event)
+    }
+
+    bool Watch(void* handle, int kind, DuckNetHandler& handler)
+    {
+        return DuckNetNative.Watch(handle, kind, &handler, &Store, &Dispatch, &Drop) != 0
+    }
+}
+
+Net
+#{
+    NetReceiveSettings ReceiveSettings()
+    {
+        NetReceiveSettings settings()
+        DuckNetNative.Settings(&settings)
+        return settings
+    }
+
+    bool SetReceiveSettings(NetReceiveSettings settings)
+    {
+        return DuckNetNative.Configure(&settings) != 0
+    }
+
+    UdpSocket* BindUdp(string address, int port)
+    {
+        void* handle = DuckNetNative.BindUdp(address, port)
+        if !handle { return null }
+        UdpSocket* socket(handle)
+        return ::socket
+    }
+
+    UdpEndpoint UdpAddress(string address, int port)
+    {
+        UdpEndpoint endpoint()
+        DuckNetNative.Endpoint(address, port, &endpoint)
+        return endpoint
+    }
+
+    TcpConnection* ConnectTcp(string host, int port)
+    {
+        void* handle = DuckNetNative.Open(host, port, 0)
+        if !handle { return null }
+        TcpConnection* connection(handle)
+        return ::connection
+    }
+    TcpListener* ListenTcp(string address, int port)
+    {
+        void* handle = DuckNetNative.Open(address, port, 1)
+        if !handle { return null }
+        TcpListener* listener(handle)
+        return ::listener
+    }
+}

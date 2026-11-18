@@ -1,0 +1,23 @@
+extern "C" int PortNumber(string value) = "_wtoi"
+
+Main(string [] args)
+{
+    if args.Len != 1 { return }
+    Ping.Start()
+    peer : Net.ConnectTcp("127.0.0.1", PortNumber(args[0]))
+    if !peer { return }
+    int offset = 0
+    peer.OnReceive(@ (NetReceiveEvent& chunk) {
+        if Ping.Match(chunk, offset, 111) {
+            Print("client received pong")
+            Ping.Done()
+        }
+    })
+    peer.OnConnect(@ (int status) {
+        byte [] ping = {112, 105, 110, 103}
+        if status == 1 && peer.Write(ping) == 4 { Print("client sent ping") }
+    })
+    Ping.Wait()
+    peer.Close()
+    Ping.End()
+}

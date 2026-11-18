@@ -29,8 +29,7 @@ std::string constant(const std::string &symbol, const std::string &value) {
 std::string testRunnerIR(const std::vector<std::pair<std::string, std::string>> &tests,
                          const std::set<std::string> &nativeSymbols) {
   std::string ir;
-  const std::pair<const char *, const char *> imports[] = {{"fflush", "declare i32 @fflush(ptr)\n"},
-                                                           {"strcmp", "declare i32 @strcmp(ptr, ptr)\n"},
+  const std::pair<const char *, const char *> imports[] = {{"strcmp", "declare i32 @strcmp(ptr, ptr)\n"},
                                                            {"strstr", "declare ptr @strstr(ptr, ptr)\n"}};
 
   for (const auto &[symbol, declaration] : imports)

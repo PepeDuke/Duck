@@ -1,0 +1,29 @@
+Accepted(NetIncoming& incoming)
+{
+    peer :: incoming.Connection
+    int offset = 0
+    if peer.OnReceive(@ (NetReceiveEvent& chunk) {
+        if Ping.Match(chunk, offset, 105) {
+            byte [] pong = {112, 111, 110, 103}
+            if peer.Write(pong) == 4 {
+                Print("server received ping and sent pong")
+                Ping.Done()
+            }
+        }
+    }) {
+        Ping.Wait()
+    }
+}
+
+Main()
+{
+    Ping.Start()
+    listener : Net.ListenTcp("127.0.0.1", 0)
+    if listener && listener.OnConnect(Accepted) {
+        Print(listener.Port())
+        Print(null)
+        Ping.Wait()
+        listener.Close()
+    }
+    Ping.End()
+}

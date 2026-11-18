@@ -1,0 +1,35 @@
+// Shared by the two callback examples. The event only keeps Main alive.
+Ping
+#{
+    extern "C" void* CreateEventW(void* security, int manual, int initial, void* eventName)
+    extern "C" int SetEvent(void* event)
+    extern "C" int WaitForSingleObject(void* event, int timeout)
+    extern "C" int CloseHandle(void* event)
+    void* Finished
+
+    Start()
+    {
+        Finished = CreateEventW(null, 1, 0, null)
+        settings : Net.ReceiveSettings()
+        settings.TcpChunkBytes = 2
+        Net.SetReceiveSettings(settings)
+    }
+    Done() { SetEvent(Finished) }
+    bool Wait() { return WaitForSingleObject(Finished, 10000) == 0 }
+    End() { CloseHandle(Finished) }
+
+    // A TCP callback can deliver only part of the four-byte message.
+    bool Match(NetReceiveEvent& chunk, int& offset, byte second)
+    {
+        byte [4] expected = {112, second, 110, 103}
+        for value : chunk.Data {
+            if offset < 0 || offset >= 4 { return false }
+            if value != expected[offset] {
+                offset = -1
+                return false
+            }
+            offset++
+        }
+        return chunk.Status > 0 && offset == 4
+    }
+}

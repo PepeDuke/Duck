@@ -3422,7 +3422,7 @@ class Analyzer {
 
       if (fileValue(printed)) fail(e.token, "cannot print a file; print its IsOpen or ReadText() instead");
 
-      if (printed.depth)
+      if (printed.depth && e.args[0]->kind != "null")
         fail(e.token, "cannot print an opaque pointer; compare it with null instead");
 
       if (funcValue(printed)) fail(e.token, "cannot print a func value; call it instead");

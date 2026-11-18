@@ -1,5 +1,11 @@
 #include "Pipeline.h"
 #include "Timing.h"
+#ifdef DUCK_NET_LIBRARY
+#define NOMINMAX
+#include <windows.h>
+#undef interface
+#include "NetInterface.h"
+#endif
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -190,6 +196,15 @@ void addSource(Inputs &inputs, SourceTexts &texts, const std::string &path, bool
 
 // A dependency read from its interface file: tokens already lexed and
 // preprocessed, with the bodies importers never read left empty.
+void addInterface(Inputs &inputs, const std::string &text, const std::string &path) {
+  std::string key;
+  for (auto &tokens : duck::readInterface(text, path, key)) {
+    duck::collectContainerNames(tokens, inputs.containerNames);
+    duck::collectMacros(tokens, inputs.macros);
+    inputs.sources.push_back({true, std::move(tokens)});
+  }
+}
+
 void addImport(Inputs &inputs, const std::string &path) {
   std::ifstream input(path, std::ios::binary);
 
@@ -197,13 +212,7 @@ void addImport(Inputs &inputs, const std::string &path) {
 
   std::ostringstream text;
   text << input.rdbuf();
-  std::string key;
-
-  for (auto &tokens : duck::readInterface(text.str(), path, key)) {
-    duck::collectContainerNames(tokens, inputs.containerNames);
-    duck::collectMacros(tokens, inputs.macros);
-    inputs.sources.push_back({true, std::move(tokens)});
-  }
+  addInterface(inputs, text.str(), path);
 }
 
 // Flags and inputs may mix freely; the last two arguments are always -o <path>.
@@ -265,6 +274,17 @@ std::string compileInputs(Inputs inputs, const Options &options) {
   std::vector<duck::Program> units, importedUnits;
   std::vector<std::vector<duck::Token>> interface;
 
+#ifdef DUCK_NET_LIBRARY
+  const bool needsNet = std::any_of(inputs.sources.begin(), inputs.sources.end(), [&](const SourceFile &file) {
+    return std::any_of(file.tokens.begin(), file.tokens.end(), [&](const duck::Token &t) {
+      return !t.string && (t.text == "Net" || t.text == "TcpListener" || t.text == "TcpConnection" ||
+                           t.text == "UdpSocket" || t.text == "UdpEndpoint" || t.text == "NetReceiveSettings" ||
+                           t.text == "NetReceiveEvent" || t.text == "NetIncoming") &&
+             !inputs.containerNames.count(t.text);
+    });
+  });
+  if (needsNet) addInterface(inputs, netInterface, "<standard Net>");
+#endif
   for (auto &[dependency, tokens] : inputs.sources) {
     // The interface is made from the tokens the parser sees, before parsing
     // consumes them, and the parse that tells which bodies importers read.
@@ -297,6 +317,19 @@ std::string compileInputs(Inputs inputs, const Options &options) {
   duck::phase("combine units");
   auto ir = duck::compileModule(program, imports, options.entry && !options.test, options.parallel, options.test);
 
+#ifdef DUCK_NET_LIBRARY
+  if (needsNet) {
+    // COFF carries these dependencies through separately compiled Duck modules.
+    std::wstring executable(32768, L'\0');
+    auto length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+    if (!length || length >= executable.size()) throw std::runtime_error("cannot locate the Net runtime");
+    executable.resize(length);
+    auto library = fs::path(executable).parent_path() / DUCK_NET_LIBRARY;
+    ir += "\n; Duck Net runtime " + std::string(netRuntimeHash) +
+          "\n!llvm.linker.options = !{!0, !1}\n!0 = !{!\"/DEFAULTLIB:\\22" + library.generic_u8string() +
+          "\\22\"}\n!1 = !{!\"/DEFAULTLIB:Ws2_32.lib\"}\n";
+  }
+#endif
   // Written only once the module compiles, so a dependent never imports one
   // that would not.
   if (!options.interface.empty()) {
