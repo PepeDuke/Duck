@@ -352,63 +352,44 @@ std::optional<size_t> enumLiteralMember(const EnumInfo &info, const Expr &e) {
 }
 std::map<std::string, EnumInfo> resolveEnums(const std::vector<EnumFragment> &fragments) {
   EnumResolver resolver;
-  std::map<std::string, std::vector<const EnumFragment *>> groups;
-  std::vector<std::string> order;
-
   for (const auto &fragment : fragments) {
-    auto &group = groups[fragment.name.text];
+    const auto &name = fragment.name.text;
+    auto [entry, inserted] = resolver.enums.try_emplace(name);
+    auto &pending = entry->second;
 
-    if (group.empty()) order.push_back(fragment.name.text);
+    if (!inserted)
+      fail(fragment.name, "enum '" + name + "' is already defined\n  note: first declared as " +
+                              typeName(pending.info.type) + " at " + where(pending.info.declaration) +
+                              "\n  help: enum blocks cannot be chained. Add members to the original block or "
+                              "choose a different name for a new enum.");
 
-    group.push_back(&fragment);
-  }
-
-  for (const auto &name : order) {
-    const auto &group = groups.at(name);
-    // The underlying type may appear on any fragment; all stated types agree.
-    const EnumFragment *typed = nullptr;
-
-    for (const auto *fragment : group) {
-      if (fragment->type == Type::Void) continue;
-
-      if (!typed) typed = fragment;
-      else if (fragment->type != typed->type)
-        fail(fragment->name, "enum '" + name + "' is declared as " + typeName(typed->type) +
-                                 " in an earlier fragment, not " + typeName(fragment->type));
-    }
-
-    if (!typed)
-      fail(group.front()->name, "enum '" + name + "' requires an underlying type, as in " + name +
-                                    " : int #@{ ... }");
-
-    const auto type = typed->type;
+    const auto type = fragment.type;
+    if (type == Type::Void)
+      fail(fragment.name, "enum '" + name + "' requires an underlying type, as in " + name +
+                              " : int #@{ ... }. Enum blocks cannot be chained.");
 
     if (!integral(type) && !floating(type) && !managedText(type))
-      fail(typed->name, "enum underlying type must be an integer, float, double, string, or name; got " +
-                            typeName(type));
+      fail(fragment.name, "enum underlying type must be an integer, float, double, string, or name; got " +
+                              typeName(type));
 
-    auto &pending = resolver.enums[name];
-    pending.info = EnumInfo{group.front()->name, type, {}, {}};
+    pending.info = EnumInfo{fragment.name, type, {}, {}};
+    pending.info.attribute = fragment.attribute;
 
-    for (const auto *fragment : group) {
-      pending.info.attribute = pending.info.attribute || fragment->attribute;
+    for (const auto &member : fragment.members) {
+      if (pending.info.find(member.name.text) != pending.info.members.size())
+        fail(member.name, "duplicate member '" + member.name.text + "' in enum '" + name + "'");
 
-      for (const auto &member : fragment->members) {
-        if (pending.info.find(member.name.text) != pending.info.members.size())
-          fail(member.name, "duplicate member '" + member.name.text + "' in enum '" + name + "'");
-
-        pending.info.members.push_back(member.name);
-        pending.members.push_back(&member);
-      }
+      pending.info.members.push_back(member.name);
+      pending.members.push_back(&member);
     }
 
     pending.info.values.resize(pending.members.size());
     pending.state.assign(pending.members.size(), 0);
   }
 
-  // Values in input order, so diagnostics come out in source order.
-  for (const auto &name : order)
-    for (size_t i = 0; i < resolver.enums.at(name).members.size(); ++i) resolver.memberValue(name, i);
+  // Resolve values after collecting all members so forward references work.
+  for (const auto &fragment : fragments)
+    for (size_t i = 0; i < fragment.members.size(); ++i) resolver.memberValue(fragment.name.text, i);
 
   std::map<std::string, EnumInfo> enums;
 

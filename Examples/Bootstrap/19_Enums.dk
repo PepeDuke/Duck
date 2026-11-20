@@ -1,15 +1,11 @@
-// Extensible #@ enums with integer, floating, and text values.
+// #@ enums with integer, floating, and text values.
 // Printing a member prints its name. Operators, conversions, and
 // concatenation use its underlying value.
 
 Day : byte
 #@{
     Sunday, Monday, Tuesday
-}
-
-// A later fragment extends Day. Implicit values continue from the last
-// member of the merged enum, so Thursday is 10 and Friday is 11.
-Day #@{
+    // Implicit values continue from Wednesday, so Thursday is 10 and Friday is 11.
     Wednesday: 9
     Thursday, Friday
 }

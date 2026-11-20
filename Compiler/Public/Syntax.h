@@ -523,8 +523,7 @@ struct EnumMember {
   Token name;
   std::unique_ptr<Expr> value; // Null for an implicit value.
 };
-// One `Name [: type] #@{ ... }` block. Fragments with the same name merge in
-// input order before implicit values are assigned.
+// One enum block. Its qualified name must be unique across all input files.
 struct EnumFragment {
   Token name;
   Type type = Type::Void; // Void when this fragment omits the underlying type.

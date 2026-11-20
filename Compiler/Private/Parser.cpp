@@ -2832,7 +2832,9 @@ class Parser {
     EnumFragment fragment{tag, Type::Void, {}};
 
     if (accept(":")) {
+      const auto underlying = peek();
       fragment.type = type();
+      if (fragment.type == Type::Void) fail(underlying, "enum underlying type cannot be void");
       lines();
     }
 
@@ -3420,7 +3422,7 @@ void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
     size_t chain = next;
 
     // ':' after a name starts an enum's underlying type or a container's
-    // parent list; an enum extension may omit it. A parent list reaches '{'
+    // parent list. A parent list reaches '{'
     // or '#{' before any other '#'. Skip the list or type so its words are
     // never taken as declared names.
     if (punctuation(tokens, next, ":") ||

@@ -1558,13 +1558,20 @@ w.Tick(0.1) // Prints Duck tick
 ```
 
 ## Enums in Duck
-Duck is using inheritance style declaration for type enum declaration with combination with the @ symbol representing enumeration block and # representing static blocks. This block is also expandable same as #{} or {} blocks.
+
+Duck uses an inheritance-style declaration for enums. In `Day : byte`, `byte` is the underlying type. The `#` marks the block as static, and `@` marks it as an enumeration.
+
+Enums are an exception to Duck's container chaining rule. Declare every member in one block. A second block for the same enum is a compile error, even across files. In practice, merging blocks hid accidental name collisions and could change the values assigned to members.
+
 ``` c++
 Day : byte 
 #@{
     Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday
 }
-// more verbose way 
+```
+The same declaration can spell out the values explicitly.
+
+``` c++
 Day : byte 
 #@{
     Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6

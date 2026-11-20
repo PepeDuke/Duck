@@ -174,7 +174,7 @@ inline std::string propertyName(const std::string &key) {
   const auto member = memberName(key);
   return member.rfind("get-", 0) == 0 || member.rfind("set-", 0) == 0 ? member.substr(4) : "";
 }
-// A merged enum. Values are in member order: signed decimal integers, LLVM
+// A resolved enum. Values are in member order: signed decimal integers, LLVM
 // hexadecimal floating constants, or UTF-8 text, depending on the type.
 struct EnumInfo {
   Token declaration;

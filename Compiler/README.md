@@ -862,9 +862,8 @@ by commas or newlines, and a trailing comma is allowed. See
 ```c++
 Day : byte
 #@{
-    Sunday, Monday, Tuesday
+    Sunday, Monday, Tuesday, Wednesday: 9, Thursday
 }
-Day #@{ Wednesday: 9, Thursday }   // extension: Thursday is 10
 
 Print(Day.Sunday)                  // Sunday
 Print(Day.Thursday + 0)            // 10
@@ -879,13 +878,9 @@ Print(d.Value)                     // its underlying value
   can call it `Mode`. The name resolves like other static names, from the
   innermost container outward, so a nested enum shadows a file-scope one of
   the same name.
-- **Extension.** Further `Name #@{ ... }` blocks, in the same file or another
-  input file, add members. A fragment inside a static block extends that
-  block's enum, so `Game #{ Mode #@{ Quit } }` extends `Game.Mode`. All
-  fragments of an enum are collected in input order before any implicit value
-  is assigned. The underlying type may be stated on any fragment, must be
-  stated on at least one, and must agree wherever it is stated. Member names
-  must be unique across fragments.
+- **Declaration.** Enums use inheritance-style syntax and are an exception to
+  container chaining. Each qualified enum name has one block containing all
+  its members. A second block is a compile error, including across files.
 - **Implicit values.** An integer member is the previous member's value plus 1,
   starting at 0. A `float` or `double` member is the previous value plus 0.5,
   starting at 0. A text member defaults to its own name. Every value must fit

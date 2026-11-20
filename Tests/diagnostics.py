@@ -11,6 +11,19 @@ import unittest
 class Diagnostics(unittest.TestCase):
     compiler = ''
 
+    def test_duplicate_enum_across_files(self):
+        with tempfile.TemporaryDirectory() as work:
+            pathlib.Path(work, 'Dialogue.dk').write_text('HellfeatherVoice : int #@{ Greeting }\n')
+            pathlib.Path(work, 'Enemy.dk').write_text('HellfeatherVoice : int #@{ Taunt }\nMain() {}\n')
+            result = subprocess.run([self.compiler, 'Dialogue.dk', 'Enemy.dk', '-o', 'out.ll'],
+                                    cwd=work, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("Enemy.dk:1:1: error: enum 'HellfeatherVoice' is already defined\n", result.stderr)
+            self.assertIn('note: first declared as int at Dialogue.dk:1:1\n', result.stderr)
+            self.assertIn("help: enum blocks cannot be chained. Add members to the original block or "
+                          "choose a different name for a new enum.", result.stderr)
+            self.assertFalse(pathlib.Path(work, 'out.ll').exists())
+
     def errors(self, source, name='case.dk'):
         with tempfile.TemporaryDirectory() as work:
             path = pathlib.Path(work, name)

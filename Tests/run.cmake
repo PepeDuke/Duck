@@ -3158,12 +3158,6 @@ Main() {
   }
   Print((int)Pick(1) / 2)
 }" "Green\nverde\nverde!\nalpha\nHigh\n1\nMid\n-4\n-5\nLow\nHigh\n4194303\n")
-# Fragments merge in input order before implicit values are assigned, so the
-# untyped extension may come first.
-file(WRITE "${WORK}/enum_typed.dk" "Shade : int #@{ Dark }\n")
-file(WRITE "${WORK}/enum_extension.dk" "Shade #@{ Light }\nMain() {\n  Print(Shade.Dark + 0)\n  Print(Shade.Light)\n}\n")
-run_files(enum_fragments "0\nLight\n" "${WORK}/enum_typed.dk" "${WORK}/enum_extension.dk")
-run_files(enum_fragments_reversed "1\nLight\n" "${WORK}/enum_extension.dk" "${WORK}/enum_typed.dk")
 # Values may be constant expressions of literals and members, in any order.
 run_program(enum_value_expressions "Flags : int #@{ None, Read: 1 << 0, Write: 1 << 1, All: Read | Write | Exec, Exec: 1 << 2 }
 Wide : uint64 #@{ Top: 18446744073709551615, Half: Top / 2, Mask: ~0 & 255 }
@@ -3247,14 +3241,13 @@ Two
 #ff0000
 tuesday
 ")
-# Enums in static containers are named by their containers, and extend there.
+# Enums in static containers are named by their containers, so distinct containers can reuse an enum name.
 run_program(enum_static_container "Game #{
-  Mode : int #@{ Menu, Play: 10, Pause }
+  Mode : int #@{ Menu, Play: 10, Pause, Quit }
   Mode Start() { return Mode.Play }
   Inner #{
     Speed : float #@{ Slow: 0.5, Fast: Slow * 4.0 }
   }
-  Mode #@{ Quit }
 }
 Mode : int #@{ Other }
 Holder { Game.Mode Current = Game.Mode.Pause }
@@ -3490,8 +3483,10 @@ if(status EQUAL 0 OR NOT errors MATCHES "cannot extend imported enum")
   message(FATAL_ERROR "enum_import_extension: expected rejection, got ${status}: ${errors}")
 endif()
 reject(enum_untyped "E #@{ A }\nMain() {}" "requires an underlying type")
+reject(enum_void_extension "E : int #@{ A }\nE : void #@{ B }\nMain() {}" "enum underlying type cannot be void")
 reject(enum_type_conflict "E : int #@{ A }\nE : byte #@{ B }\nMain() {}" "declared as int")
-reject(enum_duplicate "E : int #@{ A }\nE #@{ A }\nMain() {}" "duplicate member 'A'")
+reject(enum_chained "E : int #@{ A }\nE #@{ B }\nMain() {}" "enum blocks cannot be chained")
+reject(enum_duplicate "E : int #@{ A, A }\nMain() {}" "duplicate member 'A'")
 reject(enum_unknown_member "E : int #@{ A }\nMain() { Print(E.B) }" "unknown member 'B'")
 reject(enum_implicit_range "E : byte #@{ A: 255, B }\nMain() {}" "implicit value 256")
 reject(enum_explicit_range "E : int8 #@{ A: -129 }\nMain() {}" "out of range")
