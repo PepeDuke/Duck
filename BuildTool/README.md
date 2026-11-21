@@ -23,6 +23,58 @@ The executable prints `42`. Invoke the build tool directly with
 This implementation has been exercised on Windows; compiler/platform support
 remains the bootstrap's.
 
+## Building for a browser
+
+Activate an Emscripten SDK with Memory64 support (tested with 7.0.0), then run
+the normal project build with a target:
+
+```powershell
+.\duck.cmd build Examples\Projects\Modular\Modular.dkp --target wasm64
+```
+
+Serve the project's `.duck/build/wasm64/debug/` directory over HTTP and open
+`ModularDemo.html` in a browser with Memory64 support. Deploy the HTML, JS,
+and Wasm files together. Use `--profile release` for an optimized build.
+The default target is `native`. Each target keeps its own objects and module
+interfaces. For a custom SDK location use `--emcc PATH` or `[toolchain].emcc`.
+
+The web target uses 8-byte pointers, Duck's usual string encodings and ownership
+rules, and the compiler's sequential schedule. Parallel branches retain their
+safety checks and joins. The browser provides WebTransport sessions, bidirectional streams and
+datagrams through `Net.ConnectWebTransport(url)`. The build links the Duck and
+JavaScript bindings for modules that use them. Keep `WebTransport.ll` and
+`WebTransport.js` beside `duckc` when moving the toolchain. Worker threads,
+the built-in file API, native sockets, and the project test runner currently
+require the native target. External C functions need implementations built
+for the Emscripten wasm64 ABI.
+
+The [WebTransport echo example](../Examples/Projects/WebTransport/Client.dk)
+uses a bidirectional stream and a datagram on the same session. To exercise
+both against a local HTTP/3 server, activate the SDK and run the browser
+integration test with a Python environment containing `aioquic`:
+
+```powershell
+python Tests/WebTransport/browser.py --builder build/Debug/duck.exe --compiler build/Debug/duckc.exe --browser "C:/Program Files/Google/Chrome/Application/chrome.exe"
+```
+
+The test starts its own loopback server, creates a short-lived certificate for
+that endpoint, and runs Chromium in a temporary profile.
+
+To test a **Windows x64 Duck server** against the wasm64 client, run the
+cross-target fixture with x64 CPython, its matching development import library
+(`libs/pythonXY.lib`), and `aioquic` installed in that Python environment:
+
+```powershell
+python Tests/WebTransport/windows_peer.py --builder build/Debug/duck.exe --compiler build/Debug/duckc.exe --browser "C:/Program Files/Google/Chrome/Application/chrome.exe"
+```
+
+The fixture builds both targets in release mode and launches the native
+[Windows server](../Tests/WebTransport/WindowsServer.dk). Duck owns the UDP
+socket, computes the stream reply after FIN, and handles the datagram.
+Embedded aioquic supplies TLS and HTTP/3 framing inside the server process.
+The test requires both the browser result and a clean server exit with the
+expected request counts.
+
 ## Project format
 
 `.dkp` files contain TOML, with schema version 1:

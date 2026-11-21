@@ -1,5 +1,6 @@
 #include "Pipeline.h"
 #include "Timing.h"
+#include "WebInterface.h"
 #ifdef DUCK_NET_LIBRARY
 #define NOMINMAX
 #include <windows.h>
@@ -17,6 +18,7 @@ namespace {
 namespace fs = std::filesystem;
 
 struct Options {
+  duck::Target target = duck::Target::Native;
   bool entry = true;
   bool parallel = true;
   bool test = false;
@@ -154,7 +156,7 @@ void printErrors(const std::vector<duck::CompileError> &errors, const SourceText
 }
 
 void printHelp() {
-  std::cout << "Usage: duckc [--library | --test] [--sequential] [--dependency file.dk] [--import module.dki]\n"
+  std::cout << "Usage: duckc [--target native|wasm64] [--library | --test] [--sequential] [--dependency file.dk] [--import module.dki]\n"
                "             [--interface module.dki [--interface-key KEY]] <source.dk> [more.dk ...] -o <output.ll>\n"
                "Emits LLVM IR; compile and link with clang output.ll -o program\n"
                "--import reads a dependency from its interface file instead of its sources.\n"
@@ -232,6 +234,15 @@ Inputs readArguments(int argc, char **argv, const fs::path &outputPath, Options 
       continue;
     }
 
+    if (path == "--target") {
+      if (++i >= argc - 2) throw std::runtime_error("--target requires native or wasm64");
+      const std::string value = argv[i];
+      if (value == "wasm64") options.target = duck::Target::Wasm64;
+      else if (value == "native") options.target = duck::Target::Native;
+      else throw std::runtime_error("unknown target: " + value);
+      continue;
+    }
+
     if (path == "--sequential") {
       options.parallel = false;
       continue;
@@ -274,8 +285,15 @@ std::string compileInputs(Inputs inputs, const Options &options) {
   std::vector<duck::Program> units, importedUnits;
   std::vector<std::vector<duck::Token>> interface;
 
+  const bool webNet = options.target == duck::Target::Wasm64 && std::any_of(inputs.sources.begin(), inputs.sources.end(), [&](const SourceFile &file) {
+    return std::any_of(file.tokens.begin(), file.tokens.end(), [&](const duck::Token &t) {
+      return !t.string && (t.text == "Net" || t.text == "NetReceiveEvent" || t.text == "WebTransportSession" ||
+                           t.text == "WebTransportStream") && !inputs.containerNames.count(t.text);
+    });
+  });
+  if (webNet) addInterface(inputs, webInterface, "<standard WebTransport>");
 #ifdef DUCK_NET_LIBRARY
-  const bool needsNet = std::any_of(inputs.sources.begin(), inputs.sources.end(), [&](const SourceFile &file) {
+  const bool needsNet = options.target == duck::Target::Native && std::any_of(inputs.sources.begin(), inputs.sources.end(), [&](const SourceFile &file) {
     return std::any_of(file.tokens.begin(), file.tokens.end(), [&](const duck::Token &t) {
       return !t.string && (t.text == "Net" || t.text == "TcpListener" || t.text == "TcpConnection" ||
                            t.text == "UdpSocket" || t.text == "UdpEndpoint" || t.text == "NetReceiveSettings" ||
@@ -315,7 +333,7 @@ std::string compileInputs(Inputs inputs, const Options &options) {
   if (options.test) duck::enableTests(program);
 
   duck::phase("combine units");
-  auto ir = duck::compileModule(program, imports, options.entry && !options.test, options.parallel, options.test);
+  auto ir = duck::compileModule(program, imports, options.entry && !options.test, options.parallel, options.test, options.target);
 
 #ifdef DUCK_NET_LIBRARY
   if (needsNet) {
@@ -330,6 +348,7 @@ std::string compileInputs(Inputs inputs, const Options &options) {
           "\\22\"}\n!1 = !{!\"/DEFAULTLIB:Ws2_32.lib\"}\n";
   }
 #endif
+  if (webNet) ir.insert(0, "; Duck WebTransport\n");
   // Written only once the module compiles, so a dependent never imports one
   // that would not.
   if (!options.interface.empty()) {

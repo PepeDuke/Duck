@@ -26,10 +26,25 @@ broader than the implemented subset. See [Compiler/README.md](Compiler/README.md
 for build instructions, executable examples, and current limitations.
 The separate [build tool](BuildTool/README.md) builds modular programs from
 `.dkp` projects, with explicit dependencies, optional modules, and native linking.
+Use `duck build PROJECT --target wasm64` to build a browser application with
+8-byte pointers. See the [web build instructions](BuildTool/README.md#building-for-a-browser).
 The bootstrap also supports `extern "C"` native API declarations, typed pointers, C-layout structs, native callbacks,
 opaque `void*` handles, UTF-16 `string` and UTF-8 `name` values with deterministic cleanup,
 and native text arguments; see the
 [native interop guide](Compiler/README.md#native-api-calls-and-opaque-handles).
+
+### Compiler-supported targets/platforms
+
+| Capability | Windows x64 | Browser wasm64 |
+|---|---|---|
+| Parallel execution | Automatic tasks and explicit `P` branches can use workers. | One thread runs the branches. The compiler still checks conflicting accesses and preserves joins. |
+| Built-in `file` API | Opens, reads, and writes local files. | The compiler rejects use of the built-in file runtime. |
+| TCP and UDP sockets | Connect or listen on TCP, bind UDP, and receive socket callbacks. | Browser pages cannot bind a listening port or open raw TCP/UDP sockets. Duck exposes WebTransport sessions, streams, and datagrams through `Net.ConnectWebTransport`. |
+| Platform interop | Link x64 Windows libraries and call Win32 APIs. | External functions need a wasm64 implementation or a JavaScript binding. Windowing and other OS-specific calls require browser equivalents. |
+| Running Duck unit tests | `duck test` and `duckc --test` build native test runners. | The Duck test runner is unavailable. Browser integration fixtures build and execute applications in Chromium. |
+
+- [Build and run on Windows x64](Compiler/README.md#build-and-run-on-windows)
+- [Build for browser wasm64](BuildTool/README.md#building-for-a-browser)
 
 stages
 1. design stage - make sure the syntax is consistent, complete and simple to use
@@ -1766,6 +1781,37 @@ The [ping server](Examples/Networking/PingServer.dk) and [ping client](Examples/
 are separate programs. Build each with [Ping.dk](Examples/Networking/Ping.dk),
 start the server, and pass its printed port to the client. Both use two-byte
 TCP receive chunks to assemble the four-byte messages across callbacks.
+
+## Browser WebTransport
+
+On `wasm64`, `Net.ConnectWebTransport(string url)` opens a session to an HTTPS
+WebTransport server that supports unreliable datagrams. `session.OpenStream()`
+opens a reliable bidirectional stream. Both return owning handles immediately,
+or null on setup failure. A stream can be requested while its session connects.
+Keep the owners alive across browser event-loop turns. The
+[echo client](Examples/Projects/WebTransport/Client.dk) uses a named scope to
+keep its session and stream alive after `Main` returns.
+
+| Operation | Behavior |
+|---|---|
+| `session.Status()`, `stream.Status()` | 0 pending, 1 ready, -1 closed or failed. |
+| `session.OnConnect(handler)`, `stream.OnConnect(handler)` | Calls a `func (int)` once with the opening result (1 or -1). Late registration receives the result on a later turn. |
+| `stream.OnReceive(handler)` | Calls a `func (NetReceiveEvent&)` for each chunk, in order. Positive `Status` counts bytes in `Data`. A final 0 means the peer finished writing, and -1 means receive failure. A chunk can contain part of a message or several messages. |
+| `session.OnDatagram(handler)` | The same handler signature delivers one whole datagram. Zero means an empty datagram. A final -1 ends delivery. |
+| `stream.Read(buffer)`, `stream.Write(buffer)` | Transfer up to 4096 bytes per call. `ReadAt(buffer, offset)` and `WriteAt(buffer, offset)` resume at a byte offset. Return the count, -2 to retry on a later turn, or -1 on error. A zero-byte read means end of stream. |
+| `stream.FinishWrite()` | Queue FIN after accepted writes. Returns true once. The peer can still send a reply. |
+| `session.SendDatagram(data)`, `session.ReceiveDatagram(buffer)` | Return the whole datagram size, -2 to retry, -1 on error, or -3 for an oversized datagram. An undersized receive buffer discards that packet and leaves the buffer unchanged. `MaxDatagramSize()` gives the send limit when ready. |
+
+Handlers run on the browser event loop. Registration returns false for a null
+or duplicate handler or a locally closed handle. An installed receive handler
+owns reads on its stream, or datagram reads on its session. Polling that same
+operation then returns -1. Each handle allows one outstanding write and copies
+the accepted bytes before returning. A successful write reports local
+acceptance. Datagram delivery can be lost or reordered.
+
+`Close()` and owner destruction cancel subsequent callbacks. The active handler
+may close or release its own handle. Closing a session also closes its streams.
+Callback data is valid during the call.
 
 ## Files in Duck
 `file` is a built-in type for reading and writing files on disk. A file starts closed, cannot be copied, and closes itself when it goes away, so `Close()` is only needed to finish early.

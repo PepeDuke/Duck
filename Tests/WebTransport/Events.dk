@@ -1,0 +1,76 @@
+// Regression fixture for the local HTTP/3 echo server in webtransport.py.
+Handles {
+    WebTransportSession* Session :: null
+    WebTransportStream* First :: null
+    WebTransportStream* Second :: null
+    WebTransportSession* Rejected :: null
+    int Completed
+    int Bytes
+}
+Probe #{
+    [@Run]
+    Handles State
+
+    Done() {
+        State.Completed++
+        if State.Completed == 4 {
+            Print("events complete")
+            @end Run
+        }
+    }
+    FirstReady(int status) {
+        byte [] data = {17}
+        if status != 1 || State.First.Write(data) != 1 { Print("first write failed") }
+    }
+    FirstData(NetReceiveEvent& chunk) {
+        if chunk.Status != 1 || chunk.Data[0] != 17 { Print("wrong first stream") }
+        byte [] buffer = {0}
+        if State.First.Read(buffer) != -1 { Print("poll stole event data") }
+        State.First = null
+        Done()
+    }
+    SecondReady(int status) {
+        byte [] data = {23, 24}
+        if status != 1 || State.Second.Write(data) != 2 { Print("second write failed") }
+        if !State.Second.FinishWrite() || State.Second.FinishWrite() { Print("bad FIN") }
+        // Register on the session after it has established two streams.
+        if !State.Session.OnConnect(@ (int result) {
+            if result != 1 { Print("wrong late status") }
+            Done()
+        }) { Print("late registration failed") }
+    }
+    SecondData(NetReceiveEvent& chunk) {
+        if chunk.Status < 0 { Print("second stream failed")
+            return }
+        for value : chunk.Data { State.Bytes += (int)value }
+        if chunk.Status == 0 {
+            if State.Bytes != 47 { Print("wrong second stream") }
+            State.Second.Close()
+            Done()
+        }
+    }
+    Start(string url) {
+        @start Run
+        State.Session :: Net.ConnectWebTransport(url)
+        State.First :: State.Session.OpenStream()
+        State.Second :: State.Session.OpenStream()
+        State.First.OnReceive(@ (NetReceiveEvent& event) { FirstData(event) })
+        if State.First.OnReceive(@ (NetReceiveEvent& event) { Print("unexpected handler") }) {
+            Print("duplicate registration accepted")
+        }
+        State.Second.OnReceive(@ (NetReceiveEvent& event) { SecondData(event) })
+        State.First.OnConnect(@ (int status) { FirstReady(status) })
+        State.Second.OnConnect(@ (int status) { SecondReady(status) })
+
+        discarded : State.Session.OpenStream()
+        discarded.OnConnect(@ (int status) { Print("callback after local close") })
+        discarded.Close()
+        State.Rejected :: Net.ConnectWebTransport(url + "/missing")
+        State.Rejected.OnConnect(@ (int status) {
+            if status != -1 { Print("wrong rejection status") }
+            State.Rejected = null
+            Done()
+        })
+    }
+}
+Main(string [] args) { Probe.Start(args[0]) }

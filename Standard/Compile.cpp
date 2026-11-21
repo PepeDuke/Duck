@@ -6,7 +6,8 @@
 // Build the standard module with the same parser, interface writer and code
 // generator as application modules, before linking the user-facing compiler.
 int main(int argc, char **argv) {
-    if (argc != 4) return 1;
+    const bool web = argc == 5 && std::string(argv[4]) == "wasm64";
+    if (!web && argc != 4) return 1;
     try {
         std::ifstream input(argv[1], std::ios::binary);
         if (!input) return 1;
@@ -16,7 +17,7 @@ int main(int argc, char **argv) {
         std::set<std::string> names;
         duck::collectContainerNames(tokens, names);
         auto unit = duck::parse(tokens, names, {});
-        auto ir = duck::compileModule(unit, {}, false, true);
+        auto ir = duck::compileModule(unit, {}, false, true, false, web ? duck::Target::Wasm64 : duck::Target::Native);
         auto interface = duck::writeInterface("", {duck::interfaceTokens(tokens, unit)});
         std::ofstream module(argv[2], std::ios::binary), header(argv[3], std::ios::binary);
         return !(module << ir).flush() || !(header << interface).flush();

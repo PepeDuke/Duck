@@ -1,0 +1,87 @@
+// The endpoint echoes a stream after FIN and echoes each datagram.
+Client {
+    WebTransportSession* Session :: null
+    WebTransportStream* Stream :: null
+    int Sum
+    bool StreamDone
+    bool DatagramDone
+}
+
+App #{
+    [@Network]
+    Client State
+
+    Stop() {
+        if State.StreamDone && State.DatagramDone {
+            Print("echo complete")
+            @end Network
+        }
+    }
+    Failed(string reason) {
+        Print(reason)
+        @end Network
+    }
+    Start(string url) {
+        @start Network
+        State.Session :: Net.ConnectWebTransport(url)
+        if !State.Session {
+            Failed("session setup failed")
+            return
+        }
+        State.Session.OnDatagram(@ (NetReceiveEvent& packet) {
+            if packet.Status != 1 || packet.Data[0] != 7 {
+                Failed("unexpected datagram")
+                return
+            }
+            State.DatagramDone = true
+            Stop()
+        })
+        State.Session.OnConnect(@ (int status) {
+            if status != 1 {
+                Failed("session failed")
+                return
+            }
+            byte [] ping = {7}
+            if State.Session.SendDatagram(ping) != 1 {
+                Failed("datagram send failed")
+                return
+            }
+        })
+
+        State.Stream :: State.Session.OpenStream()
+        if !State.Stream {
+            Failed("stream setup failed")
+            return
+        }
+        State.Stream.OnReceive(@ (NetReceiveEvent& chunk) {
+            if chunk.Status < 0 {
+                Failed("stream receive failed")
+                return
+            }
+            if chunk.Status == 0 {
+                if State.Sum != 42 {
+                    Failed("unexpected stream payload")
+                    return
+                }
+                State.Stream.Close()
+                State.StreamDone = true
+                Stop()
+                return
+            }
+            for value : chunk.Data { State.Sum += (int)value }
+        })
+        State.Stream.OnConnect(@ (int status) {
+            if status != 1 {
+                Failed("stream open failed")
+                return
+            }
+            byte [] request = {20, 22}
+            if State.Stream.Write(request) != 2 || !State.Stream.FinishWrite() { Failed("stream write or FIN failed") }
+        })
+    }
+}
+
+Main(string [] args) {
+    if args.Len == 1 { App.Start(args[0]) }
+    else { App.Start("https://localhost:4433/echo") }
+}

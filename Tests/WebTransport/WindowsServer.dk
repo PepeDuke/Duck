@@ -1,0 +1,88 @@
+// Windows x64 test peer. Duck owns the UDP socket and application state.
+// The in-process aioquic adapter supplies TLS and HTTP/3 record framing.
+extern "C" void Py_Initialize()
+extern "C" void* PyImport_AddModule(cstring key)
+extern "C" void* PyLong_FromVoidPtr(void* value)
+extern "C" int PyModule_AddObject(void* module, cstring key, void* value)
+extern "C" int PyRun_SimpleString(cstring command)
+extern "C" int Py_FinalizeEx()
+extern "C" int WSAGetLastError()
+extern "C" void ExitProcess(uint status)
+
+Packet { byte [65527] Data }
+Server {
+    UdpSocket* Socket :: null
+    byte [] Input
+    int StreamReplies
+    int DatagramReplies
+}
+TransportApi {
+    void* Context
+    void* Receive
+    void* Send
+    void* Respond
+    int Port
+}
+
+int ReceivePacket(Server* host, Packet* packet, int* port) {
+    UdpEndpoint sender
+    int size = host.Socket.ReceiveFrom(host.Input, sender)
+    // Chrome may already have closed its port when QUIC sends its last ACK.
+    // Winsock reports that peer's ICMP port-unreachable on the next receive.
+    if size == -1 && WSAGetLastError() == 10054 && host.StreamReplies == 1 && host.DatagramReplies == 1 {
+        return -2
+    }
+    if size >= 0 {
+        *port = sender.Port
+        for i : 0; i < size; i++ { packet.Data[i] = host.Input[i] }
+    }
+    return size
+}
+int SendPacket(Server* host, Packet* packet, int size, int port) {
+    if size < 0 || size > packet.Data.Len { return -1 }
+    byte [] bytes
+    for i : 0; i < size; i++ { bytes += packet.Data[i] }
+    peer : Net.UdpAddress("127.0.0.1", port)
+    return host.Socket.SendTo(bytes, peer)
+}
+
+// Each bidirectional stream has its own accumulator. A request containing
+// 20 and 22 returns a single byte, 42, only after the peer finishes writing.
+int Respond(Server* host, int datagram, int fin, int* sum, Packet* packet, int size) {
+    if size < 0 || size > packet.Data.Len { return -1 }
+    if datagram != 0 {
+        if size != 1 || packet.Data[0] != 7 { return -1 }
+        host.DatagramReplies++
+        return size
+    }
+    for i : 0; i < size; i++ { *sum += (int)packet.Data[i] }
+    if fin == 0 { return -2 }
+    if *sum != 42 { return -1 }
+    packet.Data[0] = (byte)*sum
+    host.StreamReplies++
+    return 1
+}
+
+Main() {
+    Server host
+    host.Socket :: Net.BindUdp("127.0.0.1", 0)
+    if !host.Socket { ExitProcess(1) }
+    for i : 0; i < 65527; i++ { host.Input += (byte)0 }
+    TransportApi api
+    api.Context = (void*)&host
+    api.Receive = &ReceivePacket
+    api.Send = &SendPacket
+    api.Respond = &Respond
+    api.Port = host.Socket.Port()
+
+    Py_Initialize()
+    module : PyImport_AddModule("__main__")
+    if PyModule_AddObject(module, "duck_api", PyLong_FromVoidPtr((void*)&api)) != 0 { ExitProcess(1) }
+    int result = PyRun_SimpleString("from windows_peer import serve_duck; serve_duck(duck_api)")
+    int shutdown = Py_FinalizeEx()
+    host.Socket.Close()
+    if result != 0 || shutdown != 0 || host.StreamReplies != 1 || host.DatagramReplies != 1 {
+        ExitProcess(1)
+    }
+    Print("Windows Duck handled stream FIN and datagram")
+}

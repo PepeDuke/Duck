@@ -694,13 +694,14 @@ FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
 // nativeSymbols lists symbols already declared by the program, so runtime
 // imports are not declared twice.
 // mainArguments selects the native entry for Main(string [] args).
+enum class Target { Native, Wasm64 };
 std::string assembleModule(const std::vector<FunctionIR> &functions,
                            bool entry = true,
                            const std::set<std::string> &nativeSymbols = {},
-                           bool mainArguments = false, bool fileFields = false);
+                           bool mainArguments = false, bool fileFields = false, Target target = Target::Native);
 std::string textRuntimeIR();
 // The native entry that builds Main's argument array.
-std::string entryArgumentsIR();
+std::string entryArgumentsIR(Target target = Target::Native);
 std::string collectionRuntimeIR();
 std::string collectionBigKeyIR();
 std::string heapRuntimeIR();
@@ -744,7 +745,7 @@ std::string compile(const Program &program, bool parallel = true);
 // tests builds a test module: its entry is the generated runner and Main, if
 // any, is compiled but not called. It requires entry = false.
 std::string compileModule(const Program &program, const Program &imports,
-                          bool entry, bool parallel = true, bool tests = false);
+                          bool entry, bool parallel = true, bool tests = false, Target target = Target::Native);
 // Moves the program's T{ } tests in among its functions and rejects duplicates.
 void enableTests(Program &program);
 } // namespace duck

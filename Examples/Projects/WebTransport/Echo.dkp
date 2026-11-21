@@ -1,0 +1,6 @@
+version = 1
+[project]
+name = "Echo"
+entry = "client"
+[modules.client]
+sources = ["Client.dk"]

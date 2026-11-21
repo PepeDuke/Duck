@@ -1,0 +1,1 @@
+inline constexpr char webInterface[] = @NET_INTERFACE@;

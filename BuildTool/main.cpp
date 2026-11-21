@@ -141,7 +141,7 @@ static Paths glob(const fs::path& root, const std::string& pattern) {
 
 struct Options {
     fs::path project;
-    std::string module, profile = "debug", compiler, clang;
+    std::string module, profile = "debug", target = "native", compiler, clang, emcc;
     Strings enable, disable, filters;
     bool list = false, compareSchedules = false, verbose = false;
     int samples = 5, jobs = 0; // Unspecified until the test mode is known.
@@ -195,7 +195,7 @@ public:
         buildDir = fs::weakly_canonical(root / fs::u8path(config.contains("build_dir") ?
             string(config.get("build_dir"), "project.build_dir") : ".duck/build"));
         if (auto tools = data.get("toolchain")) {
-            for (const auto& [key, value] : table(tools, {"compiler", "clang"}, "toolchain"))
+            for (const auto& [key, value] : table(tools, {"compiler", "clang", "emcc"}, "toolchain"))
                 toolchain[std::string(key.str())] = string(&value, "toolchain." + std::string(key.str()));
         }
         if (auto node = data.get("link")) link = Link(table(node, {"libraries", "library_paths"}, "link"), "link");
@@ -312,7 +312,7 @@ public:
         Strings candidates = key == "compiler" ? Strings{"duckc", (bin / "duckc.exe").u8string(),
             (bin / "duckc").u8string(), (repo / "build/Debug/duckc.exe").u8string(),
             (repo / "build/Release/duckc.exe").u8string(), (repo / "build/duckc").u8string()} :
-            Strings{"clang", "C:/Program Files/LLVM/bin/clang.exe"};
+            key == "emcc" ? Strings{"emcc"} : Strings{"clang", "C:/Program Files/LLVM/bin/clang.exe"};
         for (const auto& candidate : candidates) {
             try { return executable(candidate, root).u8string(); }
             catch (const std::runtime_error&) {}
@@ -849,7 +849,7 @@ struct ModuleBuild {
 // build and an error in a dependency is not repeated by each of its dependents.
 static void compileModules(const Project& project, const Plan& sources, const std::string& compiler,
                            const std::string& clang, const std::string& optimize, const fs::path& directory,
-                           Progress& progress, bool verbose, const Interfaces& interfaces,
+                           Progress& progress, bool verbose, bool wasm64, const Interfaces& interfaces,
                            const std::set<std::string>& upToDate) {
     std::vector<ModuleBuild> builds(sources.size());
     std::mutex mutex;
@@ -885,8 +885,11 @@ static void compileModules(const Project& project, const Plan& sources, const st
                     const auto dki = directory / (id + ".dki");
                     command.insert(command.end() - 2, {"--interface", dki.u8string(), "--interface-key", interfaces.keys.at(id)});
                 }
+                if (wasm64) command.insert(command.begin() + 1, {"--target", "wasm64"});
                 step("duckc", command);
-                step("clang", {clang, "-c", optimize, ir.u8string(), "-o", object.u8string()});
+                Strings assemble{clang, "-c", optimize, ir.u8string(), "-o", object.u8string()};
+                if (wasm64) assemble.push_back("-m64");
+                step(wasm64 ? "emcc" : "clang", assemble);
             } catch (const std::exception& error) {
                 build.error = error.what();
                 stop = true;
@@ -943,13 +946,14 @@ static void build(const Options& options, const fs::path& bin) {
     Project project(options);
     auto sources = project.plan(options.module);
     auto compiler = project.tool("compiler", options.compiler, bin);
-    auto clang = project.tool("clang", options.clang, bin);
+    const bool wasm64 = options.target == "wasm64";
+    auto clang = wasm64 ? project.tool("emcc", options.emcc, bin) : project.tool("clang", options.clang, bin);
     Strings flags;
     if (options.module.empty() && !project.entry.empty()) {
         for (auto it = sources.rbegin(); it != sources.rend(); ++it) project.linkFlags(project.modules.at(it->first), flags);
         project.linkFlags(project.link, flags);
     }
-    const auto destination = project.buildDir / options.profile;
+    const auto destination = (wasm64 ? project.buildDir / "wasm64" : project.buildDir) / options.profile;
     const bool linking = options.module.empty() && !project.entry.empty();
     const auto started = Clock::now();
     size_t width = 0;
@@ -962,13 +966,19 @@ static void build(const Options& options, const fs::path& bin) {
     // dependencies' keys and the compiler), clang, the optimization level,
     // and whether it is the entry module. A changed dependency changes the
     // key of every module above it, so those rebuild too.
-    const auto clangTool = toolIdentity(clang);
+    auto clangTool = toolIdentity(clang);
+    if (wasm64) {
+        // An SDK update can replace the driver behind the emcc launcher.
+        std::string version;
+        run({clang, "--version"}, version);
+        clangTool.push_back(version);
+    }
     std::map<std::string, std::string> objectKeys;
     std::set<std::string> upToDate;
     for (const auto& [id, files] : sources) {
         (void)files;
         const bool library = id != project.entry;
-        Strings parts{"duck-object 1", known.keys.at(id), optimize, library ? "library" : "entry"};
+        Strings parts{"duck-object 1", options.target, known.keys.at(id), optimize, library ? "library" : "entry"};
         parts.insert(parts.end(), clangTool.begin(), clangTool.end());
         objectKeys[id] = hashOf(parts);
         if (fs::exists(destination / (id + ".o")) && fs::exists(destination / (id + ".ll")) &&
@@ -976,15 +986,22 @@ static void build(const Options& options, const fs::path& bin) {
             upToDate.insert(id);
     }
     auto executable = fs::u8path(project.projectName);
+    if (wasm64) executable += ".html";
 #ifdef _WIN32
-    executable += ".exe";
+    else executable += ".exe";
 #endif
+    const auto runtimeDir = fs::u8path(compiler).parent_path();
+    const auto webIR = runtimeDir / "WebTransport.ll", webJS = runtimeDir / "WebTransport.js";
     std::string linkKey;
     if (linking) {
         Strings parts{"duck-link 1"};
         for (const auto& [id, files] : sources) {
             (void)files;
             parts.push_back(objectKeys[id]);
+        }
+        if (wasm64) {
+            for (const auto& file : {webIR, webJS})
+                for (const auto& part : toolIdentity(file.u8string())) parts.push_back(part);
         }
         // A native library given by path relinks when the file changes.
         for (const auto& flag : flags) {
@@ -995,7 +1012,12 @@ static void build(const Options& options, const fs::path& bin) {
         parts.insert(parts.end(), clangTool.begin(), clangTool.end());
         linkKey = hashOf(parts);
     }
-    const bool link = linking && (upToDate.size() < sources.size() || !fs::exists(destination / executable) ||
+    Paths companions;
+    if (wasm64) companions = {project.projectName + ".js", project.projectName + ".wasm"};
+    const bool missingCompanion = std::any_of(companions.begin(), companions.end(), [&](const auto& path) {
+        return !fs::is_regular_file(destination / path);
+    });
+    const bool link = linking && (upToDate.size() < sources.size() || missingCompanion || !fs::exists(destination / executable) ||
                                   stampKey(destination / (executable.u8string() + ".stamp")) != linkKey);
 
     Progress progress((sources.size() - upToDate.size()) * 2 + (link ? 1 : 0), width);
@@ -1003,7 +1025,7 @@ static void build(const Options& options, const fs::path& bin) {
               << progress.total << " steps (" << options.profile << "), " << known.fresh.size()
               << " interface(s) up to date" << std::endl;
     WorkDirectory work(destination);
-    compileModules(project, sources, compiler, clang, optimize, work.path, progress, options.verbose, known, upToDate);
+    compileModules(project, sources, compiler, clang, optimize, work.path, progress, options.verbose, wasm64, known, upToDate);
     Paths artifacts;
     Strings objects;
     for (const auto& [id, files] : sources) {
@@ -1023,7 +1045,14 @@ static void build(const Options& options, const fs::path& bin) {
     if (link) {
         const auto output = work.path / executable;
         Strings command{clang};
+        if (wasm64) command.insert(command.end(), {"-m64", "-sEXIT_RUNTIME=1", optimize});
         command.insert(command.end(), objects.begin(), objects.end());
+        if (wasm64 && std::any_of(sources.begin(), sources.end(), [&](const auto& source) {
+                const auto& id = source.first;
+                return stampKey((upToDate.count(id) ? destination : work.path) / (id + ".ll")) == "; Duck WebTransport";
+            })) {
+            command.insert(command.end(), {webIR.u8string(), "--js-library", webJS.u8string()});
+        }
         command.insert(command.end(), flags.begin(), flags.end());
         command.insert(command.end(), {"-o", output.u8string()});
         const auto start = Clock::now();
@@ -1031,6 +1060,7 @@ static void build(const Options& options, const fs::path& bin) {
         progress.finished("link ", output.filename().u8string(), Clock::now() - start);
         const auto stamp = work.path / (executable.u8string() + ".stamp");
         writeStamp(stamp, linkKey);
+        for (const auto& path : companions) artifacts.push_back(work.path / path);
         artifacts.insert(artifacts.end(), {output, stamp});
     }
     for (const auto& artifact : artifacts) duckbuild::publish(artifact, destination / artifact.filename());
@@ -1042,6 +1072,7 @@ static void help() {
     std::cout << "Build modular Duck projects (.dkp, TOML syntax)\n"
         "Usage: duck build PROJECT [--module MODULE] [--enable MODULE] [--disable MODULE]\n"
         "                        [--profile debug|release] [--compiler PATH] [--clang PATH] [--verbose]\n"
+        "                        [--target native|wasm64] [--emcc PATH]\n"
         "--module builds objects for the module and its dependencies without linking.\n"
         "Each step prints [done/total] as it finishes; --verbose also prints every tool command.\n"
         "--enable and --disable may be repeated. Tool overrides resolve from the working directory.\n"
@@ -1085,6 +1116,7 @@ static int mainImpl(const Strings& arguments) {
             auto equals = argument.find('=');
             auto key = argument.substr(0, equals);
             if (key != "--module" && key != "--enable" && key != "--disable" && key != "--profile" && key != "--compiler" && key != "--clang" &&
+                !(!testing && (key == "--target" || key == "--emcc")) &&
                 !(testing && (key == "--filter" || key == "--samples" || key == "--jobs")))
                 fail("unknown option: " + key);
             std::string value;
@@ -1107,6 +1139,11 @@ static int mainImpl(const Strings& arguments) {
                 options.filters.push_back(value);
             }
             else if (key == "--module") options.module = value;
+            else if (key == "--target") {
+                if (value != "wasm64" && value != "native") fail("unknown target: " + value);
+                options.target = value;
+            }
+            else if (key == "--emcc") options.emcc = value;
             else if (key == "--profile") options.profile = value;
             else if (key == "--compiler") options.compiler = value;
             else options.clang = value;

@@ -31,12 +31,26 @@ else()
   endif()
 endif()
 
+add_executable(duck_std_compiler Standard/Compile.cpp)
+target_link_libraries(duck_std_compiler PRIVATE duck_compiler)
+set(net_src "${CMAKE_CURRENT_SOURCE_DIR}/Standard/Net")
+set(net_gen "${CMAKE_CURRENT_BINARY_DIR}/standard/$<CONFIG>")
+add_custom_command(OUTPUT "${net_gen}/WebTransport.ll" "${net_gen}/WebTransport.dki" "${net_gen}/WebInterface.h"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${net_gen}"
+  COMMAND duck_std_compiler "${net_src}/WebTransport.dk" "${net_gen}/WebTransport.ll" "${net_gen}/WebTransport.dki" wasm64
+  COMMAND ${CMAKE_COMMAND} "-DINPUT=${net_gen}/WebTransport.dki" "-DLIBRARY=${net_gen}/WebTransport.ll"
+    "-DTEMPLATE=${net_src}/WebInterface.h.in" "-DOUTPUT=${net_gen}/WebInterface.h" -P "${net_src}/Embed.cmake"
+  DEPENDS duck_std_compiler "${net_src}/WebTransport.dk" "${net_src}/WebInterface.h.in" "${net_src}/Embed.cmake"
+  VERBATIM)
+add_custom_target(duck_web_net
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${net_gen}/WebTransport.ll" "${net_src}/WebTransport.js" "$<TARGET_FILE_DIR:duckc>"
+  DEPENDS "${net_gen}/WebInterface.h"
+  VERBATIM)
+add_dependencies(duckc duck_web_net)
+target_include_directories(duckc PRIVATE "${net_gen}")
+
 if(WIN32)
   find_program(DUCK_CLANG NAMES clang HINTS "C:/Program Files/LLVM/bin" REQUIRED)
-  add_executable(duck_std_compiler Standard/Compile.cpp)
-  target_link_libraries(duck_std_compiler PRIVATE duck_compiler)
-  set(net_src "${CMAKE_CURRENT_SOURCE_DIR}/Standard/Net")
-  set(net_gen "${CMAKE_CURRENT_BINARY_DIR}/standard/$<CONFIG>")
   add_custom_command(OUTPUT "${net_gen}/Net.obj" "${net_gen}/Net.dki"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${net_gen}"
     COMMAND duck_std_compiler "${net_src}/Net.dk" "${net_gen}/Net.ll" "${net_gen}/Net.dki"
@@ -51,7 +65,6 @@ if(WIN32)
     DEPENDS duck_net "${net_gen}/Net.dki" "${net_src}/Interface.h.in" "${net_src}/Embed.cmake"
     VERBATIM)
   target_sources(duckc PRIVATE "${net_gen}/NetInterface.h")
-  target_include_directories(duckc PRIVATE "${net_gen}")
   target_compile_definitions(duckc PRIVATE DUCK_NET_LIBRARY="$<TARGET_FILE_NAME:duck_net>")
 endif()
 
@@ -63,6 +76,17 @@ if(BUILD_TESTING)
   find_program(DUCK_CLANG NAMES clang HINTS "C:/Program Files/LLVM/bin" REQUIRED)
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_FOUND)
+    if(DEFINED ENV{EMSDK})
+      find_program(DUCK_EMCC NAMES emcc HINTS "$ENV{EMSDK}/upstream/emscripten")
+      find_program(DUCK_WASM_DIS NAMES wasm-dis HINTS "$ENV{EMSDK}/upstream/bin")
+      find_program(DUCK_NODE NAMES node)
+      if(DUCK_EMCC AND DUCK_WASM_DIS AND DUCK_NODE)
+        add_test(NAME buildtool.wasm64 COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/Tests/wasm64.py --builder $<TARGET_FILE:duck>
+          --compiler $<TARGET_FILE:duckc> --emcc ${DUCK_EMCC} --node ${DUCK_NODE}
+          --wasm-dis ${DUCK_WASM_DIS})
+      endif()
+    endif()
     if(WIN32)
       add_test(NAME compiler.net COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/Tests/net.py --compiler $<TARGET_FILE:duckc> --clang ${DUCK_CLANG})

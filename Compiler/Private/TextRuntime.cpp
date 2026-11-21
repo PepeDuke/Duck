@@ -1,19 +1,19 @@
 #include "Pipeline.h"
 namespace duck {
-// The compiler emits for its own host, so the host picks the native entry.
 // wmain supplies UTF-16 directly, the same form a Duck string stores. MinGW
 // links wmain only with -municode, so it keeps main and its byte arguments.
 #if defined(_WIN32) && !defined(__MINGW32__)
-constexpr bool wideEntry = true;
+constexpr bool nativeWideEntry = true;
 #else
-constexpr bool wideEntry = false;
+constexpr bool nativeWideEntry = false;
 #endif
 // Managed text must always be valid, because @duck.text.decode does not check
 // it, while the operating system promises nothing about arguments. Both
 // decoders write U+FFFD for each unpaired surrogate or malformed byte. Input
 // ends in a zero unit, which is neither a low surrogate nor a continuation
 // byte, so looking one unit ahead cannot pass the end.
-std::string entryArgumentsIR() {
+std::string entryArgumentsIR(Target target) {
+  const bool wideEntry = target == Target::Native && nativeWideEntry;
   const std::string unit = wideEntry ? "i16" : "i8";
   std::string ir = "define internal ptr @duck.args$text(ptr %native) {\nentry:\n  br label %scan\nscan:\n"
                    "  %n = phi i64 [0, %entry], [%following, %scan]\n"
@@ -132,7 +132,8 @@ end:
   ret ptr %out
 }
 )IR";
-  ir += std::string("define i32 @") + (wideEntry ? "wmain" : "main") + R"IR((i32 %argc, ptr %argv) {
+  const char *entry = target == Target::Wasm64 ? "__main_argc_argv" : (wideEntry ? "wmain" : "main");
+  ir += std::string("define i32 @") + entry + R"IR((i32 %argc, ptr %argv) {
 entry:
   store ptr @duck$thread.main, ptr @duck$thread.self
   %args = alloca ptr

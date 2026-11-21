@@ -54,7 +54,7 @@ static bool fileFields(const Symbols &symbols) {
 }
 std::string assembleModule(const std::vector<FunctionIR> &functions,
                            bool entry, const std::set<std::string> &nativeSymbols,
-                           bool mainArguments, bool fileFields) {
+                           bool mainArguments, bool fileFields, Target target) {
   std::string module =
       "; Duck bootstrap LLVM IR\ndeclare i32 @printf(ptr, ...)\n"
       "declare double @llvm.floor.f64(double)\ndeclare void @llvm.trap()\n"
@@ -129,8 +129,31 @@ $duck$thread.self = comdat any
 
   const bool needsLocks = std::any_of(functions.begin(), functions.end(), [](const auto &f) { return f.usesLockRuntime; });
 
-  if (needsTasks || needsLocks) module += lockRuntimeIR(nativeSymbols);
-  if (needsTasks) module += taskRuntimeIR(nativeSymbols);
+  if (target == Target::Wasm64) {
+    // One executing thread. The sequential lowering still validates branches
+    // and preserves their join points. Slot zero is always running.
+    if (needsTasks) module += R"IR(
+define internal i32 @duck.thread$count(i32 %mode) { ret i32 1 }
+define internal i32 @duck.thread$status(i32 %index) {
+  %valid = icmp eq i32 %index, 0
+  br i1 %valid, label %running, label %invalid
+running:
+  ret i32 1
+invalid:
+  call void @llvm.trap()
+  unreachable
+}
+)IR";
+    if (needsLocks) module += R"IR(
+define internal i64 @duck.lock$bit(ptr %address) { ret i64 0 }
+define internal i32 @duck.lock$enter(i64 %mask, i1 %exclusive) { ret i32 0 }
+define internal void @duck.lock$exit(i32 %token) { ret void }
+)IR";
+    if (needsFile) throw std::runtime_error("the built-in file API is unavailable on the wasm64 target");
+  } else {
+    if (needsTasks || needsLocks) module += lockRuntimeIR(nativeSymbols);
+    if (needsTasks) module += taskRuntimeIR(nativeSymbols);
+  }
   if (needsText) module += textRuntimeIR();
   if (needsFile) module += fileRuntimeIR(nativeSymbols);
   if (needsCollections) module += collectionRuntimeIR();
@@ -161,10 +184,11 @@ $duck$thread.self = comdat any
     return module;
 
   if (mainArguments)
-    return module + entryArgumentsIR();
+    return module + entryArgumentsIR(target);
 
-  return module + "define i32 @main() {\nentry:\n  store ptr @duck$thread.main, ptr @duck$thread.self\n  call void @duck.Main()\n  "
-                  "ret i32 0\n}\n";
+  const char *entrySignature = target == Target::Wasm64 ? "@__main_argc_argv(i32 %argc, ptr %argv)" : "@main()";
+  return module + "define i32 " + entrySignature +
+         " {\nentry:\n  store ptr @duck$thread.main, ptr @duck$thread.self\n  call void @duck.Main()\n  ret i32 0\n}\n";
 }
 std::string compile(const Program &program, bool parallel) {
   return compileModule(program, {}, true, parallel);
@@ -367,7 +391,11 @@ static std::string buildTestRunner(const Program &program, const std::set<std::s
   return testRunnerIR(cases, nativeSymbols);
 }
 std::string compileModule(const Program &program, const Program &imports,
-                          bool entry, bool parallel, bool tests) {
+                          bool entry, bool parallel, bool tests, Target target) {
+  if (target == Target::Wasm64) {
+    parallel = false;
+    if (tests) throw std::runtime_error("the wasm64 test runner is unavailable");
+  }
   // Each module emits its own member tables, so only the defining module may
   // add members; otherwise indices from the two modules would disagree.
   rejectImportedEnumExtensions(program, imports);
@@ -526,11 +554,12 @@ std::string compileModule(const Program &program, const Program &imports,
       emitDestroys(symbols, destroys) + emitTables(symbols, tables, types) +
       emitDeclarations(declarations) +
       assembleModule(fragments, entry, nativeSymbols,
-                     entry && !symbols.at("Main").parameters.empty(), fileFields(symbols)) +
+                     entry && !symbols.at("Main").parameters.empty(), fileFields(symbols), target) +
       runner;
   phase("emit module");
   auto result = emitNativeMathTypes(symbols, module) + module;
   phase("emit native math types");
+  if (target == Target::Wasm64) result.insert(0, "target triple = \"wasm64-unknown-emscripten\"\n");
   return result;
 }
 } // namespace duck

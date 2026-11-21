@@ -1,0 +1,139 @@
+// The owning handle unregisters callbacks on destruction. Registration copies
+// the Duck closures; a callback may safely close the stream that dispatched it.
+DuckWebNative #{
+    extern "C" int Connect(string url) = "duck_wt_connect"
+    extern "C" int Open(int session) = "duck_wt_open"
+    extern "C" int Status(int id) = "duck_wt_status"
+    extern "C" void Close(int id) = "duck_wt_close"
+    extern "C" int Limit(int id) = "duck_wt_limit"
+    extern "C" int Transfer(int id, byte* buffer, int size, int writing) = "duck_wt_transfer"
+    extern "C" int Finish(int id) = "duck_wt_finish"
+    extern "C" int Watch(int id, int kind, DuckWebHandler* source, void* store, void* dispatch, void* drop) = "duck_wt_watch"
+    extern "C" DuckWebPacket* Scratch(int bytes) = "duck_wt_scratch"
+    extern "C" void Release(DuckWebPacket* packet) = "duck_wt_release"
+}
+
+NetReceiveEvent {
+    byte [] Data
+    int Status
+}
+
+DuckWebPacket { byte [65535] Bytes }
+
+DuckWebHandle {
+    int Id
+    Close() { DuckWebNative.Close(Id) }
+    ~DuckWebHandle() { Close() }
+}
+
+DuckWebHandler {
+    func (int) Connected
+    func (NetReceiveEvent&) Received
+}
+
+DuckWebEvents #{
+    Store(DuckWebHandler* target, DuckWebHandler* source) {
+        target.Connected = source.Connected
+        target.Received = source.Received
+    }
+    Drop(DuckWebHandler* target) {
+        target.Connected = null
+        target.Received = null
+    }
+    Dispatch(DuckWebHandler* context, int kind, DuckWebPacket* packet, int size) {
+        // Copy the closure before calling it. It may release its own handle.
+        if kind == 0 {
+            handler : context.Connected
+            context.Connected = null
+            handler(size)
+            return
+        }
+        handler : context.Received
+        NetReceiveEvent event()
+        event.Status = size
+        for i : 0; i < size; i++ { event.Data += packet.Bytes[i] }
+        handler(event)
+    }
+
+    bool Connect(int id, func (int) handler) {
+        if handler == null { return false }
+        DuckWebHandler entry()
+        entry.Connected = handler
+        return DuckWebNative.Watch(id, 0, &entry, &Store, &Dispatch, &Drop) != 0
+    }
+    bool Receive(int id, func (NetReceiveEvent&) handler) {
+        if handler == null { return false }
+        DuckWebHandler entry()
+        entry.Received = handler
+        return DuckWebNative.Watch(id, 1, &entry, &Store, &Dispatch, &Drop) != 0
+    }
+    int StreamTransfer(int id, byte []& buffer, int offset, int writing) {
+        if offset < 0 || offset >= buffer.Len { return -1 }
+        byte [4096] chunk
+        int size = (int)(buffer.Len - offset > chunk.Len ? chunk.Len | buffer.Len - offset)
+        if writing != 0 {
+            for i : 0; i < size; i++ { chunk[i] = buffer[offset + i] }
+        }
+        int count = DuckWebNative.Transfer(id, &chunk[0], size, writing)
+        if writing == 0 {
+            for i : 0; i < count; i++ { buffer[offset + i] = chunk[i] }
+        }
+        return count
+    }
+    int Datagram(int id, byte []& data, int writing) {
+        if writing != 0 && data.Len > 65535 { return -3 }
+        int size = (int)(data.Len > 65535 ? 65535 | data.Len)
+        packet : DuckWebNative.Scratch(size)
+        if !packet { return -1 }
+        if writing != 0 {
+            for i : 0; i < size; i++ { packet.Bytes[i] = data[i] }
+        }
+        int count = DuckWebNative.Transfer(id, &packet.Bytes[0], size, writing)
+        if writing == 0 {
+            for i : 0; i < count; i++ { data[i] = packet.Bytes[i] }
+        }
+        DuckWebNative.Release(packet)
+        return count
+    }
+}
+
+WebTransportStream {
+    -DuckWebHandle* Handle()
+    WebTransportStream(int id) { Handle.Id = id }
+    int Status() { return DuckWebNative.Status(Handle.Id) }
+    Close() { Handle.Close() }
+    bool FinishWrite() { return DuckWebNative.Finish(Handle.Id) != 0 }
+    bool OnConnect(func (int) handler) { return DuckWebEvents.Connect(Handle.Id, handler) }
+    bool OnReceive(func (NetReceiveEvent&) handler) { return DuckWebEvents.Receive(Handle.Id, handler) }
+    int Read(byte []& buffer) { return ReadAt(buffer, 0) }
+    int ReadAt(byte []& buffer, int offset) { return DuckWebEvents.StreamTransfer(Handle.Id, buffer, offset, 0) }
+    int Write(byte []& buffer) { return WriteAt(buffer, 0) }
+    int WriteAt(byte []& buffer, int offset) { return DuckWebEvents.StreamTransfer(Handle.Id, buffer, offset, 1) }
+}
+
+WebTransportSession {
+    -DuckWebHandle* Handle()
+    WebTransportSession(int id) { Handle.Id = id }
+    int Status() { return DuckWebNative.Status(Handle.Id) }
+    Close() { Handle.Close() }
+    bool OnConnect(func (int) handler) { return DuckWebEvents.Connect(Handle.Id, handler) }
+    bool OnDatagram(func (NetReceiveEvent&) handler) { return DuckWebEvents.Receive(Handle.Id, handler) }
+    int MaxDatagramSize() { return DuckWebNative.Limit(Handle.Id) }
+    int SendDatagram(byte []& data) { return DuckWebEvents.Datagram(Handle.Id, data, 1) }
+    int ReceiveDatagram(byte []& data) { return DuckWebEvents.Datagram(Handle.Id, data, 0) }
+    WebTransportStream* OpenStream() {
+        int id = DuckWebNative.Open(Handle.Id)
+        if id == 0 { return null }
+        WebTransportStream* stream(id)
+        return ::stream
+    }
+}
+
+Net #{
+    WebTransportSession* ConnectWebTransport(string url) {
+        int id = DuckWebNative.Connect(url)
+        if id == 0 { return null }
+        WebTransportSession* session(id)
+        return ::session
+    }
+}
