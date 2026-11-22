@@ -20,6 +20,9 @@ Duck forces type safety for functions as they are the worst offenders in automat
 # Why this syntax?
 Duck syntax is based on my personal preferences and my imagination of the perfect syntax. I like type safety as in my opinion it makes code simpler to read especially as you get return from functions/method and you have to mouse over to see what it is actually returning, with type safety you see it right there. But on the other hand I'm not a fan of verbose syntax, as it makes the whole code unnecessarily too large.
 
+# Line in a sand
+We chose to support only 64-bit targets because most modern gaming platforms are 64-bit. This gives pointers a fixed size of 8 bytes across all supported targets.
+
 # Project status
 Current status: **early C++ bootstrap compiler**. The language design below is
 broader than the implemented subset. See [Compiler/README.md](Compiler/README.md)
