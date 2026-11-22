@@ -1,4 +1,7 @@
 # Duck
+
+<img src="Branding/duck-language.svg" alt="Duck Language logo" width="420">
+
 Duck is a programming language, focusing on speed and abstraction, designed mainly for game development. Duck is a statically typed and compiled language. Main feature of using Duck is async and sync design is resolved by the compiler with full thread safety.
 # Philosophy
 There are many languages, each great in their own way, the only reason nowadays for making a new language is to do something revolutionary. As CPUs have more and more cores over time there are not many reasons to make single threaded applications, async programming can be ok but from time to time you run into race conditions, concurrency problems or just additional code to stop your threads from fighting over resources. Duck is here to save the day. As many things are inherently async: some I/O operations, code that takes too long to execute, or any network operations. Duck solves for all of this in compile time.

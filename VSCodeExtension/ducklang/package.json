@@ -2,6 +2,7 @@
     "name": "ducklang",
     "displayName": "Duck Language",
     "description": "Syntax highlighting, snippets, and compiler diagnostics for the Duck language (.dk) and Duck projects (.dkp).",
+    "icon": "duck.png",
     "version": "0.1.0",
     "publisher": "ducklang",
     "engines": {
@@ -20,6 +21,10 @@
         "languages": [
             {
                 "id": "duck",
+                "icon": {
+                    "light": "./duck.png",
+                    "dark": "./duck.png"
+                },
                 "aliases": [
                     "Duck",
                     "duck"

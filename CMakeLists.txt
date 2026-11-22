@@ -50,6 +50,9 @@ add_dependencies(duckc duck_web_net)
 target_include_directories(duckc PRIVATE "${net_gen}")
 
 if(WIN32)
+  enable_language(RC)
+  target_sources(duckc PRIVATE Branding/duckc.rc)
+  target_include_directories(duckc PRIVATE Branding)
   find_program(DUCK_CLANG NAMES clang HINTS "C:/Program Files/LLVM/bin" REQUIRED)
   add_custom_command(OUTPUT "${net_gen}/Net.obj" "${net_gen}/Net.dki"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${net_gen}"
