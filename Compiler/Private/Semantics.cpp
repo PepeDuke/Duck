@@ -199,6 +199,37 @@ std::pair<std::string, std::string> decimalLiteral(std::string digits, long long
 
   return {(negative ? "-" : "") + digits, std::to_string(exponent)};
 }
+// Construction part ids (ConstructionPart::id), shared by copies of a Local
+// until one of them changes. The scope stack is copied at every branch and
+// loop, and nearly every local has none, so an empty set holds no memory.
+class PartSet {
+  std::shared_ptr<const std::set<std::string>> ids; // Null when empty.
+
+  static const std::set<std::string> &none() {
+    static const std::set<std::string> empty;
+    return empty;
+  }
+
+public:
+  PartSet() = default;
+  PartSet(std::set<std::string> parts) {
+    if (!parts.empty()) ids = std::make_shared<const std::set<std::string>>(std::move(parts));
+  }
+  const std::set<std::string> &get() const { return ids ? *ids : none(); }
+  operator const std::set<std::string> &() const { return get(); }
+  bool empty() const { return !ids; }
+  size_t count(const std::string &id) const { return ids ? ids->count(id) : 0; }
+  std::set<std::string>::const_iterator begin() const { return get().begin(); }
+  std::set<std::string>::const_iterator end() const { return get().end(); }
+  void erase(const std::string &id) {
+    if (!count(id)) return;
+
+    auto parts = *ids;
+    parts.erase(id);
+    *this = PartSet(std::move(parts));
+  }
+};
+
 struct Local {
   Type type;
   bool constant;
@@ -211,7 +242,7 @@ struct Local {
   bool growable = false;
   // Construction parts a container local may (on some path) or must (on
   // every path) still be missing, by ConstructionPart::id.
-  std::set<std::string> mayMiss, mustMiss;
+  PartSet mayMiss, mustMiss;
   Token declaration;
   bool memberLambda = false; // A func field that can only be called through its object.
   bool callOnly = false;     // Holds a lambda over this frame: it can be called, not copied.
@@ -219,9 +250,22 @@ struct Local {
   std::string scope;         // A field in a named scope, bound by its bare name.
   const Expr *constantValue = nullptr; // A # local's initializer, for Switch label checks.
 };
+// One block's locals. Its move is noexcept, which MSVC's std::map is not, so
+// the scope stack moves its maps when it grows instead of copying them all.
+struct Scope : std::map<std::string, Local> {
+  Scope() = default;
+  Scope(const Scope &) = default;
+  Scope(Scope &&other) noexcept : std::map<std::string, Local>(std::move(other)) {}
+  Scope &operator=(const Scope &) = default;
+  Scope &operator=(Scope &&other) noexcept {
+    std::map<std::string, Local>::operator=(std::move(other));
+    return *this;
+  }
+};
+
 class Analyzer {
   const Symbols &symbols;
-  using Scopes = std::vector<std::map<std::string, Local>>;
+  using Scopes = std::vector<Scope>;
   Scopes scopes;
   struct LoopFlow {
     std::vector<Scopes> continues;
@@ -461,26 +505,39 @@ class Analyzer {
   // Merge only bindings visible at the join, ignoring inner scopes captured
   // on a continue edge. A variable must be initialized on every incoming edge.
   Scopes merge(Scopes visible, const std::vector<Scopes> &incoming) {
+    std::vector<const Local *> others(incoming.size());
+
     for (size_t i = 0; i < visible.size(); ++i)
       for (auto &entry : visible[i]) {
         bool initialized = !incoming.empty();
+        bool anyMissing = false;
 
-        for (const auto &state : incoming)
-          initialized = initialized && state.at(i).at(entry.first).initialized;
+        // Each incoming state's copy of this local, looked up once.
+        for (size_t n = 0; n < incoming.size(); ++n) {
+          others[n] = &incoming[n].at(i).at(entry.first);
+          initialized = initialized && others[n]->initialized;
+          anyMissing = anyMissing || !others[n]->mayMiss.empty() || !others[n]->mustMiss.empty();
+        }
 
         entry.second.initialized = initialized;
 
         if (incoming.empty()) continue;
 
-        std::set<std::string> may, must = incoming.front().at(i).at(entry.first).mustMiss;
+        // Nothing missing on any path: both merged sets are empty.
+        if (!anyMissing) {
+          entry.second.mayMiss = PartSet();
+          entry.second.mustMiss = PartSet();
+          continue;
+        }
 
-        for (const auto &state : incoming) {
-          const auto &other = state.at(i).at(entry.first);
-          may.insert(other.mayMiss.begin(), other.mayMiss.end());
+        std::set<std::string> may, must = others.front()->mustMiss;
+
+        for (const auto *other : others) {
+          may.insert(other->mayMiss.begin(), other->mayMiss.end());
           std::set<std::string> both;
 
           for (const auto &id : must)
-            if (other.mustMiss.count(id)) both.insert(id);
+            if (other->mustMiss.count(id)) both.insert(id);
 
           must = both;
         }
