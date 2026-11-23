@@ -445,7 +445,7 @@ static void writeStamp(const fs::path& path, const std::string& key) {
 static std::string storedKey(const fs::path& path) {
     std::ifstream input(path, std::ios::binary);
     std::string header, keyLine;
-    if (!std::getline(input, header) || header != "duck-interface 1" || !std::getline(input, keyLine)) return "";
+    if (!std::getline(input, header) || header != "duck-interface 2" || !std::getline(input, keyLine)) return "";
     std::istringstream fields(keyLine);
     std::string word, key;
     size_t length = 0;
@@ -463,7 +463,7 @@ static ModuleKeys moduleKeys(const Project& project, const Plan& sources, const 
     const auto tool = toolIdentity(compiler);
     // The plan lists dependencies before the modules which use them.
     for (const auto& [id, files] : sources) {
-        Strings parts{"duck-interface 1", id};
+        Strings parts{"duck-interface 2", id};
         parts.insert(parts.end(), tool.begin(), tool.end());
         for (const auto& file : files) parts.insert(parts.end(), {file.u8string(), readFile(file)});
         for (const auto& dependency : project.modules.at(id).depends) parts.push_back(keys.at(dependency));

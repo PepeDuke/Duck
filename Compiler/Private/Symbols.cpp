@@ -63,7 +63,7 @@ std::optional<EnumConstant> literalConstant(const Expr &e) {
   EnumConstant c;
 
   if (e.kind == "int") {
-    const auto &text = e.token.text;
+    const std::string &text = e.token.text;
     const int base = integerLiteralBase(text);
     const auto digits = base == 10 ? text : text.substr(2);
 
@@ -98,9 +98,9 @@ std::optional<EnumConstant> literalConstant(const Expr &e) {
   return std::nullopt;
 }
 EnumConstant unaryConstant(const Token &op, EnumConstant c) {
-  if (op.text == "-" && c.kind == EnumConstant::Integer) c.bits = c.bits.negate();
-  else if (op.text == "-" && c.kind == EnumConstant::Real) c.real = -c.real;
-  else if (op.text == "~" && c.kind == EnumConstant::Integer) {
+  if (op.text == Tok::Minus && c.kind == EnumConstant::Integer) c.bits = c.bits.negate();
+  else if (op.text == Tok::Minus && c.kind == EnumConstant::Real) c.real = -c.real;
+  else if (op.text == Tok::Tilde && c.kind == EnumConstant::Integer) {
     for (auto &w : c.bits.words) w = ~w;
   } else
     fail(op, "operator '" + op.text + "' does not apply to " + constantKind(c) + " in an enum value");
@@ -115,7 +115,7 @@ unsigned bitLength(const Bits &v) {
   return 0;
 }
 EnumConstant binaryConstant(const Token &token, EnumConstant a, EnumConstant b) {
-  const auto &op = token.text;
+  const std::string &op = token.text;
 
   if (a.kind == EnumConstant::Text || b.kind == EnumConstant::Text) {
     if (op != "+" || a.kind != b.kind)
@@ -235,7 +235,7 @@ public:
   std::string memberValue(const std::string &name, size_t index) {
     auto &pending = enums.at(name);
     const auto &member = *pending.members[index];
-    const auto &label = member.name.text;
+    const std::string &label = member.name.text;
 
     if (pending.state[index] == 2) return pending.info.values[index];
     if (pending.state[index] == 1)
@@ -337,7 +337,7 @@ private:
 std::optional<size_t> enumLiteralMember(const EnumInfo &info, const Expr &e) {
   auto c = literalConstant(e);
 
-  if (!c && e.kind == "unary" && e.token.text == "-")
+  if (!c && e.kind == "unary" && e.token.text == Tok::Minus)
     if ((c = literalConstant(*e.args[0]))) c = unaryConstant(e.token, *c);
 
   if (!c) return std::nullopt;
@@ -353,7 +353,7 @@ std::optional<size_t> enumLiteralMember(const EnumInfo &info, const Expr &e) {
 std::map<std::string, EnumInfo> resolveEnums(const std::vector<EnumFragment> &fragments) {
   EnumResolver resolver;
   for (const auto &fragment : fragments) {
-    const auto &name = fragment.name.text;
+    const std::string &name = fragment.name.text;
     auto [entry, inserted] = resolver.enums.try_emplace(name);
     auto &pending = entry->second;
 
@@ -404,22 +404,22 @@ bool borrowsOnly(const Expr &e, const std::string &name, bool pointee = false,
                  bool mayEscape = false) {
   if (e.kind == "name" && e.token.text == name) return pointee && !mayEscape;
 
-  const bool indirect = e.kind == "." || (e.kind == "unary" && e.token.text == "*");
-  const bool nullCheck = e.kind == "binary" && (e.token.text == "==" || e.token.text == "!=") &&
+  const bool indirect = e.kind == "." || (e.kind == "unary" && e.token.text == Tok::Star);
+  const bool nullCheck = e.kind == "binary" && (e.token.text == Tok::EqualEqual || e.token.text == Tok::NotEqual) &&
                          (e.args[0]->kind == "null" || e.args[1]->kind == "null");
 
   // A lambda body is not inspected, so it may capture or keep anything; the
   // same goes for a macro value's argument bindings.
   if (e.kind == "lambda" || e.kind == "macroValue" || e.kind == "duckCall" || e.kind == "moveCheck") return false;
 
-  mayEscape = mayEscape || (e.kind == "unary" && e.token.text == "&") ||
+  mayEscape = mayEscape || (e.kind == "unary" && e.token.text == Tok::Ampersand) ||
               (e.kind == "call" && e.token.text != "Print");
 
   if (e.receiver && !borrowsOnly(*e.receiver, name, false, true)) return false;
 
   // Used as a condition, the pointer itself is only compared with null.
-  const bool tests = (e.kind == "unary" && e.token.text == "!") ||
-                     (e.kind == "binary" && (e.token.text == "&&" || e.token.text == "||"));
+  const bool tests = (e.kind == "unary" && e.token.text == Tok::Bang) ||
+                     (e.kind == "binary" && (e.token.text == Tok::AndAnd || e.token.text == Tok::OrOr));
 
   for (size_t i = 0; i < e.args.size(); ++i) {
     const bool selects = e.kind == "conditional" && i == 0;
@@ -619,7 +619,7 @@ static void recordNonescapingParameters(Symbols &symbols, const Function &f) {
 }
 static void declareStatics(Symbols &symbols, const Program &program) {
   for (const auto &field : program.statics) {
-    const auto &name = field.name.text;
+    const std::string &name = field.name.text;
     // Instance fields and methods are a separate namespace from statics.
     bool clash = symbols.count(name) || symbols.records.count(name);
 
@@ -806,7 +806,7 @@ const std::string *Symbols::execTarget(const Expr &call) const {
   if (argument.kind != "text" || argument.token.character)
     fail(argument.token, "Exec requires a string literal path; computed paths are not supported yet");
 
-  const auto &written = argument.token.text;
+  const std::string &written = argument.token.text;
   // Relative to the file making the call, so moving the project keeps working.
   const auto path = fs::path(sourcePath(call.token.source)).parent_path() / fs::u8path(written);
   const auto key = sourceKey(path.string());
@@ -1177,7 +1177,7 @@ void resolveInheritance(Symbols &symbols) {
 }
 void resolveAttributes(Symbols &symbols) {
   auto resolve = [&](Tag &tag) {
-    const auto &text = tag.token.text;
+    const std::string &text = tag.token.text;
     const auto dot = text.rfind('.');
 
     if (dot != std::string::npos) {

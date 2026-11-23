@@ -33,10 +33,17 @@ class Parser {
   bool returnsMarkup = false; // The function being parsed returns markup.
   bool expectMarkup = false;  // The next expression has a declared markup type.
   const Token &peek() const { return tokens[pos]; }
+  bool at(Tok t) const { return !peek().string && peek().text == t; }
   bool at(const std::string &s) const {
     return !peek().string && peek().text == s;
   }
   Token pop() { return tokens[pos++]; }
+  bool accept(Tok t) {
+    if (!at(t)) return false;
+
+    pop();
+    return true;
+  }
   bool accept(const std::string &s) {
     if (!at(s))
       return false;
@@ -46,8 +53,8 @@ class Parser {
   }
   static std::string describe(const Token &t) {
     if (t.string) return t.character ? "a character literal" : "a string literal";
-    if (t.text == "<eof>") return "end of file";
-    if (t.text == "\n") return "end of line";
+    if (t.text == Tok::Eof) return "end of file";
+    if (t.text == Tok::Newline) return "end of line";
 
     return "'" + t.text + "'";
   }
@@ -74,13 +81,18 @@ class Parser {
   [[noreturn]] void expected(const std::string &s) const {
     fail(peek(), "expected '" + s + "', found " + describe(peek()) + stillOpen(s));
   }
+  Token expect(Tok t) {
+    if (!at(t)) expected(TokenText(t).str());
+
+    return pop();
+  }
   Token expect(const std::string &s) {
     if (!at(s)) expected(s);
 
     return pop();
   }
   [[noreturn]] void badStatementEnd(const std::string &suffix = "") const {
-    if (at(";")) fail(peek(), "expected newline after statement, found ';'; Duck statements end at a newline, so remove it");
+    if (at(Tok::Semicolon)) fail(peek(), "expected newline after statement, found ';'; Duck statements end at a newline, so remove it");
 
     fail(peek(), "expected newline or '}' after statement, found " + describe(peek()) + suffix);
   }
@@ -102,7 +114,7 @@ class Parser {
     if (isWord(t) && !closestName(t.text, knownTypes()).empty()) unknownType(t);
   }
   void lines() {
-    while (accept("\n")) {
+    while (accept(Tok::Newline)) {
     }
   }
   Token identifier() {
@@ -111,11 +123,11 @@ class Parser {
     if (!isWord(t))
       fail(t, "expected identifier, found " + describe(t));
 
-    if (isType() || t.text == "true" || t.text == "false" ||
-        t.text == "return" || t.text == "if" || t.text == "else" ||
-        t.text == "while" || t.text == "for" || t.text == "break" ||
-        t.text == "continue" || t.text == "do" || t.text == "extern" ||
-        t.text == "null" || t.text == "using" || t.text == "Switch")
+    if (isType() || t.text == Tok::True || t.text == Tok::False ||
+        t.text == Tok::Return || t.text == Tok::If || t.text == Tok::Else ||
+        t.text == Tok::While || t.text == Tok::For || t.text == Tok::Break ||
+        t.text == Tok::Continue || t.text == Tok::Do || t.text == Tok::Extern ||
+        t.text == Tok::Null || t.text == Tok::Using || t.text == Tok::Switch)
       fail(t, "reserved keyword cannot be an identifier");
 
     return pop();
@@ -142,9 +154,10 @@ class Parser {
   static bool word(const Token &t) {
     return isWord(t);
   }
+  static bool punctuation(const Token &t, Tok kind) { return !t.string && t.text == kind; }
   static bool punctuation(const Token &t, const char *text) { return !t.string && t.text == text; }
-  static bool openingBracket(const Token &t) { return punctuation(t, "(") || punctuation(t, "[") || punctuation(t, "{"); }
-  static bool closingBracket(const Token &t) { return punctuation(t, ")") || punctuation(t, "]") || punctuation(t, "}"); }
+  static bool openingBracket(const Token &t) { return punctuation(t, Tok::LeftParen) || punctuation(t, Tok::LeftBracket) || punctuation(t, Tok::LeftBrace); }
+  static bool closingBracket(const Token &t) { return punctuation(t, Tok::RightParen) || punctuation(t, Tok::RightBracket) || punctuation(t, Tok::RightBrace); }
   struct MacroUse {
     const Macro *macro;
     std::string qualified;
@@ -159,12 +172,12 @@ class Parser {
     std::string path = list[at].text;
     size_t k = at + 1;
 
-    while (k + 1 < list.size() && punctuation(list[k], ".") && word(list[k + 1])) {
+    while (k + 1 < list.size() && punctuation(list[k], Tok::Dot) && word(list[k + 1])) {
       path += "." + list[k + 1].text;
       k += 2;
     }
 
-    if (k >= list.size() || !punctuation(list[k], "(")) return std::nullopt;
+    if (k >= list.size() || !punctuation(list[k], Tok::LeftParen)) return std::nullopt;
 
     auto parent = [](const std::string &name) {
       const auto dot = name.rfind('.');
@@ -216,11 +229,11 @@ class Parser {
     bool lineBreak = false;
 
     for (size_t k = use.open + 1;; ++k) {
-      if (k >= tokens.size() || punctuation(tokens[k], "<eof>")) fail(tokens[use.open], "expected ')'");
+      if (k >= tokens.size() || punctuation(tokens[k], Tok::Eof)) fail(tokens[use.open], "expected ')'");
 
       const auto &t = tokens[k];
 
-      if (depth == 1 && punctuation(t, "\n")) {
+      if (depth == 1 && punctuation(t, Tok::Newline)) {
         lineBreak = !arguments.back().empty();
         continue;
       }
@@ -231,7 +244,7 @@ class Parser {
           close = k;
           break;
         }
-      } else if (depth == 1 && punctuation(t, ",")) {
+      } else if (depth == 1 && punctuation(t, Tok::Comma)) {
         if (arguments.back().empty()) fail(t, "empty macro argument");
 
         arguments.emplace_back();
@@ -314,8 +327,8 @@ class Parser {
     auto arguments = macroArguments(*use, close);
 
     if (close + 1 >= tokens.size() ||
-        !(punctuation(tokens[close + 1], "\n") || punctuation(tokens[close + 1], "}") ||
-          punctuation(tokens[close + 1], "<eof>")))
+        !(punctuation(tokens[close + 1], Tok::Newline) || punctuation(tokens[close + 1], Tok::RightBrace) ||
+          punctuation(tokens[close + 1], Tok::Eof)))
       return; // Part of a larger expression.
 
     const auto origin = beginExpansion(tokens[pos], *use);
@@ -345,7 +358,7 @@ class Parser {
 
     for (size_t i = 0; i < count; ++i) {
       switchStatement.alternate.push_back(simpleStatement());
-      expect("\n");
+      expect(Tok::Newline);
     }
   }
   // Whether a macro's output starts with a Switch label, directly or through
@@ -354,10 +367,10 @@ class Parser {
     const auto &body = use.macro->body;
     size_t k = 0;
 
-    while (k < body.size() && punctuation(body[k], "\n")) ++k;
+    while (k < body.size() && punctuation(body[k], Tok::Newline)) ++k;
     if (k == body.size()) return false;
-    if (punctuation(body[k], "case")) return true;
-    if (punctuation(body[k], "default") && k + 1 < body.size() && punctuation(body[k + 1], ":")) return true;
+    if (punctuation(body[k], Tok::Case)) return true;
+    if (punctuation(body[k], Tok::Default) && k + 1 < body.size() && punctuation(body[k + 1], Tok::Colon)) return true;
     if (depth >= 32) return false;
 
     const auto inner = macroUse(body, k);
@@ -373,8 +386,8 @@ class Parser {
     const auto &macro = *use.macro;
     size_t first = 0, last = macro.body.size();
 
-    while (first < last && punctuation(macro.body[first], "\n")) ++first;
-    while (last > first && punctuation(macro.body[last - 1], "\n")) --last;
+    while (first < last && punctuation(macro.body[first], Tok::Newline)) ++first;
+    while (last > first && punctuation(macro.body[last - 1], Tok::Newline)) --last;
     if (first == last) fail(tokens[pos], "macro '" + use.qualified + "' is empty, so it cannot be used as a value");
 
     int depth = 0;
@@ -384,7 +397,7 @@ class Parser {
 
       if (openingBracket(t)) ++depth;
       else if (closingBracket(t)) --depth;
-      else if (depth == 0 && punctuation(t, "\n"))
+      else if (depth == 0 && punctuation(t, Tok::Newline))
         fail(tokens[pos], "macro '" + use.qualified + "' expands to statements, so it cannot be used as a value; "
                           "it is defined at " + where(macro.name));
     }
@@ -401,26 +414,26 @@ class Parser {
     replaceTokens(pos, close, std::move(out));
   }
   bool atSectionLabel() const {
-    return at("case") || (at("default") && punctuation(tokens.at(pos + 1), ":"));
+    return at(Tok::Case) || (at(Tok::Default) && punctuation(tokens.at(pos + 1), Tok::Colon));
   }
   // `case a, b:` and `default:`, including labels stacked on one section.
   void sectionLabels(Stmt &switchStatement, Stmt &section) {
     for (;;) {
-      if (accept("default")) {
+      if (accept(Tok::Default)) {
         if (section.isDefault) fail(section.token, "a Switch section cannot repeat default");
 
         section.isDefault = true;
       } else {
-        expect("case");
+        expect(Tok::Case);
 
         do {
           lines();
           section.labels.push_back(expression());
           lines();
-        } while (accept(","));
+        } while (accept(Tok::Comma));
       }
 
-      expect(":");
+      expect(Tok::Colon);
       lines();
 
       // A macro may supply the next stacked label.
@@ -438,7 +451,7 @@ class Parser {
     auto s = std::make_unique<Stmt>();
     s->kind = "switch";
     s->token = pop();
-    expect("(");
+    expect(Tok::LeftParen);
     lines();
     auto selector = std::make_unique<Stmt>();
     selector->kind = "let";
@@ -446,7 +459,7 @@ class Parser {
     selector->name = "$switch";
     selector->expr = expression();
     lines();
-    expect(")");
+    expect(Tok::RightParen);
     s->target = std::make_unique<Expr>();
     s->target->kind = "name";
     s->target->token = selector->token;
@@ -454,12 +467,12 @@ class Parser {
     s->target->token.string = s->target->token.character = false;
     s->initializer = std::move(selector);
     lines();
-    expect("{");
+    expect(Tok::LeftBrace);
     lines();
     hygiene.emplace_back();
 
-    while (!at("}")) {
-      if (at("<eof>")) expected("}");
+    while (!at(Tok::RightBrace)) {
+      if (at(Tok::Eof)) expected("}");
 
       if (auto use = macroUse(tokens, pos)) {
         expandCaseMacro(*s, *use);
@@ -475,13 +488,13 @@ class Parser {
       sectionLabels(*s, *section);
       hygiene.emplace_back();
 
-      while (!at("}") && !atSectionLabel()) {
-        if (at("<eof>")) expected("}");
+      while (!at(Tok::RightBrace) && !atSectionLabel()) {
+        if (at(Tok::Eof)) expected("}");
         if (auto use = macroUse(tokens, pos); use && opensSection(*use)) break;
 
         section->body.push_back(statement());
 
-        if (!at("}") && !at("\n")) fail(peek(), "expected newline between statements");
+        if (!at(Tok::RightBrace) && !at(Tok::Newline)) fail(peek(), "expected newline between statements");
 
         lines();
       }
@@ -491,7 +504,7 @@ class Parser {
     }
 
     hygiene.pop_back();
-    expect("}");
+    expect(Tok::RightBrace);
 
     if (s->body.empty()) fail(s->token, "a Switch needs at least one case or default");
 
@@ -510,9 +523,9 @@ class Parser {
       if (!isWord(t))
         break;
 
-      paths.push_back(paths.empty() ? t.text : paths.back() + "." + t.text);
+      paths.push_back(paths.empty() ? t.text.str() : paths.back() + "." + t.text);
 
-      if (tokens[k + 1].string || tokens[k + 1].text != ".") break;
+      if (tokens[k + 1].string || tokens[k + 1].text != Tok::Dot) break;
     }
 
     for (auto enclosing = scope; !paths.empty();) {
@@ -584,7 +597,7 @@ class Parser {
   // int.Max, i3.Min, double.Max: a built-in type followed by a member.
   bool typeMember() const {
     const auto &next = tokens.at(pos + 1);
-    return isType() && !next.string && next.text == ".";
+    return isType() && !next.string && next.text == Tok::Dot;
   }
   bool declarationType() const {
     const auto length = typePath(pos);
@@ -592,52 +605,52 @@ class Parser {
     if (!length) return isType() && !typeMember();
 
     const auto &next = tokens.at(pos + length);
-    return !next.string && (next.text == "*" || next.text == "&" || arraySuffix(pos + length) ||
+    return !next.string && (next.text == Tok::Star || next.text == Tok::Ampersand || arraySuffix(pos + length) ||
            isIdentifierStart(next.text[0]));
   }
   // `[]`, `[N]`, `[-]`, or a size hint `[*]` or `[N*]` after an element type,
   // followed by a name or `&`.
   bool arraySuffix(size_t at) const {
-    auto punct = [&](size_t k, const char *text) {
+    auto punct = [&](size_t k, auto text) {
       return k < tokens.size() && !tokens[k].string && tokens[k].text == text;
     };
 
-    if (!punct(at, "[")) return false;
+    if (!punct(at, Tok::LeftBracket)) return false;
 
     size_t close = at + 1;
 
-    if (punct(close, "-")) ++close;
+    if (punct(close, Tok::Minus)) ++close;
     else {
       if (close < tokens.size() && !tokens[close].string && std::isdigit(static_cast<unsigned char>(tokens[close].text[0])))
         ++close;
 
-      if (punct(close, "*")) ++close;
+      if (punct(close, Tok::Star)) ++close;
     }
 
-    if (!punct(close, "]") || close + 1 >= tokens.size()) return false;
+    if (!punct(close, Tok::RightBracket) || close + 1 >= tokens.size()) return false;
 
     const auto &next = tokens[close + 1];
     // A following `[` is a further dimension, reported once the type is read.
-    return !next.string && (next.text == "&" || next.text == "[" ||
+    return !next.string && (next.text == Tok::Ampersand || next.text == Tok::LeftBracket ||
                             isIdentifierStart(next.text[0]));
   }
   // iN and uN name an N-byte integer. Every i/u + digits word is reserved so
   // that out-of-range widths get a precise diagnostic.
   bool byteWidthType() const {
-    const auto &t = peek().text;
+    const std::string &t = peek().text;
     return !peek().string && t.size() >= 2 && (t[0] == 'i' || t[0] == 'u') &&
            std::all_of(t.begin() + 1, t.end(),
                        [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
   }
   bool isType() const {
-    return byteWidthType() || at("byte") || at("uint") || at("uint8") || at("uint16") ||
-           at("uint32") || at("uint64") ||
-           at("int8") || at("short") || at("int16") ||
-           at("int") || at("int32") || at("long") || at("int64") ||
-           at("float") || at("double") || at("bool") || at("void") || at("cstring") ||
-           at("string") || at("name") || at("char") || at("date") ||
-           at("time") || at("datetime") || at("big") || at("ubig") || at("tiny") ||
-           at("utiny") || at("func") || nativeMathType() || markupKeyword() || fileKeyword();
+    return byteWidthType() || at(Tok::Byte) || at(Tok::Uint) || at(Tok::Uint8) || at(Tok::Uint16) ||
+           at(Tok::Uint32) || at(Tok::Uint64) ||
+           at(Tok::Int8) || at(Tok::Short) || at(Tok::Int16) ||
+           at(Tok::Int) || at(Tok::Int32) || at(Tok::Long) || at(Tok::Int64) ||
+           at(Tok::Float) || at(Tok::Double) || at(Tok::Bool) || at(Tok::Void) || at(Tok::Cstring) ||
+           at(Tok::String) || at(Tok::Name) || at(Tok::Char) || at(Tok::Date) ||
+           at(Tok::Time) || at(Tok::Datetime) || at(Tok::Big) || at(Tok::Ubig) || at(Tok::Tiny) ||
+           at(Tok::Utiny) || at(Tok::Func) || nativeMathType() || markupKeyword() || fileKeyword();
   }
   bool nativeMathType() const {
     const auto &token = tokens.at(pos);
@@ -646,14 +659,14 @@ class Parser {
   // `file` is a type only where one can be, as in `file log` or `file& log`:
   // it is still a usable name, as in `void* file`.
   bool fileKeyword() const {
-    if (!at("file") || containerNames.count("file")) return false;
+    if (!at(Tok::File) || containerNames.count("file")) return false;
 
     const auto &next = tokens.at(pos + 1);
-    return !next.string && !next.text.empty() && (isIdentifierStart(next.text[0]) || next.text == "&");
+    return !next.string && !next.text.empty() && (isIdentifierStart(next.text[0]) || next.text == Tok::Ampersand);
   }
   // `markup` is a type only where one can be: it is still a usable name.
   bool markupKeyword() const {
-    if (!at("markup") || containerNames.count("markup")) return false;
+    if (!at(Tok::Markup) || containerNames.count("markup")) return false;
 
     const auto &next = tokens.at(pos + 1);
     return !next.string && !next.text.empty() &&
@@ -662,8 +675,8 @@ class Parser {
   // char(...), date(...), time(...), and datetime(...) construct validated values.
   bool constructorType() const {
     const auto &next = tokens.at(pos + 1);
-    return (at("char") || at("date") || at("time") || at("datetime") || nativeMathType()) &&
-           !next.string && next.text == "(";
+    return (at(Tok::Char) || at(Tok::Date) || at(Tok::Time) || at(Tok::Datetime) || nativeMathType()) &&
+           !next.string && next.text == Tok::LeftParen;
   }
   Type type() {
     Type t = plainType();
@@ -684,11 +697,11 @@ class Parser {
       while (arraySuffix(pos)) {
         Dimension d{pop()};
 
-        if (accept("-")) d.signedIndex = true;
-        else if (accept("*")) d.sizeHint = Type::HugeHint;
-        else if (!at("]")) {
+        if (accept(Tok::Minus)) d.signedIndex = true;
+        else if (accept(Tok::Star)) d.sizeHint = Type::HugeHint;
+        else if (!at(Tok::RightBracket)) {
           const auto count = pop();
-          const bool hint = accept("*");
+          const bool hint = accept(Tok::Star);
 
           if (integerLiteralBase(count.text) != 10 ||
               count.text.find_first_not_of("0123456789") != std::string::npos)
@@ -711,7 +724,7 @@ class Parser {
           (hint ? d.sizeHint : d.extent) = value;
         }
 
-        expect("]");
+        expect(Tok::RightBracket);
         dimensions.push_back(d);
       }
 
@@ -742,7 +755,7 @@ class Parser {
     }
 
     // `K, V pair` names a pair keyed by K.
-    if (at(",")) {
+    if (at(Tok::Comma)) {
       const auto saved = pos;
       pop();
 
@@ -782,7 +795,7 @@ class Parser {
   Type plainType() {
     Type t = baseType();
 
-    while (accept("*")) t = t.pointerTo();
+    while (accept(Tok::Star)) t = t.pointerTo();
     if (t.depth && t.base == Type::Func) fail(peek(), "pointers to func values are unsupported");
 
     if (t.depth && (t.base == Type::String || t.base == Type::Name ||
@@ -797,7 +810,7 @@ class Parser {
     if (!at("queue") && !at("stack") && !at("pair")) return false;
 
     const auto &next = tokens.at(pos + 1);
-    return !next.string && (next.text == "&" || isIdentifierStart(next.text[0]));
+    return !next.string && (next.text == Tok::Ampersand || isIdentifierStart(next.text[0]));
   }
   Type baseType() {
     std::string qualified;
@@ -828,37 +841,37 @@ class Parser {
       return Type::integer(8 * unsigned(std::stoi(digits)), token.text[0] == 'u');
     }
 
-    if (accept("byte") || accept("uint8"))
+    if (accept(Tok::Byte) || accept(Tok::Uint8))
       return Type::UInt8;
 
-    if (accept("uint16"))
+    if (accept(Tok::Uint16))
       return Type::UInt16;
 
-    if (accept("uint") || accept("uint32"))
+    if (accept(Tok::Uint) || accept(Tok::Uint32))
       return Type::UInt32;
 
-    if (accept("uint64"))
+    if (accept(Tok::Uint64))
       return Type::UInt64;
 
-    if (accept("int8"))
+    if (accept(Tok::Int8))
       return Type::Int8;
 
-    if (accept("short") || accept("int16"))
+    if (accept(Tok::Short) || accept(Tok::Int16))
       return Type::Short;
 
-    if (accept("long") || accept("int64"))
+    if (accept(Tok::Long) || accept(Tok::Int64))
       return Type::Long;
 
-    if (accept("float"))
+    if (accept(Tok::Float))
       return Type::Float;
 
-    if (accept("double"))
+    if (accept(Tok::Double))
       return Type::Double;
 
-    if (accept("int") || accept("int32"))
+    if (accept(Tok::Int) || accept(Tok::Int32))
       return Type::Int;
 
-    if (accept("bool"))
+    if (accept(Tok::Bool))
       return Type::Bool;
 
     if (markupKeyword()) {
@@ -871,32 +884,32 @@ class Parser {
       return Type::File;
     }
 
-    if (accept("string")) return Type::String;
-    if (accept("name")) return Type::Name;
-    if (accept("char")) return Type::Char;
-    if (accept("date")) return Type::Date;
-    if (accept("time")) return Type::Time;
-    if (accept("datetime")) return Type::DateTime;
-    if (accept("func")) return funcType();
-    if (accept("big")) return Type::Big;
-    if (accept("ubig")) return Type::UBig;
-    if (accept("tiny")) return Type::Tiny;
-    if (accept("utiny")) return Type::UTiny;
+    if (accept(Tok::String)) return Type::String;
+    if (accept(Tok::Name)) return Type::Name;
+    if (accept(Tok::Char)) return Type::Char;
+    if (accept(Tok::Date)) return Type::Date;
+    if (accept(Tok::Time)) return Type::Time;
+    if (accept(Tok::Datetime)) return Type::DateTime;
+    if (accept(Tok::Func)) return funcType();
+    if (accept(Tok::Big)) return Type::Big;
+    if (accept(Tok::Ubig)) return Type::UBig;
+    if (accept(Tok::Tiny)) return Type::Tiny;
+    if (accept(Tok::Utiny)) return Type::UTiny;
 
-    if (accept("cstring"))
+    if (accept(Tok::Cstring))
       return Type::Text;
 
-    expect("void");
+    expect(Tok::Void);
     return Type::Void;
   }
   // After `func`: a signature ahead, as in `func int(float)` or `func (int)`.
   bool funcSignatureAhead() {
-    if (at("(")) return true;
+    if (at(Tok::LeftParen)) return true;
     if (!isType() && !namedType()) return false;
 
     const auto saved = pos;
     plainType();
-    const bool found = at("(");
+    const bool found = at(Tok::LeftParen);
     pos = saved;
     return found;
   }
@@ -908,12 +921,12 @@ class Parser {
 
     auto signature = std::make_shared<FuncSignature>();
 
-    if (!at("(")) signature->result = type();
+    if (!at(Tok::LeftParen)) signature->result = type();
 
-    expect("(");
+    expect(Tok::LeftParen);
     lines();
 
-    if (!at(")"))
+    if (!at(Tok::RightParen))
       do {
         lines();
         Type parameter = type();
@@ -921,15 +934,15 @@ class Parser {
         if (parameter == Type::Void) fail(peek(), "parameter cannot have void type");
 
         requireFuncSignature(parameter, "a func parameter");
-        bool reference = accept("&");
+        bool reference = accept(Tok::Ampersand);
 
-        if (!at(",") && !at(")") && !at("\n")) identifier();
+        if (!at(Tok::Comma) && !at(Tok::RightParen) && !at(Tok::Newline)) identifier();
 
         signature->parameters.push_back({parameter, reference});
         lines();
-      } while (accept(","));
+      } while (accept(Tok::Comma));
 
-    expect(")");
+    expect(Tok::RightParen);
     requireFuncSignature(signature->result, "a func result");
     t.signature = signature;
     return t;
@@ -942,18 +955,18 @@ class Parser {
   std::vector<Tag> attributes() {
     std::vector<Tag> tags;
 
-    while (accept("[")) {
+    while (accept(Tok::LeftBracket)) {
       do {
         lines();
         auto token = identifier();
 
-        while (accept(".")) token.text += "." + identifier().text;
+        while (accept(Tok::Dot)) token.text += "." + identifier().text;
 
         tags.push_back({token});
         lines();
-      } while (accept(","));
+      } while (accept(Tok::Comma));
 
-      expect("]");
+      expect(Tok::RightBracket);
       lines();
     }
 
@@ -961,10 +974,10 @@ class Parser {
   }
   // The parameter list of a function or lambda, from '(' through ')'.
   void parameterList(Function &f) {
-    expect("(");
+    expect(Tok::LeftParen);
     lines();
 
-    if (!at(")"))
+    if (!at(Tok::RightParen))
       do {
         lines();
 
@@ -984,21 +997,21 @@ class Parser {
           fail(peek(), "parameter cannot have void type");
 
         requireFuncSignature(t, "a func parameter");
-        bool reference = accept("&");
+        bool reference = accept(Tok::Ampersand);
         auto parameterName = identifier();
         parameterName.text = declareLocal(parameterName);
         f.params.push_back({parameterName, t, reference});
         lines();
-      } while (accept(","));
+      } while (accept(Tok::Comma));
 
-    expect(")");
+    expect(Tok::RightParen);
   }
   // `@ result(parameters) { body }`, after the '@'.
   void lambdaExpression(Expr &e, bool blockBranch = false) {
     e.kind = "lambda";
     Type result = Type::Void;
 
-    if (!blockBranch && !at("(")) result = type();
+    if (!blockBranch && !at(Tok::LeftParen)) result = type();
 
     requireFuncSignature(result, "a func result");
     Token name = e.token;
@@ -1035,7 +1048,7 @@ class Parser {
     if (t.string)
       return 0;
 
-    const auto &s = t.text;
+    const std::string &s = t.text;
 
     if (s == "||")
       return 1;
@@ -1077,19 +1090,19 @@ class Parser {
 
     // `(Day)n` converts a value to the enum member that holds it.
     if ((isType() && !constructorType() && !typeMember()) ||
-        (namedLength && tokens[pos + namedLength].text == "*") ||
+        (namedLength && tokens[pos + namedLength].text == Tok::Star) ||
         (namedLength && containerNames.count("#@" + named) && !tokens[pos + namedLength].string &&
-         tokens[pos + namedLength].text == ")")) {
+         tokens[pos + namedLength].text == Tok::RightParen)) {
       e->kind = "cast";
       e->castType = type();
       lines();
-      expect(")");
+      expect(Tok::RightParen);
       e->args.push_back(expression(11, stopAtPipe));
     } else {
       e = expression();
       lines();
 
-      if (at("::") && e->kind == ".") {
+      if (at(Tok::ColonColon) && e->kind == ".") {
         // `(a.Child :: b)` gives false instead of trapping on an ownership
         // cycle, and leaves b's owner as it was.
         auto move = std::make_unique<Expr>();
@@ -1101,7 +1114,7 @@ class Parser {
         lines();
       }
 
-      if (at("+=") || at("-=") || at("++") || at("--")) {
+      if (at(Tok::PlusAssign) || at(Tok::MinusAssign) || at(Tok::PlusPlus) || at(Tok::MinusMinus)) {
         // `(s += x)` gives the inserted index; `(s--)` and `(s -= [i])`
         // give the removed element.
         auto mutation = std::make_unique<Expr>();
@@ -1109,14 +1122,14 @@ class Parser {
         mutation->token = pop();
         mutation->args.push_back(std::move(e));
 
-        if (mutation->token.text == "+=" || mutation->token.text == "-=")
+        if (mutation->token.text == Tok::PlusAssign || mutation->token.text == Tok::MinusAssign)
           mutation->args.push_back(mutationOperand(mutation->token.text));
 
         e = std::move(mutation);
         lines();
       }
 
-      expect(")");
+      expect(Tok::RightParen);
     }
   }
   void braceLiteral(Expr &literal) {
@@ -1127,21 +1140,21 @@ class Parser {
     literal.kind = "initializer";
     lines();
 
-    while (!at("}")) {
+    while (!at(Tok::RightBrace)) {
       // A word right before ':' is a field-style key, even a keyword such
       // as `name` in {name: "Bob"}.
       const auto &next = tokens.at(pos + 1);
       std::unique_ptr<Expr> first;
 
       if (!peek().string && isIdentifierStart(peek().text[0]) &&
-          !next.string && next.text == ":") {
+          !next.string && next.text == Tok::Colon) {
         first = std::make_unique<Expr>();
         first->kind = "name";
         first->token = pop();
       } else
         first = expression();
 
-      if (accept(":")) {
+      if (accept(Tok::Colon)) {
         auto entry = std::make_unique<Expr>();
 
         if (first->kind == "name") {
@@ -1160,13 +1173,13 @@ class Parser {
       } else
         literal.args.push_back(std::move(first));
 
-      if (!at("}") && !at("\n") && !at(",")) fail(peek(), "expected ',' or a new line between literal entries");
+      if (!at(Tok::RightBrace) && !at(Tok::Newline) && !at(Tok::Comma)) fail(peek(), "expected ',' or a new line between literal entries");
 
-      accept(",");
+      accept(Tok::Comma);
       lines();
     }
 
-    expect("}");
+    expect(Tok::RightBrace);
   }
   std::unique_ptr<Expr> primaryExpression(bool stopAtPipe, bool markupExpected) {
     auto e = std::make_unique<Expr>();
@@ -1179,24 +1192,24 @@ class Parser {
 
       while (!accept("$result")) {
         e->bindings.push_back(simpleStatement());
-        expect("\n");
+        expect(Tok::Newline);
       }
 
       e->args.push_back(expression());
       lines();
       expect("$end");
       hygiene.pop_back();
-    } else if (accept("#")) {
+    } else if (accept(Tok::Hash)) {
       e->kind = "compileTime";
       e->args.push_back(expression(11, stopAtPipe));
 
       if (e->args[0]->kind != "call")
         fail(e->token, "'#' requires an explicit function call, as in #Call(1); "
                        "a constant declaration requires an explicit type");
-    } else if (accept("-") || accept("!") || accept("~") || accept("&") || accept("*")) {
+    } else if (accept(Tok::Minus) || accept(Tok::Bang) || accept(Tok::Tilde) || accept(Tok::Ampersand) || accept(Tok::Star)) {
       e->kind = "unary";
       e->args.push_back(expression(11, stopAtPipe));
-    } else if (accept("?")) {
+    } else if (accept(Tok::Question)) {
       // `?p.q.Foo()` skips the call, arguments included, at the first invalid
       // link and reads as the result type's default.
       // `?a[i]` guards an index: a missing element skips a write and reads
@@ -1208,21 +1221,21 @@ class Parser {
           e->args[0]->kind != "." && !(e->args[0]->kind == "call" && e->args[0]->receiver))
         fail(e->token, "'?' guards an index such as ?a[i], a method call such as ?p.Foo(), "
                        "a duck call such as ?e..Foo(), or a scoped variable");
-    } else if (at("@") && word(tokens.at(pos + 1)) && !punctuation(tokens.at(pos + 2), "(") &&
-               !punctuation(tokens.at(pos + 2), "*") && !punctuation(tokens.at(pos + 2), "[") &&
-               !punctuation(tokens.at(pos + 2), ".")) {
+    } else if (at(Tok::At) && word(tokens.at(pos + 1)) && !punctuation(tokens.at(pos + 2), Tok::LeftParen) &&
+               !punctuation(tokens.at(pos + 2), Tok::Star) && !punctuation(tokens.at(pos + 2), Tok::LeftBracket) &&
+               !punctuation(tokens.at(pos + 2), Tok::Dot)) {
       // `@Name` asks whether that scope is active. A lambda's result type is
       // always followed by its parameter list.
       pop();
       e->kind = "scopeActive";
       e->token = identifier();
-    } else if (at("{") && (markupExpected || markupAhead())) {
+    } else if (at(Tok::LeftBrace) && (markupExpected || markupAhead())) {
       markupLiteral(*e, nullptr);
-    } else if (accept("@")) {
+    } else if (accept(Tok::At)) {
       lambdaExpression(*e);
-    } else if (accept("(")) {
+    } else if (accept(Tok::LeftParen)) {
       parenthesized(e, stopAtPipe);
-    } else if (accept("{")) {
+    } else if (accept(Tok::LeftBrace)) {
       braceLiteral(*e);
     } else if (peek().character) {
       e->kind = "char";
@@ -1233,11 +1246,11 @@ class Parser {
     } else if (typeMember()) {
       e->kind = "typeMember";
       e->castType = baseType();
-      expect(".");
+      expect(Tok::Dot);
       e->token = identifier();
 
       // vec3.Identity(): a function of the type rather than a limit like int.Max.
-      if (nativeMath(e->castType) && accept("(")) {
+      if (nativeMath(e->castType) && accept(Tok::LeftParen)) {
         e->kind = "call";
         e->token.text = e->castType.record + "." + e->token.text;
         e->castType = Type();
@@ -1246,11 +1259,11 @@ class Parser {
     } else if (constructorType()) {
       e->kind = "construct";
       e->castType = baseType();
-      expect("(");
+      expect(Tok::LeftParen);
       e->args = callArguments();
-    } else if (accept("null")) {
+    } else if (accept(Tok::Null)) {
       e->kind = "null";
-    } else if (at("true") || at("false")) {
+    } else if (at(Tok::True) || at(Tok::False)) {
       e->kind = "bool";
       pop();
     } else if (std::isdigit(static_cast<unsigned char>(peek().text[0]))) {
@@ -1270,11 +1283,11 @@ class Parser {
     // Dynamic dispatch: `e..Foo()`, and the checks `e..?Foo()` (would
     // this call run?) and `e..?Foo` (does any method of that name exist?).
     auto call = std::make_unique<Expr>();
-    call->kind = accept("?") ? "duckCheck" : "duckCall";
+    call->kind = accept(Tok::Question) ? "duckCheck" : "duckCall";
     call->token = identifier();
     call->receiver = std::move(e);
 
-    if (accept("(")) call->args = callArguments();
+    if (accept(Tok::LeftParen)) call->args = callArguments();
     else if (call->kind == "duckCheck") call->kind = "duckExists";
     else fail(call->token, "a duck call needs an argument list, as in e..Foo()");
 
@@ -1288,14 +1301,14 @@ class Parser {
     lines();
     index->args.push_back(expression());
     lines();
-    expect("]");
+    expect(Tok::RightBracket);
     e = std::move(index);
   }
   // The closing parenthesis of `a (0.5)== b`, or 0 if none is ahead. The
   // operator touches the `)`, and a space before the `(` tells it from the
   // call in `f(0.5)== b`.
   size_t toleranceClose() const {
-    if (pos == 0 || !at("(")) return 0;
+    if (pos == 0 || !at(Tok::LeftParen)) return 0;
 
     const auto &before = tokens[pos - 1], &open = tokens[pos];
 
@@ -1307,11 +1320,11 @@ class Parser {
       const auto &token = tokens[k];
 
       if (token.string) continue;
-      if (token.text == "(") ++depth;
+      if (token.text == Tok::LeftParen) ++depth;
 
-      if (token.text == ")" && --depth == 0) {
+      if (token.text == Tok::RightParen && --depth == 0) {
         const auto &next = tokens[k + 1];
-        const bool comparison = !next.string && (next.text == "==" || next.text == "!=");
+        const bool comparison = !next.string && (next.text == Tok::EqualEqual || next.text == Tok::NotEqual);
         return comparison && next.line == token.line && next.column == token.column + 1 ? k : 0;
       }
     }
@@ -1321,20 +1334,20 @@ class Parser {
   void postfixChain(std::unique_ptr<Expr> &e) {
     std::string path = e->kind == "name" ? e->token.text : "";
 
-    while (at(".") || (at("(") && !toleranceClose()) || at("[") || at("..")) {
-      if (accept("..")) {
+    while (at(Tok::Dot) || (at(Tok::LeftParen) && !toleranceClose()) || at(Tok::LeftBracket) || at(Tok::DotDot)) {
+      if (accept(Tok::DotDot)) {
         duckCallSuffix(e);
         path.clear();
         continue;
       }
 
-      if (at("[")) {
+      if (at(Tok::LeftBracket)) {
         indexSuffix(e);
         path.clear();
         continue;
       }
 
-      if (accept(".")) {
+      if (accept(Tok::Dot)) {
         auto member = std::make_unique<Expr>();
         member->kind = ".";
         member->token = identifier();
@@ -1342,7 +1355,7 @@ class Parser {
         member->args.push_back(std::move(e));
         e = std::move(member);
       } else {
-        expect("(");
+        expect(Tok::LeftParen);
 
         if (e->kind == "call" || e->kind == "invoke" || e->kind == "index" || e->kind == "lambda" ||
             e->kind == "duckCall") {
@@ -1391,9 +1404,9 @@ class Parser {
     // its separator. Parentheses and call arguments start fresh expressions.
     for (;;) {
       if (const auto close = toleranceClose(); close && precedence(tokens[close + 1]) >= minimum) {
-        expect("(");
+        expect(Tok::LeftParen);
         auto tolerance = expression();
-        expect(")");
+        expect(Tok::RightParen);
         auto parent = operatorNode("binary", std::move(e));
         int p = precedence(parent->token);
         parent->args.push_back(expression(p + 1, stopAtPipe));
@@ -1402,7 +1415,7 @@ class Parser {
         continue;
       }
 
-      if (precedence(peek()) < minimum || (stopAtPipe && at("|"))) break;
+      if (precedence(peek()) < minimum || (stopAtPipe && at(Tok::Pipe))) break;
 
       auto parent = operatorNode("binary", std::move(e));
       int p = precedence(parent->token);
@@ -1412,16 +1425,16 @@ class Parser {
 
     // A range binds looser than every operator, so 0...a.Len-1 needs no
     // parentheses; a bare pipe after it belongs to the enclosing form.
-    if (minimum == 1 && at("...")) {
+    if (minimum == 1 && at(Tok::Ellipsis)) {
       auto parent = operatorNode("range", std::move(e));
       parent->args.push_back(expression(2, true));
       e = std::move(parent);
     }
 
-    if (minimum == 1 && at("?")) {
+    if (minimum == 1 && at(Tok::Question)) {
       auto parent = operatorNode("conditional", std::move(e));
       parent->args.push_back(expression(1, true));
-      expect("|");
+      expect(Tok::Pipe);
       parent->args.push_back(expression(1, stopAtPipe));
       e = std::move(parent);
     }
@@ -1432,23 +1445,23 @@ class Parser {
   Token blockOpen{}, blockClose{};
   std::vector<std::unique_ptr<Stmt>> block() {
     lines();
-    const auto open = expect("{");
+    const auto open = expect(Tok::LeftBrace);
     lines();
     hygiene.emplace_back();
     std::vector<std::unique_ptr<Stmt>> result;
 
-    while (!at("}")) {
-      if (at("<eof>")) expected("}");
+    while (!at(Tok::RightBrace)) {
+      if (at(Tok::Eof)) expected("}");
 
       result.push_back(statement());
 
-      if (!at("}") && !at("\n")) fail(peek(), "expected newline between statements");
+      if (!at(Tok::RightBrace) && !at(Tok::Newline)) fail(peek(), "expected newline between statements");
 
       lines();
     }
 
     hygiene.pop_back();
-    blockClose = expect("}");
+    blockClose = expect(Tok::RightBrace);
     blockOpen = open;
     return result;
   }
@@ -1480,15 +1493,15 @@ class Parser {
   }
   // `{` that opens a markup literal: a block's first content is a tag.
   bool markupAhead() const {
-    if (!at("{")) return false;
+    if (!at(Tok::LeftBrace)) return false;
 
     size_t k = pos + 1;
 
-    while (k < tokens.size() && punctuation(tokens[k], "\n")) ++k;
+    while (k < tokens.size() && punctuation(tokens[k], Tok::Newline)) ++k;
 
-    return k + 1 < tokens.size() && punctuation(tokens[k], "<") && word(tokens[k + 1]);
+    return k + 1 < tokens.size() && punctuation(tokens[k], Tok::Less) && word(tokens[k + 1]);
   }
-  bool closingTagAhead() const { return at("<") && punctuation(tokens.at(pos + 1), "/"); }
+  bool closingTagAhead() const { return at(Tok::Less) && punctuation(tokens.at(pos + 1), Tok::Slash); }
   // A value written directly inside an element, and the `value` field it needs.
   bool literalContent(Type &type) {
     const auto &t = peek();
@@ -1498,12 +1511,12 @@ class Parser {
       return true;
     }
 
-    if (at("true") || at("false")) {
+    if (at(Tok::True) || at(Tok::False)) {
       type = Type::Bool;
       return true;
     }
 
-    const auto &digit = at("-") ? tokens.at(pos + 1) : t;
+    const auto &digit = at(Tok::Minus) ? tokens.at(pos + 1) : t;
 
     if (digit.string || digit.text.empty() || !std::isdigit(static_cast<unsigned char>(digit.text[0]))) return false;
 
@@ -1517,10 +1530,10 @@ class Parser {
                    const Place &self, Record *root) {
     bool children = false;
 
-    for (lines(); !at("}") && !closingTagAhead(); lines()) {
-      if (at("<eof>")) fail(peek(), "unterminated markup: expected '}' or a closing tag");
+    for (lines(); !at(Tok::RightBrace) && !closingTagAhead(); lines()) {
+      if (at(Tok::Eof)) fail(peek(), "unterminated markup: expected '}' or a closing tag");
 
-      if (at("<")) {
+      if (at(Tok::Less)) {
         markupElement(out, holder, root);
         children = true;
         continue;
@@ -1564,8 +1577,8 @@ class Parser {
     return children;
   }
   void closingTag(const std::string &tag, const std::string &written) {
-    expect("<");
-    expect("/");
+    expect(Tok::Less);
+    expect(Tok::Slash);
     std::string closing;
     const auto closingAt = peek();
     const auto length = typePath(pos, &closing);
@@ -1574,14 +1587,14 @@ class Parser {
       fail(closingAt, "expected closing tag </" + written + ">");
 
     pos += length;
-    expect(">");
+    expect(Tok::Greater);
   }
   // `Name=value` pairs through the end of a tag. Values stop at any operator,
   // so `/>` is never read as a division: parenthesize an expression.
   void markupAttributes(Statements &out, const Place &self) {
-    for (lines(); !at("/") && !at(">"); lines()) {
+    for (lines(); !at(Tok::Slash) && !at(Tok::Greater); lines()) {
       const auto name = identifier();
-      expect("=");
+      expect(Tok::Assign);
       auto value = expression(11);
       out.push_back(assignment(memberOf(self(name), name), std::move(value), name));
     }
@@ -1612,9 +1625,9 @@ class Parser {
     const Place self = [local](const Token &at) { return localName(at, local); };
     markupAttributes(group->body, self);
 
-    if (accept("/")) expect(">");
+    if (accept(Tok::Slash)) expect(Tok::Greater);
     else {
-      expect(">");
+      expect(Tok::Greater);
       Token field = tagToken;
       field.text = "$children";
       const Place children = [local, field](const Token &at) { return memberOf(localName(at, local), field); };
@@ -1650,21 +1663,21 @@ class Parser {
     let->type = markupType();
     e.bindings.push_back(std::move(let));
     const Place holder = [local](const Token &at) { return localName(at, local); };
-    expect("{");
+    expect(Tok::LeftBrace);
     lines();
     Token receiver = start;
     receiver.text = "this";
     const Place self = [](const Token &at) { return localName(at, "this"); };
 
     // A block's root may be written out; it is always the container itself.
-    if (root && at("<") && tokens.at(pos + 1).text == bare && !punctuation(tokens.at(pos + 2), ".")) {
+    if (root && at(Tok::Less) && tokens.at(pos + 1).text == bare && !punctuation(tokens.at(pos + 2), Tok::Dot)) {
       pop();
       const auto rootName = pop();
       markupAttributes(e.bindings, self);
 
-      if (accept("/")) expect(">");
+      if (accept(Tok::Slash)) expect(Tok::Greater);
       else {
-        expect(">");
+        expect(Tok::Greater);
         markupItems(e.bindings, holder, tag, rootName, self, root);
         closingTag(tag, bare);
       }
@@ -1673,7 +1686,7 @@ class Parser {
     } else
       markupItems(e.bindings, holder, tag, receiver, self, root);
 
-    expect("}");
+    expect(Tok::RightBrace);
     auto take = std::make_unique<Expr>();
     take->token = start;
     take->token.text = local;
@@ -1717,8 +1730,8 @@ class Parser {
   // Whether `T.Name(` here is an assertion. A program's own container named
   // T keeps its members, so only the assertion names are claimed.
   bool assertionAhead() const {
-    if (!at("T") || !punctuation(tokens.at(pos + 1), ".") || !word(tokens.at(pos + 2)) ||
-        !punctuation(tokens.at(pos + 3), "("))
+    if (!at("T") || !punctuation(tokens.at(pos + 1), Tok::Dot) || !word(tokens.at(pos + 2)) ||
+        !punctuation(tokens.at(pos + 3), Tok::LeftParen))
       return false;
 
     const bool container = containerNames.count("T") || containerNames.count("#{T");
@@ -1833,7 +1846,7 @@ class Parser {
   // normal scope cleanup, so a failed test still releases what it holds.
   std::unique_ptr<Stmt> assertion() {
     const auto start = pop();
-    expect(".");
+    expect(Tok::Dot);
     const auto check = identifier();
     const auto label = "T." + check.text;
 
@@ -1845,7 +1858,7 @@ class Parser {
     if (arity == assertionNames().end())
       fail(check, "unknown assertion '" + label + "'; use AreEqual, AreNotEqual, IsTrue, IsFalse, or Fail");
 
-    expect("(");
+    expect(Tok::LeftParen);
     auto arguments = callArguments();
 
     if (arguments.size() < arity->second.first || arguments.size() > arity->second.second)
@@ -1870,13 +1883,13 @@ class Parser {
 
     return assertionCheck(start, std::move(condition), std::move(failure), std::move(statements));
   }
-  bool scopeMarkAhead() const { return at("[") && punctuation(tokens.at(pos + 1), "@"); }
+  bool scopeMarkAhead() const { return at(Tok::LeftBracket) && punctuation(tokens.at(pos + 1), Tok::At); }
   // `[@Name]` before a field or loop: the scope's name.
   Token scopeMark() {
-    expect("[");
-    expect("@");
+    expect(Tok::LeftBracket);
+    expect(Tok::At);
     auto scope = identifier();
-    expect("]");
+    expect(Tok::RightBracket);
     lines();
     return scope;
   }
@@ -1894,7 +1907,7 @@ class Parser {
     stored = scopeSlotType();
   }
   bool scopeStatementAhead() const {
-    return at("@") && tokens.at(pos + 2).line == peek().line &&
+    return at(Tok::At) && tokens.at(pos + 2).line == peek().line &&
            (tokens.at(pos + 1).text == "start" || tokens.at(pos + 1).text == "end") && !tokens.at(pos + 1).string &&
            word(tokens.at(pos + 2));
   }
@@ -1909,7 +1922,7 @@ class Parser {
 
     s->name = identifier().text;
 
-    if (!at("\n") && !at("}")) badStatementEnd();
+    if (!at(Tok::Newline) && !at(Tok::RightBrace)) badStatementEnd();
 
     return s;
   }
@@ -1917,7 +1930,7 @@ class Parser {
   std::unique_ptr<Stmt> scopedLoop() {
     const auto mark = scopeMark();
 
-    if (!at("while") && !at("for") && !at("do"))
+    if (!at(Tok::While) && !at(Tok::For) && !at(Tok::Do))
       fail(mark, "a scope mark in a function body applies to a loop");
 
     auto loop = statement();
@@ -1937,18 +1950,18 @@ class Parser {
     // line is too, unless it has a block of its own: that is the next
     // statement, and this `do` has no condition.
     const auto end = pos;
-    const bool sameLine = at("while");
+    const bool sameLine = at(Tok::While);
     lines();
 
-    if (accept("while")) {
+    if (accept(Tok::While)) {
       auto condition = expression();
-      const bool terminated = at("\n") || at("}");
+      const bool terminated = at(Tok::Newline) || at(Tok::RightBrace);
 
       if (sameLine && !terminated) fail(peek(), "expected terminator after do-while condition");
 
       const auto after = pos;
       lines();
-      const bool ownBlock = at("{");
+      const bool ownBlock = at(Tok::LeftBrace);
       pos = after;
 
       if (terminated && (sameLine || !ownBlock)) {
@@ -1969,10 +1982,10 @@ class Parser {
       auto saved = pos;
       lines();
 
-      if (accept("else")) {
+      if (accept(Tok::Else)) {
         lines();
 
-        if (at("if"))
+        if (at(Tok::If))
           s->alternate.push_back(statement());
         else
           s->alternate = controlBody();
@@ -1986,28 +1999,28 @@ class Parser {
   bool parallelAhead() const {
     if (!at("P")) return false;
     size_t k = pos + 1;
-    if (punctuation(tokens.at(k), "{")) return true;
-    if (!punctuation(tokens.at(k), "(") || !skipToCloseParen(k)) return false;
-    return punctuation(tokens.at(k + 1), "(") || punctuation(tokens.at(k + 1), "{");
+    if (punctuation(tokens.at(k), Tok::LeftBrace)) return true;
+    if (!punctuation(tokens.at(k), Tok::LeftParen) || !skipToCloseParen(k)) return false;
+    return punctuation(tokens.at(k + 1), Tok::LeftParen) || punctuation(tokens.at(k + 1), Tok::LeftBrace);
   }
   std::unique_ptr<Stmt> parallelGroup() {
     auto group = std::make_unique<Stmt>();
     group->token = pop();
     group->kind = "parallel";
     do {
-      if (at("{")) {
+      if (at(Tok::LeftBrace)) {
         auto branch = std::make_unique<Expr>();
         branch->token = peek();
         lambdaExpression(*branch, true);
         group->labels.push_back(std::move(branch));
       } else {
-        expect("(");
+        expect(Tok::LeftParen);
         lines();
         group->labels.push_back(expression());
         lines();
-        expect(")");
+        expect(Tok::RightParen);
       }
-    } while (at("{") || at("("));
+    } while (at(Tok::LeftBrace) || at(Tok::LeftParen));
     if (group->labels.size() < 2) fail(group->token, "P requires at least two branches");
     return group;
   }
@@ -2016,23 +2029,23 @@ class Parser {
 
     if (scopeMarkAhead()) return scopedLoop();
     if (scopeStatementAhead()) return scopeStatement();
-    if (at("Switch")) return switchStatement();
+    if (at(Tok::Switch)) return switchStatement();
     if (parallelAhead()) return parallelGroup();
 
-    if (at("macro") && word(tokens.at(pos + 1)) && punctuation(tokens.at(pos + 2), "("))
+    if (at(Tok::Macro) && word(tokens.at(pos + 1)) && punctuation(tokens.at(pos + 2), Tok::LeftParen))
       fail(peek(), "a macro cannot be declared inside a function; declare it at file scope or in a container");
 
-    if (at("case")) {
+    if (at(Tok::Case)) {
       const auto &next = tokens.at(pos + 1);
 
-      if (next.string || next.text == "-" || word(next) || std::isdigit(static_cast<unsigned char>(next.text[0])))
+      if (next.string || next.text == Tok::Minus || word(next) || std::isdigit(static_cast<unsigned char>(next.text[0])))
         fail(peek(), "'case' is valid only directly inside a Switch body");
     }
 
     if (assertionAhead()) {
       auto check = assertion();
 
-      if (!at("\n") && !at("}")) badStatementEnd();
+      if (!at(Tok::Newline) && !at(Tok::RightBrace)) badStatementEnd();
 
       return check;
     }
@@ -2040,41 +2053,41 @@ class Parser {
     auto s = std::make_unique<Stmt>();
     s->token = peek();
 
-    if (at("{")) {
+    if (at(Tok::LeftBrace)) {
       s->kind = "block";
       s->body = block();
       return s;
     }
 
-    if (at("$") && punctuation(tokens.at(pos + 1), "{")) {
+    if (at(Tok::Dollar) && punctuation(tokens.at(pos + 1), Tok::LeftBrace)) {
       pop();
       s->kind = "ordered";
       s->body = block();
       return s;
     }
 
-    if (accept("do")) return doStatement(std::move(s));
+    if (accept(Tok::Do)) return doStatement(std::move(s));
 
-    if (accept("for")) {
+    if (accept(Tok::For)) {
       hygiene.emplace_back();
       forClause(*s);
       hygiene.pop_back();
       return s;
     }
 
-    if (accept("if") || accept("while")) return conditionalStatement(std::move(s));
+    if (accept(Tok::If) || accept(Tok::While)) return conditionalStatement(std::move(s));
 
-    if (accept("break") || accept("continue"))
+    if (accept(Tok::Break) || accept(Tok::Continue))
       s->kind = s->token.text;
-    else if (accept("return")) {
+    else if (accept(Tok::Return)) {
       s->kind = "return";
 
-      if (accept("::")) {
+      if (accept(Tok::ColonColon)) {
         returnsOwner = true;
         s->kind = "returnOwner";
       }
 
-      if (!at("\n") && !at("}")) {
+      if (!at(Tok::Newline) && !at(Tok::RightBrace)) {
         expectMarkup = returnsMarkup;
         s->expr = expression();
       }
@@ -2089,7 +2102,7 @@ class Parser {
       }
     }
 
-    if (!at("\n") && !at("}")) badStatementEnd(" (syntax may not be supported yet)");
+    if (!at(Tok::Newline) && !at(Tok::RightBrace)) badStatementEnd(" (syntax may not be supported yet)");
 
     return s;
   }
@@ -2101,17 +2114,17 @@ class Parser {
     if (!forEachHeader(s)) {
       s.kind = "for";
 
-      if (!at(";"))
+      if (!at(Tok::Semicolon))
         s.initializer = simpleStatement();
 
-      expect(";");
+      expect(Tok::Semicolon);
 
-      if (!at(";"))
+      if (!at(Tok::Semicolon))
         s.expr = expression();
 
-      expect(";");
+      expect(Tok::Semicolon);
 
-      if (!at("{") && !at("\n") && !at("|"))
+      if (!at(Tok::LeftBrace) && !at(Tok::Newline) && !at(Tok::Pipe))
         s.step = simpleStatement(true);
 
       if (s.step && (s.step->kind == "let" || s.step->kind == "own"))
@@ -2120,10 +2133,10 @@ class Parser {
 
     std::vector<std::unique_ptr<Stmt>> before, after;
 
-    if (accept("|")) {
+    if (accept(Tok::Pipe)) {
       lines();
 
-      if (at("{")) {
+      if (at(Tok::LeftBrace)) {
         after = block();
         lines();
       }
@@ -2132,7 +2145,7 @@ class Parser {
       const auto end = pos;
       lines();
 
-      if (!accept("|")) {
+      if (!accept(Tok::Pipe)) {
         pos = end;
         s.body = std::move(before);
         return;
@@ -2140,7 +2153,7 @@ class Parser {
 
       lines();
 
-      if (at("{")) fail(peek(), "an outer loop takes one body, before or after its inner loop");
+      if (at(Tok::LeftBrace)) fail(peek(), "an outer loop takes one body, before or after its inner loop");
     }
 
     auto inner = std::make_unique<Stmt>();
@@ -2156,12 +2169,12 @@ class Parser {
   // the position is restored for the counted form.
   bool forEachHeader(Stmt &s) {
     const auto start = pos;
-    const bool reverse = accept("-");
+    const bool reverse = accept(Tok::Minus);
     auto first = peek();
     const bool word = !first.string && !first.text.empty() &&
                       isIdentifierStart(first.text[0]);
 
-    if (!word || at("<eof>") || (tokens[pos + 1].text != ":" && tokens[pos + 1].text != ",") ||
+    if (!word || at(Tok::Eof) || (tokens[pos + 1].text != Tok::Colon && tokens[pos + 1].text != Tok::Comma) ||
         tokens[pos + 1].string) {
       pos = start;
       return false;
@@ -2170,15 +2183,15 @@ class Parser {
     auto valueName = identifier();
     std::optional<Token> keyName;
 
-    if (accept(",")) {
+    if (accept(Tok::Comma)) {
       keyName = valueName;
       valueName = identifier();
     }
 
-    expect(":");
+    expect(Tok::Colon);
     auto collection = expression(1, true);
 
-    if (at(";") && !reverse && !keyName) {
+    if (at(Tok::Semicolon) && !reverse && !keyName) {
       pos = start;
       return false;
     }
@@ -2188,7 +2201,7 @@ class Parser {
 
     if (keyName) s.key = declareLocal(*keyName);
 
-    if (!at("{") && !at("\n") && !at("|"))
+    if (!at(Tok::LeftBrace) && !at(Tok::Newline) && !at(Tok::Pipe))
       fail(peek(), "expected '{' or a newline after the collection of a for loop");
 
     if (collection->kind == "range" && reverse)
@@ -2205,7 +2218,7 @@ class Parser {
   std::vector<std::unique_ptr<Stmt>> controlBody() {
     lines();
 
-    if (at("{"))
+    if (at(Tok::LeftBrace))
       return block();
 
     std::vector<std::unique_ptr<Stmt>> body;
@@ -2217,34 +2230,34 @@ class Parser {
     std::vector<std::unique_ptr<Expr>> arguments;
     lines();
 
-    if (!at(")"))
+    if (!at(Tok::RightParen))
       do {
         lines();
         arguments.push_back(expression());
         lines();
-      } while (accept(","));
+      } while (accept(Tok::Comma));
 
-    expect(")");
+    expect(Tok::RightParen);
     return arguments;
   }
   // The right side of += or -=: `key : value` adds an entry to a pair, and
   // `[i]` or `[key]` after -= names the element to remove.
   std::unique_ptr<Expr> mutationOperand(const std::string &op, bool stopAtPipe = false) {
-    if (op == "-=" && at("[")) {
+    if (op == "-=" && at(Tok::LeftBracket)) {
       auto removal = std::make_unique<Expr>();
       removal->kind = "removal";
       removal->token = pop();
       lines();
       removal->args.push_back(expression());
       lines();
-      expect("]");
+      expect(Tok::RightBracket);
 
-      while (at("[")) {
+      while (at(Tok::LeftBracket)) {
         pop();
         lines();
         removal->args.push_back(expression());
         lines();
-        expect("]");
+        expect(Tok::RightBracket);
       }
 
       return removal;
@@ -2252,7 +2265,7 @@ class Parser {
 
     auto value = expression(1, stopAtPipe);
 
-    if (op == "+=" && at(":")) {
+    if (op == "+=" && at(Tok::Colon)) {
       auto entry = std::make_unique<Expr>();
       entry->kind = "entry";
       entry->token = pop();
@@ -2269,7 +2282,7 @@ class Parser {
     s->token = peek();
 
     // A leading # can mark either a typed constant or a call expression.
-    if (accept("#")) {
+    if (accept(Tok::Hash)) {
       s->constant = declarationType();
 
       if (!s->constant) --pos;
@@ -2288,7 +2301,7 @@ class Parser {
       const auto declaredName = identifier();
       s->name = declaredName.text;
 
-      if (accept("(")) {
+      if (accept(Tok::LeftParen)) {
         // `Gun g(5)` and `Gun* p(5)` construct with arguments, like `Gun(5)`.
         auto arguments = callArguments();
         auto construction = [&](const Type &record) {
@@ -2320,11 +2333,11 @@ class Parser {
           s->expr = construction(s->type.pointee());
         }
       } else if (s->constant) {
-        if (!accept("="))
+        if (!accept(Tok::Assign))
           fail(peek(), "constant '" + s->name + "' requires an initializer, as in #int age = 5");
 
         s->expr = expression();
-      } else if (accept("=")) {
+      } else if (accept(Tok::Assign)) {
         expectMarkup = markupValue(s->type);
         s->expr = expression();
       }
@@ -2335,20 +2348,20 @@ class Parser {
       unreachableNestedType();
       auto target = expression(1, stopAtPipe);
 
-      if (at("::") && target->kind == ".") {
+      if (at(Tok::ColonColon) && target->kind == ".") {
         pop();
         s->kind = "moveInto";
         s->target = std::move(target);
         s->expr = expression();
-      } else if (at(":") || at("::")) {
+      } else if (at(Tok::Colon) || at(Tok::ColonColon)) {
         if (target->kind != "name") fail(target->token, "expected local name");
 
-        s->kind = pop().text == "::" ? "own" : "let";
+        s->kind = pop().text == Tok::ColonColon ? "own" : "let";
         s->expr = expression();
         s->name = declareLocal(target->token);
-      } else if (at("=") || at("++") || at("--") || at("+=") || at("-=") ||
-                 at("*=") || at("/=") || at("%=") || at("&=") || at("|=") ||
-                 at("^=") || at("<<=") || at(">>=")) {
+      } else if (at(Tok::Assign) || at(Tok::PlusPlus) || at(Tok::MinusMinus) || at(Tok::PlusAssign) || at(Tok::MinusAssign) ||
+                 at(Tok::StarAssign) || at(Tok::SlashAssign) || at(Tok::PercentAssign) || at(Tok::AmpersandAssign) || at(Tok::PipeAssign) ||
+                 at(Tok::CaretAssign) || at(Tok::ShiftLeftAssign) || at(Tok::ShiftRightAssign)) {
         auto op = pop().text;
         s->kind = op == "=" ? "assign" : op;
         s->target = std::move(target);
@@ -2383,14 +2396,14 @@ class Parser {
     if (external) {
       f.nativeSymbol = nativeName;
 
-      if (accept("=")) {
+      if (accept(Tok::Assign)) {
         if (!peek().string || peek().character || peek().text.empty())
           fail(peek(), "native symbol must be a nonempty string literal");
 
         f.nativeSymbol = pop().text;
       }
 
-      if (at("{"))
+      if (at(Tok::LeftBrace))
         fail(peek(), "native declaration cannot have a body");
     } else {
       returnsOwner = false;
@@ -2415,10 +2428,10 @@ class Parser {
     for (int depth = 0;; ++k) {
       const auto &t = tokens.at(k);
 
-      if (punctuation(t, "<eof>")) return false;
+      if (punctuation(t, Tok::Eof)) return false;
 
-      if (punctuation(t, "(")) ++depth;
-      else if (punctuation(t, ")") && --depth == 0) return true;
+      if (punctuation(t, Tok::LeftParen)) ++depth;
+      else if (punctuation(t, Tok::RightParen) && --depth == 0) return true;
     }
   }
   // After a pointer-typed member name: `Item* Child()` with no body is an
@@ -2426,28 +2439,28 @@ class Parser {
   bool owningFieldAhead(const Type &t) const {
     if (t.depth != 1 || !heapValue(t.pointee())) return false;
 
-    auto punct = [&](size_t k, const char *text) { return !tokens.at(k).string && tokens.at(k).text == text; };
+    auto punct = [&](size_t k, auto text) { return !tokens.at(k).string && tokens.at(k).text == text; };
     size_t k = pos;
 
     if (!skipToCloseParen(k)) return false;
-    for (++k; punct(k, "\n"); ++k) {}
+    for (++k; punct(k, Tok::Newline); ++k) {}
 
-    return !punct(k, "{");
+    return !punct(k, Tok::LeftBrace);
   }
   // A '+' (public, the default) or '-' (protected) prefix must touch the
   // member it modifies, as in -int Cash or -Helper().
   bool accessModifier() {
-    if (!at("+") && !at("-")) return false;
+    if (!at(Tok::Plus) && !at(Tok::Minus)) return false;
 
     const auto sign = pop();
     const auto &next = peek();
 
-    if (next.string || next.text == "\n" || next.text == "<eof>" ||
+    if (next.string || next.text == Tok::Newline || next.text == Tok::Eof ||
         next.source != sign.source || next.line != sign.line || next.column != sign.column + 1)
       fail(sign, "access modifier '" + sign.text +
                      "' must be written directly before the member, without spaces");
 
-    return sign.text == "-";
+    return sign.text == Tok::Minus;
   }
   void destructorDeclaration(Program &program, std::set<std::string> &members, const std::string &bare, const Token &tag, const std::vector<Tag> &tags, const Token &tagged, bool isProtected, const Token &modifier) {
     if (!tags.empty()) fail(tagged, "attributes apply to fields and methods, not destructors");
@@ -2483,7 +2496,7 @@ class Parser {
   void containerField(Record &record, const Token &name, Type t, bool typed, bool isProtected, std::vector<Tag> tags, const std::optional<Token> &scoped) {
     if (!typed && isWord(peek())) rejectMisspelledType(name);
 
-    if (!typed && (at(":") || enumBlock()))
+    if (!typed && (at(Tok::Colon) || enumBlock()))
       fail(name, "an enum belongs at file scope or in a static #{ } block, not in a container's instance body");
 
     if (!typed || t == Type::Void)
@@ -2491,7 +2504,7 @@ class Parser {
 
     std::shared_ptr<Expr> initializer;
 
-    if (at("(")) {
+    if (at(Tok::LeftParen)) {
       // `Item* Child()` is an owning field built with its container.
       if (!recordValue(t.pointee()))
         fail(name, "field '" + name.text + "' cannot be constructed; write " + typeName(t.pointee()) + "* " +
@@ -2502,19 +2515,19 @@ class Parser {
       initializer->token = name;
       initializer->token.text = t.record;
       initializer->castType = t.pointee();
-      expect("(");
+      expect(Tok::LeftParen);
       initializer->args = callArguments();
       t.role = Type::Owner;
-    } else if (accept("::")) {
+    } else if (accept(Tok::ColonColon)) {
       // `Item* Child :: null` is an owning field that starts empty.
       if (t.depth != 1 || !heapValue(t.pointee()))
         fail(name, "an owning field needs a typed heap pointer");
 
       t.role = Type::Owner;
 
-      if (!accept("null")) initializer = expression();
+      if (!accept(Tok::Null)) initializer = expression();
     } else {
-      if (accept("=")) initializer = expression();
+      if (accept(Tok::Assign)) initializer = expression();
       // A pointer to a container is a tracked alias. void* and pointers
       // to scalars stay raw, in the container's C layout.
       if (t.depth == 1 && recordValue(t.pointee())) t.role = Type::Alias;
@@ -2539,7 +2552,7 @@ class Parser {
   }
   // One instance body. Members accumulate across the chain's instance bodies.
   void endMember() {
-    if (!at("}") && !at("\n")) fail(peek(), "expected member terminator");
+    if (!at(Tok::RightBrace) && !at(Tok::Newline)) fail(peek(), "expected member terminator");
 
     lines();
   }
@@ -2549,16 +2562,16 @@ class Parser {
     const auto &tag = record.name;
     const auto enclosing = scope;
     scope = tag.text;
-    expect("{");
+    expect(Tok::LeftBrace);
     lines();
 
-    while (!accept("}")) {
+    while (!accept(Tok::RightBrace)) {
       if (macroDeclaration()) {
         skipMacroDeclaration();
         continue;
       }
 
-      if (at("this") && punctuation(tokens.at(pos + 1), "{")) {
+      if (at(Tok::This) && punctuation(tokens.at(pos + 1), Tok::LeftBrace)) {
         markupBlock(program, record, members, bare);
         endMember();
         continue;
@@ -2574,7 +2587,7 @@ class Parser {
       const bool isProtected = accessModifier();
 
       // ~Name() declares the container's destructor.
-      if (at("~")) {
+      if (at(Tok::Tilde)) {
         destructorDeclaration(program, members, bare, tag, tags, tagged, isProtected, modifier);
         endMember();
         continue;
@@ -2586,16 +2599,16 @@ class Parser {
 
       // Name(...) declares a constructor, keyed by its parameter types;
       // -Name(...) declares a partial constructor.
-      if (name.text == bare && at("(")) {
+      if (name.text == bare && at(Tok::LeftParen)) {
         constructorDeclaration(program, members, tag, name, typed, tags, tagged, isProtected);
         endMember();
         continue;
       }
 
       if (!members.insert(name.text).second) fail(name, "duplicate container member");
-      if (name.text == "this") fail(name, "this is reserved for the receiver");
+      if (name.text == Tok::This) fail(name, "this is reserved for the receiver");
 
-      if (at("(") && !(typed && owningFieldAhead(t))) {
+      if (at(Tok::LeftParen) && !(typed && owningFieldAhead(t))) {
         if (scoped) fail(*scoped, "a scope mark applies to a field or a loop, not a method");
 
         name.text = methodKey(tag.text, name.text);
@@ -2617,7 +2630,7 @@ class Parser {
     if (!at("T")) return false;
 
     const auto &next = tokens.at(pos + 1);
-    return !next.string && next.text == "{" && next.source == peek().source && next.line == peek().line &&
+    return !next.string && next.text == Tok::LeftBrace && next.source == peek().source && next.line == peek().line &&
            next.column == peek().column + 1;
   }
   // Each member is a test: `Name() { ... }`. Tests are static members of their
@@ -2626,10 +2639,10 @@ class Parser {
     pop();
     const auto enclosing = scope;
     scope = container;
-    expect("{");
+    expect(Tok::LeftBrace);
     lines();
 
-    while (!accept("}")) {
+    while (!accept(Tok::RightBrace)) {
       if (macroDeclaration()) {
         skipMacroDeclaration();
         continue;
@@ -2642,7 +2655,7 @@ class Parser {
 
       auto name = identifier();
 
-      if (!at("(")) fail(name, "a T{ } block holds only tests, written Name() { ... }");
+      if (!at(Tok::LeftParen)) fail(name, "a T{ } block holds only tests, written Name() { ... }");
 
       auto key = name;
       key.text = container + ".$test$" + name.text;
@@ -2654,7 +2667,7 @@ class Parser {
 
       program.tests.push_back(std::move(test));
 
-      if (!at("}") && !at("\n")) fail(peek(), "expected member terminator");
+      if (!at(Tok::RightBrace) && !at(Tok::Newline)) fail(peek(), "expected member terminator");
 
       lines();
     }
@@ -2663,11 +2676,11 @@ class Parser {
   }
   // `#{` starts a static body.
   bool staticBody() const {
-    return at("#") && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == "{";
+    return at(Tok::Hash) && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == Tok::LeftBrace;
   }
   // `@{` starts a getter block and `={` a setter block.
   bool accessorBody() const {
-    return (at("@") || at("=")) && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == "{";
+    return (at(Tok::At) || at(Tok::Assign)) && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == Tok::LeftBrace;
   }
   // A getter block, `@{ Age: Years }`, or a setter block, `={ Age: Years =
   // value }`. Each entry declares one accessor of a property: an optional
@@ -2675,13 +2688,13 @@ class Parser {
   // `{ ... }` body. A setter reads the assigned value as `value`. Accessors
   // are instance methods named get-Name and set-Name.
   void accessorBlock(Program &program, const std::string &record, std::set<std::string> &members) {
-    const bool getter = pop().text == "@";
+    const bool getter = pop().text == Tok::At;
     const auto enclosing = scope;
     scope = record;
-    expect("{");
+    expect(Tok::LeftBrace);
     lines();
 
-    while (!accept("}")) {
+    while (!accept(Tok::RightBrace)) {
       const bool isProtected = accessModifier();
       const bool typed = declarationType();
       const Type t = typed ? type() : Type(Type::Void);
@@ -2690,12 +2703,12 @@ class Parser {
 
       auto name = identifier();
 
-      if (name.text == "this") fail(name, "this is reserved for the receiver");
+      if (name.text == Tok::This) fail(name, "this is reserved for the receiver");
 
-      expect(":");
+      expect(Tok::Colon);
 
       // A `{ ... }` body may start on the next line.
-      if (const auto saved = pos; (lines(), !at("{"))) pos = saved;
+      if (const auto saved = pos; (lines(), !at(Tok::LeftBrace))) pos = saved;
 
       Function f{name, getter ? t : Type(Type::Void), {}, {}, true, {}};
       f.name.text = getter ? getterKey(record, name.text) : setterKey(record, name.text);
@@ -2713,7 +2726,7 @@ class Parser {
       f.params.push_back({receiver, self, true});
 
       if (getter) {
-        if (at("{")) {
+        if (at(Tok::LeftBrace)) {
           if (!typed)
             fail(peek(), "a getter with a block body needs a type, as in int " + name.text + ": { ... }");
 
@@ -2730,13 +2743,13 @@ class Parser {
         value.text = "value";
         f.params.push_back({value, t, false});
 
-        if (at("{")) f.body = block();
+        if (at(Tok::LeftBrace)) f.body = block();
         else f.body.push_back(statement());
       }
 
       program.push_back(std::move(f));
 
-      if (!accept(",") && !at("}") && !at("\n")) fail(peek(), "expected newline, ',' or '}' after a property accessor");
+      if (!accept(Tok::Comma) && !at(Tok::RightBrace) && !at(Tok::Newline)) fail(peek(), "expected newline, ',' or '}' after a property accessor");
 
       lines();
     }
@@ -2758,16 +2771,16 @@ class Parser {
     for (bool first = true;; first = false) {
       if (!first) {
         auto saved = pos;
-        accept("\n");
+        accept(Tok::Newline);
 
-        if (at("\n")) {
+        if (at(Tok::Newline)) {
           lines();
 
-          if (at("{") || staticBody() || accessorBody() || testBody())
+          if (at(Tok::LeftBrace) || staticBody() || accessorBody() || testBody())
             fail(peek(), "chained container bodies must be adjacent, without a blank line");
         }
 
-        if (!at("{") && !staticBody() && !accessorBody() && !testBody()) {
+        if (!at(Tok::LeftBrace) && !staticBody() && !accessorBody() && !testBody()) {
           pos = saved;
           break;
         }
@@ -2778,7 +2791,7 @@ class Parser {
         continue;
       }
 
-      if (accept("#")) {
+      if (accept(Tok::Hash)) {
         declarations(program, prefix + tag.text + ".", true, true);
         continue;
       }
@@ -2796,7 +2809,7 @@ class Parser {
     else if (!record.parents.empty())
       fail(record.parents.front(), "a parent list requires an instance body");
 
-    if (!at("<eof>") && !at("\n") && !(nested && at("}")))
+    if (!at(Tok::Eof) && !at(Tok::Newline) && !(nested && at(Tok::RightBrace)))
       fail(peek(), "expected newline after container");
 
     lines();
@@ -2806,32 +2819,32 @@ class Parser {
   // or a parent list (`Name : Parent, Other {`). Whichever of '#' or '{'
   // comes first decides.
   bool parentList() const {
-    if (!at(":")) return false;
+    if (!at(Tok::Colon)) return false;
 
     for (size_t i = pos + 1; i < tokens.size(); ++i) {
       const auto &t = tokens[i];
 
       if (t.string) continue;
-      if (t.text == "{") return true;
+      if (t.text == Tok::LeftBrace) return true;
 
       // An enum continues with `#@{`; a parent list may start with a static body.
-      if (t.text == "#")
-        return i + 1 < tokens.size() && !tokens[i + 1].string && tokens[i + 1].text == "{";
+      if (t.text == Tok::Hash)
+        return i + 1 < tokens.size() && !tokens[i + 1].string && tokens[i + 1].text == Tok::LeftBrace;
 
-      if (t.text == "<eof>") return false;
+      if (t.text == Tok::Eof) return false;
     }
 
     return false;
   }
   bool enumBlock() const {
-    return at("#") && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == "@";
+    return at(Tok::Hash) && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == Tok::At;
   }
   // Name [: type] #@{ Member[: literal], ... } with members separated by
   // commas or newlines. The type may be omitted on an extension fragment.
   void enumFragment(Program &program, Token tag) {
     EnumFragment fragment{tag, Type::Void, {}};
 
-    if (accept(":")) {
+    if (accept(Tok::Colon)) {
       const auto underlying = peek();
       fragment.type = type();
       if (fragment.type == Type::Void) fail(underlying, "enum underlying type cannot be void");
@@ -2843,19 +2856,19 @@ class Parser {
     pop();
     pop();
     lines();
-    expect("{");
+    expect(Tok::LeftBrace);
     lines();
 
-    while (!accept("}")) {
+    while (!accept(Tok::RightBrace)) {
       EnumMember member{identifier(), nullptr};
 
-      if (accept(":")) member.value = expression();
+      if (accept(Tok::Colon)) member.value = expression();
 
       fragment.members.push_back(std::move(member));
 
-      if (!at("}") && !at("\n") && !at(",")) fail(peek(), "expected ',' or newline between enum members");
+      if (!at(Tok::RightBrace) && !at(Tok::Newline) && !at(Tok::Comma)) fail(peek(), "expected ',' or newline between enum members");
 
-      accept(",");
+      accept(Tok::Comma);
       lines();
     }
 
@@ -2872,22 +2885,22 @@ class Parser {
   // A function definition ahead: `[type] Name(...)` and then its block. The
   // block is the only difference between a definition and a call.
   bool functionAhead() {
-    auto punct = [&](size_t k, const char *text) { return !tokens[k].string && tokens[k].text == text; };
+    auto punct = [&](size_t k, auto text) { return !tokens[k].string && tokens[k].text == text; };
     size_t k = pos;
 
     // A func result's own signature is not the parameter list.
-    if (at("func")) {
+    if (at(Tok::Func)) {
       const auto saved = pos;
       ++pos;
       const bool signature = funcSignatureAhead();
       pos = saved;
 
       if (signature) {
-        while (!punct(k, "(") && !punct(k, "<eof>") && !punct(k, "\n")) ++k;
+        while (!punct(k, Tok::LeftParen) && !punct(k, Tok::Eof) && !punct(k, Tok::Newline)) ++k;
 
-        for (int depth = 0; !punct(k, "<eof>"); ++k) {
-          if (punct(k, "(")) ++depth;
-          else if (punct(k, ")") && --depth == 0) {
+        for (int depth = 0; !punct(k, Tok::Eof); ++k) {
+          if (punct(k, Tok::LeftParen)) ++depth;
+          else if (punct(k, Tok::RightParen) && --depth == 0) {
             ++k;
             break;
           }
@@ -2895,16 +2908,16 @@ class Parser {
       }
     }
 
-    for (; !punct(k, "("); ++k)
-      if (tokens[k].string || punct(k, "<eof>") || punct(k, "\n") || punct(k, "=") || punct(k, ":") || punct(k, "::"))
+    for (; !punct(k, Tok::LeftParen); ++k)
+      if (tokens[k].string || punct(k, Tok::Eof) || punct(k, Tok::Newline) || punct(k, Tok::Assign) || punct(k, Tok::Colon) || punct(k, Tok::ColonColon))
         return false;
 
     if (!skipToCloseParen(k)) return false;
 
-    for (++k; punct(k, "\n"); ++k) {
+    for (++k; punct(k, Tok::Newline); ++k) {
     }
 
-    return punct(k, "{");
+    return punct(k, Tok::LeftBrace);
   }
   bool containerAhead() {
     // A static-only container is not a type name, but still has a body.
@@ -2912,28 +2925,28 @@ class Parser {
     const auto saved = pos;
     ++pos;
     lines();
-    const bool found = at("{") || staticBody() || (named && (parentList() || at(":") || enumBlock()));
+    const bool found = at(Tok::LeftBrace) || staticBody() || (named && (parentList() || at(Tok::Colon) || enumBlock()));
     pos = saved;
     return found;
   }
   // Anything at file scope that is not a declaration is a statement. Tokens
   // that open no statement stay on the declaration path and its diagnostics.
   bool fileStatement() {
-    if (at("extern") || at("{") || at("}") || at("+") || at("-")) return false;
+    if (at(Tok::Extern) || at(Tok::LeftBrace) || at(Tok::RightBrace) || at(Tok::Plus) || at(Tok::Minus)) return false;
 
-    if (at("#")) {
+    if (at(Tok::Hash)) {
       const auto &next = tokens.at(pos + 1);
-      return next.string || (next.text != "{" && next.text != "@");
+      return next.string || (next.text != Tok::LeftBrace && next.text != Tok::At);
     }
 
-    if (at("if") || at("for") || at("while") || at("do") || at("return") || at("break") || at("continue") ||
-        at("Switch"))
+    if (at(Tok::If) || at(Tok::For) || at(Tok::While) || at(Tok::Do) || at(Tok::Return) || at(Tok::Break) || at(Tok::Continue) ||
+        at(Tok::Switch))
       return true;
 
     return !functionAhead() && !containerAhead();
   }
   bool macroDeclaration() const {
-    return at("macro") && word(tokens.at(pos + 1)) && punctuation(tokens.at(pos + 2), "(");
+    return at(Tok::Macro) && word(tokens.at(pos + 1)) && punctuation(tokens.at(pos + 2), Tok::LeftParen);
   }
   // collectMacros already captured it; a macro's body is checked only when used.
   void skipMacroDeclaration() {
@@ -2941,8 +2954,8 @@ class Parser {
     pos += 2;
 
     for (;; ++pos) {
-      if (at("(")) ++depth;
-      else if (at(")") && --depth == 0) break;
+      if (at(Tok::LeftParen)) ++depth;
+      else if (at(Tok::RightParen) && --depth == 0) break;
     }
 
     ++pos;
@@ -2950,13 +2963,13 @@ class Parser {
     depth = 0;
 
     for (;; ++pos) {
-      if (at("{")) ++depth;
-      else if (at("}") && --depth == 0) break;
+      if (at(Tok::LeftBrace)) ++depth;
+      else if (at(Tok::RightBrace) && --depth == 0) break;
     }
 
     ++pos;
 
-    if (!at("\n") && !at("}") && !at("<eof>")) fail(peek(), "expected newline after macro");
+    if (!at(Tok::Newline) && !at(Tok::RightBrace) && !at(Tok::Eof)) fail(peek(), "expected newline after macro");
 
     lines();
   }
@@ -2987,34 +3000,34 @@ class Parser {
     auto tag = identifier();
     lines();
 
-    if (parentList() || at("{") || staticBody()) {
+    if (parentList() || at(Tok::LeftBrace) || staticBody()) {
       if (attributeEnum) fail(tag, "[args] marks an enum, not a container");
       if (modified) fail(modifier, "access modifiers on nested containers are not supported");
 
       std::vector<Token> parents;
 
-      if (accept(":")) {
+      if (accept(Tok::Colon)) {
         do {
           lines();
           parents.push_back(parentName());
           lines();
-        } while (accept(","));
+        } while (accept(Tok::Comma));
       }
 
       containerChain(functions, tag, std::move(parents), prefix, nested);
       return true;
     }
 
-    if (attributeEnum && !at(":") && !enumBlock()) fail(tag, "[args] marks an enum, not a container");
+    if (attributeEnum && !at(Tok::Colon) && !enumBlock()) fail(tag, "[args] marks an enum, not a container");
 
-    if (at(":") || enumBlock()) {
+    if (at(Tok::Colon) || enumBlock()) {
       // An enum in a static body is named by its enclosing containers, as
       // in Outer.Day; inside Outer it is simply Day.
       tag.text = prefix + tag.text;
       enumFragment(functions, tag);
       functions.enums.back().attribute = attributeEnum;
 
-      if (!at("<eof>") && !at("\n") && !(nested && at("}"))) fail(peek(), "expected newline after enum");
+      if (!at(Tok::Eof) && !at(Tok::Newline) && !(nested && at(Tok::RightBrace))) fail(peek(), "expected newline after enum");
 
       lines();
       return true;
@@ -3030,7 +3043,7 @@ class Parser {
     StaticField field{name, result, constant, isProtected, nullptr};
     field.usings = usings;
 
-    if (accept("="))
+    if (accept(Tok::Assign))
       field.initializer = expression();
     else if (constant)
       fail(peek(), "constant '" + name.text + "' requires an initializer, as in #int Max = 10");
@@ -3043,14 +3056,14 @@ class Parser {
 
     functions.statics.push_back(std::move(field));
 
-    if (!at("\n") && !at("}")) fail(peek(), "expected newline after static field");
+    if (!at(Tok::Newline) && !at(Tok::RightBrace)) fail(peek(), "expected newline after static field");
 
     lines();
   }
   void fileStatement(std::vector<std::unique_ptr<Stmt>> &statements) {
     statements.push_back(statement());
 
-    if (!at("\n")) fail(peek(), "expected newline between statements");
+    if (!at(Tok::Newline)) fail(peek(), "expected newline between statements");
 
     lines();
   }
@@ -3061,17 +3074,17 @@ class Parser {
     const auto outer = usings;
     scope = prefix.empty() ? "" : prefix.substr(0, prefix.size() - 1);
 
-    if (braced) expect("{");
+    if (braced) expect(Tok::LeftBrace);
 
     lines();
     usingDirectives();
     std::vector<std::unique_ptr<Stmt>> statements;
 
-    while (!at("<eof>") && !(nested && at("}"))) {
+    while (!at(Tok::Eof) && !(nested && at(Tok::RightBrace))) {
       if (testBody())
         fail(peek(), "a T{ } test block must directly follow a container's body, with no blank line between them");
 
-      if (at("using"))
+      if (at(Tok::Using))
         fail(peek(), "using directives must come before the other declarations in their scope");
 
       if (macroDeclaration()) {
@@ -3093,7 +3106,7 @@ class Parser {
       if (scopeMarkAhead()) scoped = scopeMark();
 
       // `[args]` marks the enum that follows as attribute data.
-      const bool attributeEnum = at("[") && attributeEnumMark(nested);
+      const bool attributeEnum = at(Tok::LeftBracket) && attributeEnumMark(nested);
 
       if (!nested && !attributeEnum && fileStatement()) {
         fileStatement(statements);
@@ -3101,12 +3114,12 @@ class Parser {
       }
 
       const auto modifier = peek();
-      const bool modified = at("+") || at("-");
+      const bool modified = at(Tok::Plus) || at(Tok::Minus);
 
       if (modified && !nested) fail(modifier, "access modifiers apply only to container members");
 
       const bool isProtected = accessModifier();
-      bool external = accept("extern");
+      bool external = accept(Tok::Extern);
 
       if (external) {
         if (!peek().string || peek().character || peek().text != "C")
@@ -3119,7 +3132,7 @@ class Parser {
 
       // In a static block, `#int Max = 10` declares a constant static field.
       const auto constantToken = peek();
-      const bool constant = nested && !external && accept("#");
+      const bool constant = nested && !external && accept(Tok::Hash);
 
       if (constant && !declarationType())
         fail(peek(), "constant static field requires an explicit type");
@@ -3127,15 +3140,15 @@ class Parser {
       bool typed = declarationType();
       Type result = typed ? type() : Type::Void;
 
-      if (at("}") && !nested) fail(peek(), "unmatched '}': no block is open here");
+      if (at(Tok::RightBrace) && !nested) fail(peek(), "unmatched '}': no block is open here");
 
       Token name = identifier();
 
       // `itn F() { ... }`: the word before the function name is not a type.
-      if (!typed && !external && isWord(peek()) && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == "(")
+      if (!typed && !external && isWord(peek()) && !tokens.at(pos + 1).string && tokens.at(pos + 1).text == Tok::LeftParen)
         unknownType(name);
 
-      if (nested && !external && typed && !at("(")) {
+      if (nested && !external && typed && !at(Tok::LeftParen)) {
         staticField(functions, name, result, prefix, constant, isProtected, scoped);
         continue;
       }
@@ -3143,13 +3156,13 @@ class Parser {
       if (scoped) fail(*scoped, "a scope mark applies to a field or a loop");
       if (constant) fail(constantToken, "'#' before a member declares a constant static field");
 
-      if (!external && !typed && (at(":") || enumBlock()))
+      if (!external && !typed && (at(Tok::Colon) || enumBlock()))
         fail(name, "enum declarations must be at file scope");
 
-      if (!external && !typed && !at("(")) {
+      if (!external && !typed && !at(Tok::LeftParen)) {
         lines();
 
-        if (staticBody() || at("{")) {
+        if (staticBody() || at(Tok::LeftBrace)) {
           if (modified)
             fail(modifier, "access modifiers on nested containers are not supported");
 
@@ -3165,13 +3178,13 @@ class Parser {
 
       if (!nested && functions.back().name.text == "Main") entryParameter(functions.back());
 
-      if (!at("<eof>") && !at("\n") && !(nested && at("}")))
+      if (!at(Tok::Eof) && !at(Tok::Newline) && !(nested && at(Tok::RightBrace)))
         fail(peek(), "expected newline between functions");
 
       lines();
     }
 
-    if (braced) expect("}");
+    if (braced) expect(Tok::RightBrace);
     if (!statements.empty()) fileScript(functions, std::move(statements));
 
     scope = enclosing;
@@ -3180,16 +3193,16 @@ class Parser {
   // `using Name.Space` lines at the top of a file or static body. The target
   // resolves like a type path, from the innermost container outward.
   void usingDirectives() {
-    if (!at("using")) return;
+    if (!at(Tok::Using)) return;
 
     auto visible = *usings;
 
-    while (at("using")) {
+    while (at(Tok::Using)) {
       const auto keyword = pop();
       auto start = peek();
       std::string path = identifier().text;
 
-      while (accept(".")) path += "." + identifier().text;
+      while (accept(Tok::Dot)) path += "." + identifier().text;
 
       start.text = path;
       std::string target;
@@ -3217,7 +3230,7 @@ class Parser {
       visible.push_back({start, scope, target});
       (void)keyword;
 
-      if (!at("\n") && !at("<eof>") && !at("}")) fail(peek(), "expected newline after using directive");
+      if (!at(Tok::Newline) && !at(Tok::Eof) && !at(Tok::RightBrace)) fail(peek(), "expected newline after using directive");
 
       lines();
     }
@@ -3263,6 +3276,9 @@ Program parse(std::vector<Token> tokens) {
   return parse(std::move(tokens), names, macros);
 }
 namespace {
+bool punctuation(const std::vector<Token> &tokens, size_t k, Tok kind) {
+  return k < tokens.size() && !tokens[k].string && tokens[k].text == kind;
+}
 bool punctuation(const std::vector<Token> &tokens, size_t k, const char *text) {
   return k < tokens.size() && !tokens[k].string && tokens[k].text == text;
 }
@@ -3273,8 +3289,8 @@ size_t closingBrace(const std::vector<Token> &tokens, size_t open) {
   for (size_t k = open; k < tokens.size(); ++k) {
     if (tokens[k].string) continue;
 
-    if (tokens[k].text == "{") ++nesting;
-    else if (tokens[k].text == "}" && --nesting == 0) return k;
+    if (tokens[k].text == Tok::LeftBrace) ++nesting;
+    else if (tokens[k].text == Tok::RightBrace && --nesting == 0) return k;
   }
 
   return tokens.size();
@@ -3282,7 +3298,7 @@ size_t closingBrace(const std::vector<Token> &tokens, size_t open) {
 // Whether [k, end) starts with comma-separated dotted names leading to a
 // body: a parent list, or an enum's underlying type.
 bool namesBeforeBody(const std::vector<Token> &tokens, size_t k, size_t end) {
-  auto skipLines = [&] { while (k < end && punctuation(tokens, k, "\n")) ++k; };
+  auto skipLines = [&] { while (k < end && punctuation(tokens, k, Tok::Newline)) ++k; };
   auto word = [&] {
     return k < end && isWord(tokens[k]);
   };
@@ -3292,7 +3308,7 @@ bool namesBeforeBody(const std::vector<Token> &tokens, size_t k, size_t end) {
 
     if (!word()) return false;
 
-    for (++k; punctuation(tokens, k, ".") ; ++k) {
+    for (++k; punctuation(tokens, k, Tok::Dot) ; ++k) {
       ++k;
 
       if (!word()) return false;
@@ -3300,8 +3316,8 @@ bool namesBeforeBody(const std::vector<Token> &tokens, size_t k, size_t end) {
 
     skipLines();
 
-    if (k < end && (punctuation(tokens, k, "{") || punctuation(tokens, k, "#"))) return true;
-    if (!punctuation(tokens, k, ",")) return false;
+    if (k < end && (punctuation(tokens, k, Tok::LeftBrace) || punctuation(tokens, k, Tok::Hash))) return true;
+    if (!punctuation(tokens, k, Tok::Comma)) return false;
 
     ++k;
   }
@@ -3318,20 +3334,20 @@ size_t collectMacro(const std::vector<Token> &tokens, size_t i, const std::strin
   std::set<std::string> seen;
 
   for (;;) {
-    while (punctuation(tokens, k, "\n")) ++k;
-    if (punctuation(tokens, k, ")")) break;
+    while (punctuation(tokens, k, Tok::Newline)) ++k;
+    if (punctuation(tokens, k, Tok::RightParen)) break;
 
     MacroParameter parameter;
     int depth = 0;
 
     for (;; ++k) {
-      if (k >= tokens.size() || punctuation(tokens, k, "<eof>")) fail(macro.name, "expected ')' after macro parameters");
-      if (depth == 0 && (punctuation(tokens, k, ",") || punctuation(tokens, k, ")"))) break;
+      if (k >= tokens.size() || punctuation(tokens, k, Tok::Eof)) fail(macro.name, "expected ')' after macro parameters");
+      if (depth == 0 && (punctuation(tokens, k, Tok::Comma) || punctuation(tokens, k, Tok::RightParen))) break;
 
-      if (punctuation(tokens, k, "(") || punctuation(tokens, k, "[")) ++depth;
-      else if (punctuation(tokens, k, ")") || punctuation(tokens, k, "]")) --depth;
+      if (punctuation(tokens, k, Tok::LeftParen) || punctuation(tokens, k, Tok::LeftBracket)) ++depth;
+      else if (punctuation(tokens, k, Tok::RightParen) || punctuation(tokens, k, Tok::RightBracket)) --depth;
 
-      if (!punctuation(tokens, k, "\n")) parameter.type.push_back(tokens[k]);
+      if (!punctuation(tokens, k, Tok::Newline)) parameter.type.push_back(tokens[k]);
     }
 
     if (parameter.type.empty()) fail(tokens[k], "expected a macro parameter");
@@ -3342,7 +3358,7 @@ size_t collectMacro(const std::vector<Token> &tokens, size_t i, const std::strin
     if (!isWord(k - 1) || parameter.type.empty())
       fail(parameter.name, "a macro parameter requires an explicit type and a name, as in int count");
 
-    if (!parameter.type.back().string && parameter.type.back().text == "&")
+    if (!parameter.type.back().string && parameter.type.back().text == Tok::Ampersand)
       fail(parameter.name, "macro parameter '" + parameter.name.text + "' cannot be a reference: arguments are bound "
                            "once by value; a macro body can name the caller's variable directly");
 
@@ -3351,13 +3367,13 @@ size_t collectMacro(const std::vector<Token> &tokens, size_t i, const std::strin
 
     macro.parameters.push_back(std::move(parameter));
 
-    if (punctuation(tokens, k, ",")) ++k;
+    if (punctuation(tokens, k, Tok::Comma)) ++k;
   }
 
   ++k;
 
-  while (punctuation(tokens, k, "\n")) ++k;
-  if (!punctuation(tokens, k, "{")) fail(macro.name, "macro '" + macro.name.text + "' requires a { ... } body");
+  while (punctuation(tokens, k, Tok::Newline)) ++k;
+  if (!punctuation(tokens, k, Tok::LeftBrace)) fail(macro.name, "macro '" + macro.name.text + "' requires a { ... } body");
 
   const size_t close = closingBrace(tokens, k);
 
@@ -3386,25 +3402,25 @@ void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
     if (t.string) continue;
 
     // Function bodies and other blocks declare no types.
-    if (t.text == "{") {
+    if (t.text == Tok::LeftBrace) {
       i = closingBrace(tokens, i);
       continue;
     }
 
     if (!isIdentifierStart(t.text[0])) continue;
 
-    if (t.text == "macro" && i + 2 < end && !tokens[i + 1].string && !tokens[i + 1].text.empty() &&
+    if (t.text == Tok::Macro && i + 2 < end && !tokens[i + 1].string && !tokens[i + 1].text.empty() &&
         (std::isalpha(static_cast<unsigned char>(tokens[i + 1].text[0])) || tokens[i + 1].text[0] == '_') &&
-        punctuation(tokens, i + 2, "(")) {
+        punctuation(tokens, i + 2, Tok::LeftParen)) {
       i = collectMacro(tokens, i, prefix, macros);
       continue;
     }
 
     // A file-scope statement declares no types, but its header can look as
     // if it does: `if ready {` and `for x : items {`. Skip the whole line.
-    if (t.text == "if" || t.text == "else" || t.text == "for" || t.text == "while" || t.text == "do") {
-      while (i < end && !punctuation(tokens, i, "\n")) {
-        if (punctuation(tokens, i, "{")) i = closingBrace(tokens, i);
+    if (t.text == Tok::If || t.text == Tok::Else || t.text == Tok::For || t.text == Tok::While || t.text == Tok::Do) {
+      while (i < end && !punctuation(tokens, i, Tok::Newline)) {
+        if (punctuation(tokens, i, Tok::LeftBrace)) i = closingBrace(tokens, i);
 
         ++i;
       }
@@ -3414,10 +3430,10 @@ void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
 
     size_t next = i + 1;
 
-    while (punctuation(tokens, next, "\n")) ++next;
+    while (punctuation(tokens, next, Tok::Newline)) ++next;
     if (next >= end) continue;
     // `x : 1` is a statement; a declaration's ':' starts a list of names.
-    if (punctuation(tokens, next, ":") && !namesBeforeBody(tokens, next + 1, end)) continue;
+    if (punctuation(tokens, next, Tok::Colon) && !namesBeforeBody(tokens, next + 1, end)) continue;
 
     size_t chain = next;
 
@@ -3425,16 +3441,16 @@ void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
     // parent list. A parent list reaches '{'
     // or '#{' before any other '#'. Skip the list or type so its words are
     // never taken as declared names.
-    if (punctuation(tokens, next, ":") ||
-        (punctuation(tokens, next, "#") && punctuation(tokens, next + 1, "@"))) {
+    if (punctuation(tokens, next, Tok::Colon) ||
+        (punctuation(tokens, next, Tok::Hash) && punctuation(tokens, next + 1, Tok::At))) {
       size_t stop = next;
 
-      while (stop < end && (tokens[stop].string || (tokens[stop].text != "#" && tokens[stop].text != "{")))
+      while (stop < end && (tokens[stop].string || (tokens[stop].text != Tok::Hash && tokens[stop].text != Tok::LeftBrace)))
         ++stop;
 
-      const bool parents = punctuation(tokens, next, ":") && stop < end &&
-                           (punctuation(tokens, stop, "{") ||
-                            (punctuation(tokens, stop, "#") && punctuation(tokens, stop + 1, "{")));
+      const bool parents = punctuation(tokens, next, Tok::Colon) && stop < end &&
+                           (punctuation(tokens, stop, Tok::LeftBrace) ||
+                            (punctuation(tokens, stop, Tok::Hash) && punctuation(tokens, stop + 1, Tok::LeftBrace)));
 
       if (!parents) {
         names.insert(prefix + t.text);
@@ -3454,7 +3470,7 @@ void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
       size_t open;
 
       // A chained T{ } block declares no type; only macros matter inside it.
-      if (last != std::string::npos && punctuation(tokens, k, "T") && punctuation(tokens, k + 1, "{") &&
+      if (last != std::string::npos && punctuation(tokens, k, "T") && punctuation(tokens, k + 1, Tok::LeftBrace) &&
           tokens[k + 1].line == tokens[k].line && tokens[k + 1].column == tokens[k].column + 1) {
         const size_t close = closingBrace(tokens, k + 1);
 
@@ -3463,13 +3479,13 @@ void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
         last = close;
         k = close + 1;
 
-        if (punctuation(tokens, k, "\n")) ++k;
+        if (punctuation(tokens, k, Tok::Newline)) ++k;
 
         continue;
       }
 
-      if (punctuation(tokens, k, "{")) open = k;
-      else if (punctuation(tokens, k, "#") && punctuation(tokens, k + 1, "{")) open = k + 1;
+      if (punctuation(tokens, k, Tok::LeftBrace)) open = k;
+      else if (punctuation(tokens, k, Tok::Hash) && punctuation(tokens, k + 1, Tok::LeftBrace)) open = k + 1;
       else break;
 
       const size_t close = closingBrace(tokens, open);
@@ -3487,7 +3503,7 @@ void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
       last = close;
       k = close + 1;
 
-      if (punctuation(tokens, k, "\n")) ++k;
+      if (punctuation(tokens, k, Tok::Newline)) ++k;
     }
 
     if (last == std::string::npos) continue;

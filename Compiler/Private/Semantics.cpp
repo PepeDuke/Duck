@@ -656,7 +656,7 @@ class Analyzer {
 
     if (base.empty()) return "";
 
-    return base == "this" ? e.token.text : base + "." + e.token.text;
+    return base == "this" ? e.token.text.str() : base + "." + e.token.text;
   }
   static bool writesPath(const Expr *e, const std::string &path) {
     if (!e) return false;
@@ -694,7 +694,7 @@ class Analyzer {
 
     const auto payload = destination.type.pointee();
     const bool literal = source.kind == "int" || source.kind == "real" ||
-                         (source.kind == "unary" && source.token.text == "-" && source.args[0]->kind == "int");
+                         (source.kind == "unary" && source.token.text == Tok::Minus && source.args[0]->kind == "int");
     ownerDestination = &source;
     const auto type = expression(source, (literal && numeric(payload)) || source.kind == "initializer"
                                              ? payload : Type(Type::Void));
@@ -1361,7 +1361,7 @@ class Analyzer {
 
     if (!collectionValue(type)) return Type::Void;
 
-    const auto &member = e.token.text;
+    const std::string &member = e.token.text;
 
     if (gridValue(type) && member != "Len")
       fail(e.token, typeName(type) + " has no member '" + member + "'; a grid has Len, the number of stored cells");
@@ -1594,7 +1594,7 @@ class Analyzer {
     if (e.kind == ".") {
       const auto &base = *e.args[0];
 
-      if (base.kind == "name" && base.token.text == "this") return "0:" + e.token.text; // Fields bind in scope 0.
+      if (base.kind == "name" && base.token.text == Tok::This) return "0:" + e.token.text; // Fields bind in scope 0.
 
       const auto prefix = placeKey(base);
       return prefix.empty() ? "" : prefix + "." + e.token.text;
@@ -1681,7 +1681,7 @@ class Analyzer {
   Type rangeEndpoints(const Expr &e, Type expected) {
     const auto &first = *e.args[0], &second = *e.args[1];
     auto literal = [](const Expr &x) {
-      return x.kind == "int" || (x.kind == "unary" && x.token.text == "-" && x.args[0]->kind == "int");
+      return x.kind == "int" || (x.kind == "unary" && x.token.text == Tok::Minus && x.args[0]->kind == "int");
     };
     auto integer = [](const Expr &x, const Type &type) {
       if (!integral(type)) fail(x.token, "a range needs integer endpoints, not " + typeName(type));
@@ -2071,7 +2071,7 @@ class Analyzer {
       if (read) requireInitialized(e.token);
     } else if (e.kind == "index") {
       if (indexLocation(e, read, local)) return local;
-    } else if (e.kind == "unary" && e.token.text == "*") {
+    } else if (e.kind == "unary" && e.token.text == Tok::Star) {
       auto ptr = expression(*e.args[0]);
 
       if (!ptr.depth || ptr == Type::Pointer) fail(e.token, "dereference requires a typed pointer");
@@ -2126,7 +2126,7 @@ class Analyzer {
     if (analysis.expressionTypes.at(&e).role != Type::Raw) return true;
     if (analysis.staticFields.count(&e)) return false; // What is left of it is a container name, not storage.
 
-    if (e.kind == "." || e.kind == "index" || (e.kind == "unary" && e.token.text == "*"))
+    if (e.kind == "." || e.kind == "index" || (e.kind == "unary" && e.token.text == Tok::Star))
       return heapStorage(*e.args[0]);
 
     return false;
@@ -2658,7 +2658,7 @@ class Analyzer {
     return e.castType;
   }
   Type checkDecimalLiteral(const Expr &e, const Type &expected) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
     // Exact decimal parsing: 0.1 is one tenth, not the nearest binary float.
     const auto marker = op.find_first_of("eE");
     const auto mantissa = op.substr(0, marker);
@@ -2687,7 +2687,7 @@ class Analyzer {
     return expected;
   }
   Type checkFloatingLiteral(const Expr &e, const Type &expected) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
     Type type = expected == Type::Double ? Type::Double : Type::Float;
     double value = 0;
 
@@ -2698,8 +2698,8 @@ class Analyzer {
     return type;
   }
   Type checkIntegerLiteral(const Expr &e, const Type &expected, bool negativeLiteral) {
-    const auto &op = e.token.text;
-    const auto &digits = negativeLiteral ? e.args[0]->token.text : op;
+    const std::string &op = e.token.text;
+    const std::string &digits = negativeLiteral ? e.args[0]->token.text.str() : op;
     const auto base = integerLiteralBase(digits);
     const auto magnitude = base == 10 ? digits : digits.substr(2);
 
@@ -2810,7 +2810,7 @@ class Analyzer {
     return type;
   }
   Type checkMutationResult(const Expr &e) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
     // (s += x) gives the inserted index; (s--) and (s -= [i]) give the
     // removed element.
     const auto &target = *e.args[0];
@@ -2877,7 +2877,7 @@ class Analyzer {
     return local.type.pointerTo();
   }
   Type checkCall(const Expr &e, const Type &expected) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
 
     // `Gun g(5)` and `Gun* p(5)` arrive with the constructed type resolved.
     if (nativeMath(e.castType)) return checkNativeConstruct(e);
@@ -2982,7 +2982,7 @@ class Analyzer {
     return signature.result;
   }
   static bool numberLiteral(const Expr &e) {
-    const auto &value = e.kind == "unary" && e.token.text == "-" ? *e.args[0] : e;
+    const auto &value = e.kind == "unary" && e.token.text == Tok::Minus ? *e.args[0] : e;
     return value.kind == "int" || value.kind == "real";
   }
   // The scalar a literal should be parsed as beside a native vector or matrix.
@@ -3237,7 +3237,7 @@ class Analyzer {
         {"Min", {2, Domain::Number}},   {"Max", {2, Domain::Number}},    {"Clamp", {3, Domain::Number}},
         {"Dot", {2, Domain::Vector}},   {"Length", {1, Domain::Vector}}, {"Distance", {2, Domain::Vector}},
         {"Normalize", {1, Domain::Vector}}, {"Cross", {2, Domain::Vector3}}};
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
     const auto found = functions.find(op.substr(5));
 
     if (found == functions.end()) fail(e.token, "the Math namespace has no function '" + op.substr(5) + "'");
@@ -3282,7 +3282,7 @@ class Analyzer {
   // Duck has no vector type: a vector is any container whose fields are
   // exactly X, Y and optionally Z and W, all of one floating type.
   Type checkMathVectors(const Expr &e, bool threeOnly) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
     static const std::vector<std::string> names{"X", "Y", "Z", "W"};
     const auto first = expression(*e.args[0]);
 
@@ -3317,7 +3317,7 @@ class Analyzer {
     return memberName(op) == "Cross" || memberName(op) == "Normalize" ? first : fields[0].type;
   }
   std::optional<Type> checkLocalCallee(const Expr &e) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
 
     if (!e.receiver && op.find('.') == std::string::npos)
       if (const auto *local = findLocal(e.token)) {
@@ -3359,7 +3359,7 @@ class Analyzer {
     return std::nullopt;
   }
   std::optional<Type> checkBuiltinCall(const Expr &e) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
 
     if (op == "Length" || op == "CodeUnitAt") {
       if (e.args.size() != (op == "Length" ? 1u : 2u))
@@ -3433,7 +3433,7 @@ class Analyzer {
     return std::nullopt;
   }
   std::optional<Type> checkInstanceCall(const Expr &e, Symbols::const_iterator &found) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
     const auto &base = *e.receiver;
     requireComplete(base);
     Type t;
@@ -3579,7 +3579,7 @@ class Analyzer {
     return result;
   }
   Type checkCollectionClear(const Expr &e, const Expr &base, const Type &t, bool constant) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
 
     // s.Clear() removes every element and frees the storage.
     if (memberName(op) != "Clear")
@@ -3648,7 +3648,7 @@ class Analyzer {
     return yes;
   }
   Type checkBinary(const Expr &e, const Type &expected, Type first) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
     const Type hint = binaryOperandHint(e, expected, first);
     auto second = decay(*e.args[1], expression(*e.args[1], hint));
 
@@ -3738,7 +3738,7 @@ class Analyzer {
     convert(tolerance, given, scalar);
   }
   Type binaryOperandHint(const Expr &e, const Type &expected, const Type &first) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
     Type hint = Type::Void;
 
     if (const auto shape = nativeMath(first)) return nativeLiteralHint(*e.args[1], shape);
@@ -3747,12 +3747,12 @@ class Analyzer {
     // Only beyond 64 bits can a literal need its operand's width to be representable.
     else if (customInteger(first) && integerWidth(first) > 64 && op != "<<" && op != ">>" &&
              (e.args[1]->kind == "int" ||
-              (e.args[1]->kind == "unary" && e.args[1]->token.text == "-" &&
+              (e.args[1]->kind == "unary" && e.args[1]->token.text == Tok::Minus &&
                e.args[1]->args[0]->kind == "int")))
       hint = first;
     else if (arbitraryNumber(first) && op != "<<" && op != ">>" &&
              (e.args[1]->kind == "int" || e.args[1]->kind == "real" ||
-              (e.args[1]->kind == "unary" && e.args[1]->token.text == "-" &&
+              (e.args[1]->kind == "unary" && e.args[1]->token.text == Tok::Minus &&
                (e.args[1]->args[0]->kind == "int" || e.args[1]->args[0]->kind == "real"))))
       hint = first; // Literals take big/tiny precision from the left operand.
     else if (textType(first) &&
@@ -3761,7 +3761,7 @@ class Analyzer {
     return hint;
   }
   Type checkArbitraryBinary(const Expr &e, const Type &first, const Type &second) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
     const auto type = arbitraryCommon(first, second);
 
     if (type == Type::Void)
@@ -3831,7 +3831,7 @@ class Analyzer {
       return type;
     }
 
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
 
     if (e.kind == "lambda") return lambdaExpression(e);
     if (e.kind == "duckCall" || e.kind == "duckCheck" || e.kind == "duckExists") return duckCall(e, expected);
@@ -4024,7 +4024,7 @@ class Analyzer {
   // float and double, Min is the lowest finite value, -Max.
   Type typeLimit(const Expr &e) {
     const auto type = e.castType;
-    const auto &member = e.token.text;
+    const std::string &member = e.token.text;
 
     if (!integral(type) && !floating(type))
       fail(e.token, "type '" + typeName(type) + "' has no Min or Max" +
@@ -4068,7 +4068,7 @@ class Analyzer {
   // bits into big, and real literals into tiny. Integer literals into tiny keep
   // integer arithmetic, so tiny x = 1 / 3 is 0, as for double.
   static bool leftLiteralAdopts(const Expr &e, Type expected) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
 
     if (e.kind != "binary" || e.args.empty() ||
         (op != "+" && op != "-" && op != "*" && op != "/" && op != "%"))
@@ -4076,7 +4076,7 @@ class Analyzer {
 
     const Expr *literal = e.args[0].get();
 
-    if (literal->kind == "unary" && literal->token.text == "-") literal = literal->args[0].get();
+    if (literal->kind == "unary" && literal->token.text == Tok::Minus) literal = literal->args[0].get();
 
     return (bigInteger(expected) && literal->kind == "int") ||
            (decimalValue(expected) && literal->kind == "real");
@@ -4084,7 +4084,7 @@ class Analyzer {
   // Calendar accessors are built-ins only when no user function or container
   // has the same name, so existing programs keep their own Day or Second.
   bool calendarCall(const Expr &e, Type &type) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
     const bool datePart = op == "Year" || op == "Month" || op == "Day" || op == "DayOfWeek";
     const bool timePart = op == "Hour" || op == "Minute" || op == "Second" || op == "Nanosecond";
 
@@ -4168,7 +4168,7 @@ class Analyzer {
     if (e.kind == "int" || e.kind == "bool" || e.kind == "char" || e.kind == "text" || e.kind == "typeMember" ||
         e.kind == "compileTime" || analysis.enumMembers.count(&e) ||
         (e.kind == "." && analysis.integerConstants.count(&e)) ||
-        (e.kind == "unary" && e.token.text == "-" && e.args[0]->kind == "int"))
+        (e.kind == "unary" && e.token.text == Tok::Minus && e.args[0]->kind == "int"))
       return true;
 
     if (const auto field = analysis.staticFields.find(&e); field != analysis.staticFields.end())
@@ -4574,7 +4574,7 @@ class Analyzer {
 
     if (s.expr && s.type.depth && s.expr->kind != "null") {
       const bool literal = s.expr->kind == "int" || s.expr->kind == "real" ||
-          (s.expr->kind == "unary" && s.expr->token.text == "-" && s.expr->args[0]->kind == "int");
+          (s.expr->kind == "unary" && s.expr->token.text == Tok::Minus && s.expr->args[0]->kind == "int");
       hint = (literal && numeric(s.type.pointee())) || s.expr->kind == "initializer"
                  ? s.type.pointee() : Type(Type::Void);
     }
@@ -4863,7 +4863,7 @@ public:
       return real->second;
 
     // A negated floating literal: flip the sign bit of the encoded value.
-    if (e.kind == "unary" && e.token.text == "-" && !converted) {
+    if (e.kind == "unary" && e.token.text == Tok::Minus && !converted) {
       auto real = analysis.floatingConstants.find(e.args[0].get());
 
       if (real != analysis.floatingConstants.end()) {

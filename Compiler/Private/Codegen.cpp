@@ -2963,7 +2963,7 @@ class Generator {
     return {Type::Long, moved};
   }
   Value lowerCall(const Expr &e) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
 
     if (auto file = analysis.fileCalls.find(&e); file != analysis.fileCalls.end()) return lowerFileCall(e, file->second);
 
@@ -3751,7 +3751,7 @@ class Generator {
     return convert({Type::Double, mathCall(inDouble.at(name), Type::Double, operands)}, type);
   }
   Value lowerTextQuery(const Expr &e) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
     usesTextRuntime = true;
     auto text = expression(*e.args[0]);
     auto id = fresh();
@@ -3891,7 +3891,7 @@ class Generator {
     return {f.result, id};
   }
   std::optional<Value> lowerLiteral(const Expr &e) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
     auto member = analysis.enumMembers.find(&e);
 
     if (member != analysis.enumMembers.end())
@@ -3948,7 +3948,7 @@ class Generator {
     return {b.type, id};
   }
   Value lowerShortCircuit(const Expr &e, const Value &a, const std::string &id) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
     auto leftEnd = currentBlock, right = label(), end = label();
     emit("br i1 " + a.value + ", label %" + (op == "&&" ? right : end) +
          ", label %" + (op == "&&" ? end : right));
@@ -3974,7 +3974,7 @@ class Generator {
       }
       return {Type::Int, result};
     }
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
 
     if (e.kind == "compileTime") {
       const auto type = analysis.expressionTypes.at(&e);
@@ -4765,7 +4765,7 @@ class Generator {
   }
   Value calendarCall(const Expr &e) {
     usesCalendarRuntime = true;
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
     auto value = expression(*e.args[0]);
     auto days = [&] { return value.type == Type::DateTime ? part(value, 0) : value.value; };
     auto nanos = [&] { return value.type == Type::DateTime ? part(value, 1) : value.value; };
@@ -5420,7 +5420,7 @@ class Generator {
     if (!analysis.expressionTypes.count(&e)) return; // A static path, not a value.
     if (analysis.staticFields.count(&e)) return guardLink(e, skip, links);
 
-    if (e.kind == "." || (e.kind == "unary" && e.token.text == "*")) guardChain(*e.args[0], skip, links);
+    if (e.kind == "." || (e.kind == "unary" && e.token.text == Tok::Star)) guardChain(*e.args[0], skip, links);
     else if (e.kind == "call" && e.receiver) guardChain(*e.receiver, skip, links);
     else if (e.kind == "index") {
       // The guarded slot lookup walks any inner indexes itself.
@@ -5800,7 +5800,7 @@ std::string emitEnums(const Symbols &symbols) {
     const auto type = irType(info.type);
 
     for (size_t i = 0; i < info.members.size(); ++i) {
-      const auto &label = info.members[i].text;
+      const std::string &label = info.members[i].text;
       ir << "@enum." << name << ".name." << i << " = private unnamed_addr constant ["
          << label.size() + 1 << " x i8] c\"" << label << "\\00\"\n";
       ir << managedTextGlobal(enumLabelSymbol(name, i), info.members[i], Type::Name);

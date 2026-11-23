@@ -351,7 +351,7 @@ class Projects(unittest.TestCase):
         self.assertNotIn("--import", first)
         self.assertFalse((output / "app.dki").exists())  # The entry module has no importers.
         interface = (output / "core.dki").read_text(encoding="utf-8")
-        self.assertIn("::", interface)            # Make's body decides who owns its result.
+        self.assertIn(" 4 made\n", interface)     # Make's body (its local `made`) decides who owns its result.
         self.assertNotIn("12345", interface)      # Secret's body is never read by importers.
         from_sources = (output / "app.ll").read_bytes()
 
@@ -373,12 +373,12 @@ class Projects(unittest.TestCase):
     def test_damaged_interface_is_not_imported(self):
         self.invoke()
         interface = self.root / ".duck/build/debug/core.dki"
-        interface.write_text("duck-interface 1\nkey 3 bad\nfiles 0\n", encoding="utf-8")
+        interface.write_text("duck-interface 2\nkey 3 bad\nfiles 0\n", encoding="utf-8")
         result = self.invoke("--verbose").stdout
         self.assertIn("1 up to date", result)  # core rebuilds to replace it; app is unaffected.
         self.assertIn("0 interface(s) up to date", result)
         self.assertNotIn("--import", result)
-        self.assertIn("duck-interface 1\nkey 16 ", (self.root / ".duck/build/debug/core.dki").read_text(encoding="utf-8"))
+        self.assertIn("duck-interface 2\nkey 16 ", (self.root / ".duck/build/debug/core.dki").read_text(encoding="utf-8"))
 
     def test_unchanged_modules_are_skipped(self):
         output = self.root / ".duck/build/debug"

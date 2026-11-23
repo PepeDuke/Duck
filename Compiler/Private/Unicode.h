@@ -4,7 +4,7 @@
 namespace duck {
 inline std::vector<uint32_t> decodeUTF8(const Token &token) {
   std::vector<uint32_t> result;
-  const auto &bytes = token.text;
+  const std::string &bytes = token.text;
 
   for (size_t i = 0; i < bytes.size();) {
     auto first = static_cast<unsigned char>(bytes[i++]);

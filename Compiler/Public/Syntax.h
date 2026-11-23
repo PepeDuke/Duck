@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <ostream>
+#include <unordered_map>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -25,8 +27,139 @@ const std::string &sourcePath(SourceId id);
 // Brackets the parallel phases: worker threads may read the table only while it is frozen.
 void freezeSources(bool frozen);
 
+// Every fixed spelling a token can have: punctuation, keywords and type
+// words. Any other text (names, numbers, string contents) is a Literal and
+// lives once in a shared table. The order is the .dki numbering, so adding or
+// moving an entry changes the interface format; interfaces are rebuilt anyway.
+#define DUCK_TOKEN_SPELLINGS(X)                                                                                  \
+  X(Empty, "") X(Newline, "\n") X(Eof, "<eof>")                                                                  \
+  X(Bang, "!") X(Hash, "#") X(Dollar, "$") X(Percent, "%") X(Ampersand, "&") X(LeftParen, "(")                   \
+  X(RightParen, ")") X(Star, "*") X(Plus, "+") X(Comma, ",") X(Minus, "-") X(Dot, ".") X(Slash, "/")            \
+  X(Colon, ":") X(Semicolon, ";") X(Less, "<") X(Assign, "=") X(Greater, ">") X(Question, "?") X(At, "@")        \
+  X(LeftBracket, "[") X(Backslash, "\\") X(RightBracket, "]") X(Caret, "^") X(Backtick, "`")                    \
+  X(LeftBrace, "{") X(Pipe, "|") X(RightBrace, "}") X(Tilde, "~")                                               \
+  X(ColonColon, "::") X(EqualEqual, "==") X(NotEqual, "!=") X(LessEqual, "<=") X(GreaterEqual, ">=")            \
+  X(PlusPlus, "++") X(MinusMinus, "--") X(AndAnd, "&&") X(OrOr, "||") X(PlusAssign, "+=")                       \
+  X(MinusAssign, "-=") X(StarAssign, "*=") X(SlashAssign, "/=") X(PercentAssign, "%=")                          \
+  X(AmpersandAssign, "&=") X(PipeAssign, "|=") X(CaretAssign, "^=") X(ShiftLeft, "<<") X(ShiftRight, ">>")      \
+  X(ShiftLeftAssign, "<<=") X(ShiftRightAssign, ">>=") X(DotDot, "..") X(Ellipsis, "...")                      \
+  X(If, "if") X(Else, "else") X(For, "for") X(While, "while") X(Do, "do") X(Return, "return")                   \
+  X(Break, "break") X(Continue, "continue") X(Switch, "Switch") X(Case, "case") X(Default, "default")           \
+  X(Using, "using") X(Extern, "extern") X(Macro, "macro") X(True, "true") X(False, "false") X(Null, "null")      \
+  X(This, "this") X(Define, "define") X(Struct, "struct") X(Class, "class")                                    \
+  X(Void, "void") X(Bool, "bool") X(Byte, "byte") X(Short, "short") X(Int, "int") X(Long, "long")               \
+  X(Float, "float") X(Double, "double") X(Name, "name") X(String, "string") X(Cstring, "cstring")               \
+  X(Char, "char") X(Uint, "uint") X(Int8, "int8") X(Int16, "int16") X(Int32, "int32") X(Int64, "int64")         \
+  X(Uint8, "uint8") X(Uint16, "uint16") X(Uint32, "uint32") X(Uint64, "uint64") X(Date, "date")                \
+  X(Time, "time") X(Datetime, "datetime") X(Big, "big") X(Ubig, "ubig") X(Tiny, "tiny") X(Utiny, "utiny")       \
+  X(Func, "func") X(File, "file") X(Markup, "markup") X(Element, "element") X(Vec2, "vec2") X(Vec3, "vec3")     \
+  X(Vec4, "vec4") X(Dvec2, "dvec2") X(Dvec3, "dvec3") X(Dvec4, "dvec4") X(Ivec2, "ivec2") X(Ivec3, "ivec3")     \
+  X(Ivec4, "ivec4") X(Mat3, "mat3") X(Mat4, "mat4") X(Dmat3, "dmat3") X(Dmat4, "dmat4") X(Quat, "quat")         \
+  X(Rot, "rot")
+
+enum class Tok : std::uint16_t {
+  Literal, // Text from the literal table.
+#define DUCK_TOKEN_ENUM(name, text) name,
+  DUCK_TOKEN_SPELLINGS(DUCK_TOKEN_ENUM)
+#undef DUCK_TOKEN_ENUM
+  Count
+};
+
+// A token's text: a fixed spelling, or an index into the shared literal table.
+// The same text always gets the same value, so comparing two of them compares
+// two integers. It reads like a const std::string where code needs one.
+// Adding to the literal table takes a lock; reading it never does.
+class TokenText {
+  Tok kind_ = Tok::Empty;
+  std::uint32_t literal_ = 0; // Meaningful only for Tok::Literal.
+
+  TokenText(Tok kind, std::uint32_t literal) : kind_(kind), literal_(literal) {}
+  static const std::string &literalText(std::uint32_t literal);
+  static const std::string &spelling(Tok kind);
+
+public:
+  TokenText() = default;
+  TokenText(Tok kind) : kind_(kind) {}
+  TokenText(const std::string &text) : TokenText(intern(text)) {}
+  TokenText(const char *text) : TokenText(intern(text)) {}
+  static TokenText intern(const std::string &text);
+
+  Tok kind() const { return kind_; }
+  std::uint32_t literal() const { return literal_; }
+  const std::string &str() const { return kind_ == Tok::Literal ? literalText(literal_) : spelling(kind_); }
+  operator const std::string &() const { return str(); }
+
+  bool empty() const { return kind_ == Tok::Empty; }
+  size_t size() const { return str().size(); }
+  size_t length() const { return str().size(); }
+  const char *c_str() const { return str().c_str(); }
+  char front() const { return str().front(); }
+  char back() const { return str().back(); }
+  char operator[](size_t i) const { return str()[i]; }
+  std::string substr(size_t pos = 0, size_t count = std::string::npos) const { return str().substr(pos, count); }
+  size_t find(const std::string &s, size_t pos = 0) const { return str().find(s, pos); }
+  size_t find(char c, size_t pos = 0) const { return str().find(c, pos); }
+  size_t rfind(const std::string &s, size_t pos = std::string::npos) const { return str().rfind(s, pos); }
+  size_t rfind(char c, size_t pos = std::string::npos) const { return str().rfind(c, pos); }
+  size_t find_first_of(const char *chars, size_t pos = 0) const { return str().find_first_of(chars, pos); }
+  size_t find_first_not_of(const char *chars, size_t pos = 0) const { return str().find_first_not_of(chars, pos); }
+  int compare(const std::string &s) const { return str().compare(s); }
+  int compare(size_t pos, size_t count, const std::string &s) const { return str().compare(pos, count, s); }
+  std::string::const_iterator begin() const { return str().begin(); }
+  std::string::const_iterator end() const { return str().end(); }
+  TokenText &operator+=(const std::string &s) { return *this = intern(str() + s); }
+  TokenText &operator+=(char c) { return *this = intern(str() + c); }
+
+  // Against a fixed spelling: one integer comparison.
+  friend bool operator==(const TokenText &a, Tok b) { return a.kind_ == b; }
+  friend bool operator!=(const TokenText &a, Tok b) { return a.kind_ != b; }
+  friend bool operator==(const TokenText &a, const TokenText &b) {
+    return a.kind_ == b.kind_ && a.literal_ == b.literal_;
+  }
+  friend bool operator!=(const TokenText &a, const TokenText &b) { return !(a == b); }
+  friend bool operator==(const TokenText &a, const std::string &b) { return a.str() == b; }
+  friend bool operator!=(const TokenText &a, const std::string &b) { return a.str() != b; }
+  friend bool operator==(const std::string &a, const TokenText &b) { return a == b.str(); }
+  friend bool operator!=(const std::string &a, const TokenText &b) { return a != b.str(); }
+  friend bool operator==(const TokenText &a, const char *b) { return a.str() == b; }
+  friend bool operator!=(const TokenText &a, const char *b) { return a.str() != b; }
+  friend bool operator==(const char *a, const TokenText &b) { return a == b.str(); }
+  friend bool operator!=(const char *a, const TokenText &b) { return a != b.str(); }
+  friend bool operator<(const TokenText &a, const TokenText &b) { return a.str() < b.str(); }
+  friend std::string operator+(const TokenText &a, const TokenText &b) { return a.str() + b.str(); }
+  friend std::string operator+(const TokenText &a, const std::string &b) { return a.str() + b; }
+  friend std::string operator+(const std::string &a, const TokenText &b) { return a + b.str(); }
+  friend std::string operator+(std::string &&a, const TokenText &b) { return std::move(a) + b.str(); }
+  friend std::string operator+(const TokenText &a, const char *b) { return a.str() + b; }
+  friend std::string operator+(const char *a, const TokenText &b) { return a + b.str(); }
+  friend std::string operator+(const TokenText &a, char b) { return a.str() + b; }
+  friend std::string operator+(char a, const TokenText &b) { return a + b.str(); }
+  friend std::ostream &operator<<(std::ostream &out, const TokenText &t) { return out << t.str(); }
+};
+
+// A Tok is a token spelling. Comparing it with a plain string is a mistake:
+// the string is not token text, so the comparison would only look like one.
+bool operator==(const std::string &, Tok) = delete;
+bool operator!=(const std::string &, Tok) = delete;
+bool operator==(Tok, const std::string &) = delete;
+bool operator!=(Tok, const std::string &) = delete;
+
+// Interns for one thread, so text it has seen before skips the shared lock.
+class TokenTextCache {
+  std::unordered_map<std::string, TokenText> seen;
+
+public:
+  TokenText intern(const std::string &text) {
+    if (const auto found = seen.find(text); found != seen.end()) return found->second;
+
+    const auto interned = TokenText::intern(text);
+    seen.emplace(text, interned);
+    return interned;
+  }
+};
+
 struct Token {
-  std::string text;
+  TokenText text;
   int line, column;
   bool string = false;
   SourceId source = 0;
@@ -424,7 +557,7 @@ struct Expr {
   // its result in args[0] and evaluated only when the expression is reached.
   std::vector<std::unique_ptr<struct Stmt>> bindings;
   bool addressable() const {
-    return kind == "name" || kind == "." || kind == "index" || (kind == "unary" && token.text == "*");
+    return kind == "name" || kind == "." || kind == "index" || (kind == "unary" && token.text == Tok::Star);
   }
 };
 struct Stmt {

@@ -16,7 +16,7 @@ bool inside(const Token &t, const Function &f) {
 // resolveReturnRoles work out whether a pointer result hands over ownership,
 // and markup in a body can add fields to the containers it names.
 bool bodyNeeded(const Function &f, const Program &unit) {
-  if (f.bodyOpen.text != "{" || f.bodyClose.text != "}" || f.bodyOpen.origin || f.bodyClose.origin) return true;
+  if (f.bodyOpen.text != Tok::LeftBrace || f.bodyClose.text != Tok::RightBrace || f.bodyOpen.origin || f.bodyClose.origin) return true;
   if (f.result.depth) return true;
 
   for (const auto &p : f.params)
@@ -95,7 +95,7 @@ std::vector<Token> interfaceTokens(const std::vector<Token> &tokens, const Progr
   for (size_t k = 0; k < tokens.size(); ++k) {
     result.push_back(tokens[k]);
 
-    if (tokens[k].string || tokens[k].text != "{") continue;
+    if (tokens[k].string || tokens[k].text != Tok::LeftBrace) continue;
 
     const auto found = skipped.find(at(tokens[k]));
 
@@ -104,7 +104,7 @@ std::vector<Token> interfaceTokens(const std::vector<Token> &tokens, const Progr
     // Keep the body's line breaks so the braces stay valid statement syntax.
     size_t close = k + 1;
 
-    while (close < tokens.size() && !(!tokens[close].string && tokens[close].text == "}" && at(tokens[close]) == found->second))
+    while (close < tokens.size() && !(!tokens[close].string && tokens[close].text == Tok::RightBrace && at(tokens[close]) == found->second))
       ++close;
 
     if (close == tokens.size()) continue; // Not found: keep the body as written.
@@ -116,7 +116,7 @@ std::vector<Token> interfaceTokens(const std::vector<Token> &tokens, const Progr
 }
 
 std::string writeInterface(const std::string &key, const std::vector<std::vector<Token>> &files) {
-  std::string out = "duck-interface 1\nkey ";
+  std::string out = "duck-interface 2\nkey ";
   out += std::to_string(key.size()) + ' ' + key + '\n';
   out += "files ";
   writeNumber(out, static_cast<long long>(files.size()));
@@ -135,7 +135,15 @@ std::string writeInterface(const std::string &key, const std::vector<std::vector
       writeNumber(out, t.line);
       writeNumber(out, t.column);
       writeNumber(out, (t.string ? 1 : 0) | (t.character ? 2 : 0));
-      out += std::to_string(t.text.size()) + ' ' + t.text + '\n';
+      // A fixed spelling is written as its Tok number alone; only a literal
+      // (Tok::Literal, 0) is followed by its text.
+      writeNumber(out, static_cast<long long>(t.text.kind()));
+
+      if (t.text.kind() == Tok::Literal) {
+        const std::string &text = t.text;
+        out += std::to_string(text.size()) + ' ' + text + '\n';
+      } else
+        out.back() = '\n';
     }
   }
 
@@ -144,11 +152,13 @@ std::string writeInterface(const std::string &key, const std::vector<std::vector
 
 std::vector<InterfaceFile> readInterface(const std::string &text, const std::string &path, std::string &key) {
   Reader in(text, path);
-  in.expectWord("duck-interface 1\nkey ");
+  in.expectWord("duck-interface 2\nkey ");
   key = in.bytes();
   in.expectWord("files ");
   const auto count = in.number();
   std::vector<InterfaceFile> files;
+
+  TokenTextCache cache;
 
   for (long long f = 0; f < count; ++f) {
     InterfaceFile file;
@@ -163,7 +173,11 @@ std::vector<InterfaceFile> readInterface(const std::string &text, const std::str
       const auto flags = in.number();
       t.string = flags & 1;
       t.character = flags & 2;
-      t.text = in.bytes();
+      const auto kind = in.number();
+
+      if (kind < 0 || kind >= static_cast<long long>(Tok::Count)) in.bad();
+
+      t.text = kind == static_cast<long long>(Tok::Literal) ? cache.intern(in.bytes()) : TokenText(static_cast<Tok>(kind));
       file.tokens.push_back(std::move(t));
     }
 

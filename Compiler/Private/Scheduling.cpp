@@ -273,7 +273,7 @@ class EffectWalker {
     }
   }
   void call(const Expr &e) {
-    const auto &op = e.token.text;
+    const std::string &op = e.token.text;
 
     if (a.reinitializations.count(&e) || a.completions.count(&e) || a.reflections.count(&e) ||
         a.indirectCalls.count(&e) || a.elementNames.count(&e)) {
@@ -430,7 +430,7 @@ class EffectWalker {
 
     if (e.kind == "call") return call(e);
 
-    if (e.kind == "unary" && (e.token.text == "&" || e.token.text == "*")) {
+    if (e.kind == "unary" && (e.token.text == Tok::Ampersand || e.token.text == Tok::Star)) {
       current.unknown = true;
       return;
     }
@@ -998,7 +998,7 @@ class CostModel {
 
       if (low >= 0 && high >= 0) count = std::fabs(high - low) + 1;
     } else if ((s.kind == "for" || s.kind == "while") && s.expr && s.expr->kind == "binary" && s.expr->args.size() == 2) {
-      const auto &op = s.expr->token.text;
+      const std::string &op = s.expr->token.text;
 
       if (op == "<" || op == "<=" || op == ">" || op == ">=" || op == "!=") {
         count = bound(*s.expr->args[1], frame);

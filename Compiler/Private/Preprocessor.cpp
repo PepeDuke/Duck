@@ -24,14 +24,15 @@ class Preprocessor {
   };
   std::map<std::string, Definition> defines;
 
+  bool punct(size_t k, Tok kind) const { return k < in.size() && !in[k].string && in[k].text == kind; }
   bool punct(size_t k, const char *text) const { return k < in.size() && !in[k].string && in[k].text == text; }
-  bool directive(size_t k, const char *word) const { return punct(k, "#") && punct(k + 1, word); }
+  bool directive(size_t k, Tok word) const { return punct(k, Tok::Hash) && punct(k + 1, word); }
   void requireLineStart(size_t k) const {
-    if (k && !punct(k - 1, "\n") && !punct(k - 1, "{") && !punct(k - 1, "}"))
+    if (k && !punct(k - 1, Tok::Newline) && !punct(k - 1, Tok::LeftBrace) && !punct(k - 1, Tok::RightBrace))
       fail(in[k], "'#" + in[k + 1].text + "' must start a line");
   }
   size_t skipLines(size_t k) const {
-    while (punct(k, "\n")) ++k;
+    while (punct(k, Tok::Newline)) ++k;
 
     return k;
   }
@@ -40,8 +41,8 @@ class Preprocessor {
     int depth = 0;
 
     for (size_t k = open; k < in.size(); ++k) {
-      if (punct(k, "{")) ++depth;
-      else if (punct(k, "}") && --depth == 0) return k;
+      if (punct(k, Tok::LeftBrace)) ++depth;
+      else if (punct(k, Tok::RightBrace) && --depth == 0) return k;
     }
 
     fail(in[open], "unterminated " + directiveName + " block");
@@ -50,7 +51,14 @@ class Preprocessor {
   // Conditions and define values share one small typed expression language
   // over the tokens in [cursor, end).
   size_t cursor = 0, end = 0;
+  bool at(Tok kind) const { return cursor < end && punct(cursor, kind); }
   bool at(const char *text) const { return cursor < end && punct(cursor, text); }
+  bool accept(Tok kind) {
+    if (!at(kind)) return false;
+
+    ++cursor;
+    return true;
+  }
   bool accept(const char *text) {
     if (!at(text)) return false;
 
@@ -66,7 +74,7 @@ class Preprocessor {
     Constant value;
     value.kind = Constant::Integer;
     const int base = integerLiteralBase(t.text);
-    const std::string digits = base == 10 ? t.text : t.text.substr(2);
+    const std::string digits = base == 10 ? t.text.str() : t.text.substr(2);
 
     if (digits.empty()) fail(t, "integer literal requires digits after its prefix");
 
@@ -88,10 +96,10 @@ class Preprocessor {
 
     const auto &t = in[cursor];
 
-    if (accept("(")) {
+    if (accept(Tok::LeftParen)) {
       auto value = logicalOr();
 
-      if (!accept(")")) fail(current(), "expected ')' in #define or #if expression");
+      if (!accept(Tok::RightParen)) fail(current(), "expected ')' in #define or #if expression");
 
       return value;
     }
@@ -109,9 +117,9 @@ class Preprocessor {
 
     if (std::isdigit(static_cast<unsigned char>(t.text[0]))) return literal(t);
 
-    if (t.text == "true" || t.text == "false") {
+    if (t.text == Tok::True || t.text == Tok::False) {
       Constant value;
-      value.truth = t.text == "true";
+      value.truth = t.text == Tok::True;
       return value;
     }
 
@@ -127,7 +135,7 @@ class Preprocessor {
   Constant unary() {
     const auto &t = current();
 
-    if (accept("!")) {
+    if (accept(Tok::Bang)) {
       auto value = unary();
 
       if (value.kind != Constant::Bool) wrongType(t, "!", value);
@@ -136,7 +144,7 @@ class Preprocessor {
       return value;
     }
 
-    if (accept("-")) {
+    if (accept(Tok::Minus)) {
       auto value = unary();
 
       if (value.kind != Constant::Integer) wrongType(t, "-", value);
@@ -150,7 +158,7 @@ class Preprocessor {
   Constant relational() {
     auto left = unary();
 
-    while (at("<") || at(">") || at("<=") || at(">=")) {
+    while (at(Tok::Less) || at(Tok::Greater) || at(Tok::LessEqual) || at(Tok::GreaterEqual)) {
       const auto &op = in[cursor++];
       const auto right = unary();
 
@@ -158,9 +166,9 @@ class Preprocessor {
       if (right.kind != Constant::Integer) wrongType(op, op.text, right);
 
       Constant result;
-      result.truth = op.text == "<"    ? left.number < right.number
-                     : op.text == ">"  ? left.number > right.number
-                     : op.text == "<=" ? left.number <= right.number
+      result.truth = op.text == Tok::Less    ? left.number < right.number
+                     : op.text == Tok::Greater  ? left.number > right.number
+                     : op.text == Tok::LessEqual ? left.number <= right.number
                                        : left.number >= right.number;
       left = result;
     }
@@ -170,7 +178,7 @@ class Preprocessor {
   Constant equality() {
     auto left = relational();
 
-    while (at("==") || at("!=")) {
+    while (at(Tok::EqualEqual) || at(Tok::NotEqual)) {
       const auto &op = in[cursor++];
       const auto right = relational();
 
@@ -180,7 +188,7 @@ class Preprocessor {
 
       const bool same = left.truth == right.truth && left.number == right.number && left.text == right.text;
       Constant result;
-      result.truth = op.text == "==" ? same : !same;
+      result.truth = op.text == Tok::EqualEqual ? same : !same;
       left = result;
     }
 
@@ -191,7 +199,7 @@ class Preprocessor {
   Constant logicalAnd() {
     auto left = equality();
 
-    while (at("&&")) {
+    while (at(Tok::AndAnd)) {
       const auto &op = in[cursor++];
       const auto right = equality();
 
@@ -206,7 +214,7 @@ class Preprocessor {
   Constant logicalOr() {
     auto left = logicalAnd();
 
-    while (at("||")) {
+    while (at(Tok::OrOr)) {
       const auto &op = in[cursor++];
       const auto right = logicalAnd();
 
@@ -236,17 +244,17 @@ class Preprocessor {
     const auto &keyword = in[k + 1];
     const size_t nameAt = k + 2;
 
-    if (nameAt >= in.size() || !isWord(in[nameAt]) || in[nameAt].text == "<eof>")
+    if (nameAt >= in.size() || !isWord(in[nameAt]) || in[nameAt].text == Tok::Eof)
       fail(keyword, "#define requires a name, as in #define WIN_64 true");
 
     size_t last = nameAt + 1;
 
-    while (last < in.size() && !punct(last, "\n") && !punct(last, "<eof>")) ++last;
+    while (last < in.size() && !punct(last, Tok::Newline) && !punct(last, Tok::Eof)) ++last;
 
     if (const auto existing = defines.find(in[nameAt].text); existing != defines.end())
       fail(in[nameAt], "'" + in[nameAt].text + "' is already defined at " + where(existing->second.name));
 
-    if (in[nameAt].text == "true" || in[nameAt].text == "false")
+    if (in[nameAt].text == Tok::True || in[nameAt].text == Tok::False)
       fail(in[nameAt], "cannot #define '" + in[nameAt].text + "'");
 
     auto value = evaluate(nameAt + 1, last, keyword);
@@ -261,7 +269,7 @@ class Preprocessor {
     const auto &keyword = in[k + 1];
     size_t last = k + 2;
 
-    while (last < in.size() && !punct(last, "\n") && !punct(last, "{") && !punct(last, "<eof>")) ++last;
+    while (last < in.size() && !punct(last, Tok::Newline) && !punct(last, Tok::LeftBrace) && !punct(last, Tok::Eof)) ++last;
 
     const auto condition = evaluate(k + 2, last, keyword);
 
@@ -270,7 +278,7 @@ class Preprocessor {
 
     const size_t open = skipLines(last);
 
-    if (!punct(open, "{")) fail(keyword, "#if requires a { ... } block");
+    if (!punct(open, Tok::LeftBrace)) fail(keyword, "#if requires a { ... } block");
 
     const size_t close = closing(open, "#if");
 
@@ -279,10 +287,10 @@ class Preprocessor {
     size_t finish = close;
     const size_t elseAt = skipLines(close + 1);
 
-    if (directive(elseAt, "else")) {
+    if (directive(elseAt, Tok::Else)) {
       const size_t elseOpen = skipLines(elseAt + 2);
 
-      if (!punct(elseOpen, "{")) fail(in[elseAt + 1], "#else requires a { ... } block");
+      if (!punct(elseOpen, Tok::LeftBrace)) fail(in[elseAt + 1], "#else requires a { ... } block");
 
       const size_t elseClose = closing(elseOpen, "#else");
 
@@ -291,16 +299,16 @@ class Preprocessor {
       finish = elseClose;
     }
 
-    if (!punct(finish + 1, "\n") && !punct(finish + 1, "}") && !punct(finish + 1, "<eof>"))
+    if (!punct(finish + 1, Tok::Newline) && !punct(finish + 1, Tok::RightBrace) && !punct(finish + 1, Tok::Eof))
       fail(in[finish + 1], "expected a new line after the #if block");
 
     return finish;
   }
   void run(size_t first, size_t last) {
     for (size_t k = first; k < last; ++k) {
-      if (directive(k, "define")) k = define(k);
-      else if (directive(k, "if")) k = conditional(k);
-      else if (directive(k, "else")) fail(in[k + 1], "#else without a matching #if");
+      if (directive(k, Tok::Define)) k = define(k);
+      else if (directive(k, Tok::If)) k = conditional(k);
+      else if (directive(k, Tok::Else)) fail(in[k + 1], "#else without a matching #if");
       else out.push_back(in[k]);
     }
   }

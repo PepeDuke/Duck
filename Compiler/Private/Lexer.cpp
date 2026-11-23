@@ -4,6 +4,8 @@
 #include <atomic>
 #include <cctype>
 #include <deque>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 
 namespace duck {
@@ -39,6 +41,73 @@ const std::string &sourcePath(SourceId id) { return sourcePaths.at(id); }
 void freezeSources(bool frozen) { sourcesFrozen.store(frozen); }
 
 namespace {
+// Literal text lives in fixed blocks behind a directory that never moves, so
+// a reader needs no lock: an index is only handed out after its string is
+// stored, and other threads get indexes through tokens passed to them.
+struct LiteralTable {
+  static constexpr std::uint32_t BlockBits = 12, BlockSize = 1u << BlockBits, MaxBlocks = 1u << 14;
+  std::mutex lock;
+  std::unordered_map<std::string, std::uint32_t> ids;
+  std::uint32_t count = 0;
+  std::unique_ptr<std::string[]> blocks[MaxBlocks];
+};
+
+LiteralTable &literalTable() {
+  static LiteralTable table;
+  return table;
+}
+
+const std::string *spellings() {
+  static const std::string table[] = {
+      std::string(), // Tok::Literal has no spelling of its own.
+#define DUCK_TOKEN_TEXT(name, text) std::string(text),
+      DUCK_TOKEN_SPELLINGS(DUCK_TOKEN_TEXT)
+#undef DUCK_TOKEN_TEXT
+  };
+  return table;
+}
+
+const std::unordered_map<std::string, Tok> &spellingKinds() {
+  static const auto kinds = [] {
+    std::unordered_map<std::string, Tok> map;
+#define DUCK_TOKEN_KIND(name, text) map.emplace(text, Tok::name);
+    DUCK_TOKEN_SPELLINGS(DUCK_TOKEN_KIND)
+#undef DUCK_TOKEN_KIND
+    return map;
+  }();
+  return kinds;
+}
+} // namespace
+
+const std::string &TokenText::literalText(std::uint32_t literal) {
+  const auto &table = literalTable();
+  return table.blocks[literal >> LiteralTable::BlockBits][literal & (LiteralTable::BlockSize - 1)];
+}
+
+const std::string &TokenText::spelling(Tok kind) { return spellings()[static_cast<size_t>(kind)]; }
+
+TokenText TokenText::intern(const std::string &text) {
+  if (const auto found = spellingKinds().find(text); found != spellingKinds().end()) return TokenText(found->second);
+
+  auto &table = literalTable();
+  std::lock_guard<std::mutex> guard(table.lock);
+
+  if (const auto found = table.ids.find(text); found != table.ids.end()) return TokenText(Tok::Literal, found->second);
+
+  const auto id = table.count;
+  const auto block = id >> LiteralTable::BlockBits;
+
+  if (block >= LiteralTable::MaxBlocks) throw std::logic_error("too many distinct token texts");
+
+  if (!table.blocks[block]) table.blocks[block].reset(new std::string[LiteralTable::BlockSize]);
+
+  table.blocks[block][id & (LiteralTable::BlockSize - 1)] = text;
+  table.ids.emplace(text, id);
+  ++table.count;
+  return TokenText(Tok::Literal, id);
+}
+
+namespace {
 
 bool isDigit(char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; }
 
@@ -56,13 +125,21 @@ class Lexer {
   const std::string &source;
   const SourceId sourceName;
   std::vector<Token> out;
+  std::string text;      // The token being read; interned once it is complete.
+  TokenTextCache cache;
   size_t i = 0;
   int line = 1, col = 1;
 
   bool atEnd() const { return i >= source.size(); }
   bool nextIs(char c) const { return !atEnd() && source[i] == c; }
-  bool startsWith(const char *text) const { return source.compare(i, 2, text) == 0; }
-  Token startToken() const { return Token{"", line, col, false, sourceName}; }
+  bool startsWith(const char *prefix) const { return source.compare(i, 2, prefix) == 0; }
+  // An error in the token being read shows the text read so far, as the
+  // source line printer needs a token with text.
+  [[noreturn]] void failAt(Token t, const std::string &message) {
+    t.text = cache.intern(text);
+    fail(t, message);
+  }
+  Token startToken() const { return Token{Tok::Empty, line, col, false, sourceName}; }
 
   char take() {
     const char c = source[i++];
@@ -77,7 +154,7 @@ class Lexer {
   }
 
   template <class Predicate> void takeWhile(Token &t, Predicate matches) {
-    while (!atEnd() && matches(source[i])) t.text += take();
+    while (!atEnd() && matches(source[i])) text += take();
   }
 
   void skipLineComment() {
@@ -90,7 +167,7 @@ class Lexer {
     take();
 
     while (!atEnd() && !startsWith("*/")) {
-      if (source[i] == '\n') out.push_back({"\n", line, col, false, sourceName});
+      if (source[i] == '\n') out.push_back({Tok::Newline, line, col, false, sourceName});
 
       take();
     }
@@ -105,23 +182,23 @@ class Lexer {
     uint32_t codePoint = 0;
 
     for (int n = 0; n < digits; ++n) {
-      if (atEnd()) fail(t, "incomplete Unicode escape");
+      if (atEnd()) failAt(t, "incomplete Unicode escape");
 
       const int digit = digitValue(take());
 
-      if (digit < 0) fail(t, "invalid Unicode escape");
+      if (digit < 0) failAt(t, "invalid Unicode escape");
 
       codePoint = (codePoint << 4) | static_cast<uint32_t>(digit);
     }
 
     if (codePoint > 0x10FFFF || (codePoint >= 0xD800 && codePoint <= 0xDFFF))
-      fail(t, "Unicode escape must be a scalar value");
+      failAt(t, "Unicode escape must be a scalar value");
 
-    appendUTF8(t.text, codePoint);
+    appendUTF8(text, codePoint);
   }
 
   void escapeSequence(Token &t) {
-    if (atEnd()) fail(t, "unterminated string literal");
+    if (atEnd()) failAt(t, "unterminated string literal");
 
     char c = take();
 
@@ -147,10 +224,10 @@ class Lexer {
     case '\'':
       break;
     default:
-      fail(t, "unsupported escape sequence");
+      failAt(t, "unsupported escape sequence");
     }
 
-    t.text += c;
+    text += c;
   }
 
   // A character literal shares string escapes but must hold one scalar.
@@ -163,28 +240,30 @@ class Lexer {
       const char c = take();
 
       if (c == '\n' || c == '\r')
-        fail(t, t.character ? "newline in character literal" : "newline in string literal");
+        failAt(t, t.character ? "newline in character literal" : "newline in string literal");
 
       if (c == '\\')
         escapeSequence(t);
       else
-        t.text += c;
+        text += c;
     }
 
-    if (atEnd()) fail(t, t.character ? "unterminated character literal" : "unterminated string literal");
+    if (atEnd()) failAt(t, t.character ? "unterminated character literal" : "unterminated string literal");
 
     take();
 
+    t.text = cache.intern(text);
+
     if (decodeUTF8(t).size() != 1 && t.character)
-      fail(t, "character literal must contain exactly one Unicode scalar");
+      failAt(t, "character literal must contain exactly one Unicode scalar");
   }
 
   void exponent(Token &t) {
-    t.text += take();
+    text += take();
 
-    if (nextIs('+') || nextIs('-')) t.text += take();
+    if (nextIs('+') || nextIs('-')) text += take();
 
-    if (atEnd() || !isDigit(source[i])) fail(t, "exponent requires digits");
+    if (atEnd() || !isDigit(source[i])) failAt(t, "exponent requires digits");
 
     takeWhile(t, isDigit);
   }
@@ -194,8 +273,8 @@ class Lexer {
     // semantic diagnostics point to the complete literal. Hex e/E is a digit,
     // never a decimal exponent marker.
     if (i + 1 < source.size() && integerLiteralBase(source.substr(i, 2)) != 10) {
-      t.text += take();
-      t.text += take();
+      text += take();
+      text += take();
       takeWhile(t, isIdentifierChar);
       return;
     }
@@ -203,7 +282,7 @@ class Lexer {
     takeWhile(t, isDigit);
 
     if (i + 1 < source.size() && source[i] == '.' && isDigit(source[i + 1])) {
-      t.text += take();
+      text += take();
       takeWhile(t, isDigit);
     }
 
@@ -215,33 +294,34 @@ class Lexer {
   void word(Token &t) {
     takeWhile(t, isIdentifierChar);
 
-    if (t.text == "struct" || t.text == "class")
-      fail(t, "'" + t.text + "' is reserved in Duck. Use the container name directly");
+    if (text == "struct" || text == "class")
+      failAt(t, "'" + text + "' is reserved in Duck. Use the container name directly");
   }
 
   void punctuation(Token &t) {
-    t.text += take();
+    text += take();
 
-    if (t.text == "." && source.compare(i, 2, "..") == 0) {
-      t.text += take();
-      t.text += take();
+    if (text == "." && source.compare(i, 2, "..") == 0) {
+      text += take();
+      text += take();
       return;
     }
 
-    if (t.text == "." && nextIs('.')) {
-      t.text += take(); // The duck call operator.
+    if (text == "." && nextIs('.')) {
+      text += take(); // The duck call operator.
       return;
     }
 
     if (atEnd()) return;
 
-    if (isTwoCharOperator(t.text + source[i])) t.text += take();
+    if (isTwoCharOperator(text + source[i])) text += take();
 
-    if ((t.text == "<<" || t.text == ">>") && nextIs('=')) t.text += take();
+    if ((text == "<<" || text == ">>") && nextIs('=')) text += take();
   }
 
   void token(char c) {
     Token t = startToken();
+    text.clear();
 
     if (c == '"' || c == '\'')
       textLiteral(t, c);
@@ -252,6 +332,7 @@ class Lexer {
     else
       punctuation(t);
 
+    t.text = cache.intern(text);
     out.push_back(std::move(t));
   }
 
@@ -272,7 +353,7 @@ public:
         token(c);
     }
 
-    out.push_back({"<eof>", line, col, false, sourceName});
+    out.push_back({Tok::Eof, line, col, false, sourceName});
     return std::move(out);
   }
 };

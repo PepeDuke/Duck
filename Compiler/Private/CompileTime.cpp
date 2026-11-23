@@ -263,7 +263,7 @@ class Interpreter {
              e.kind != "conditional" && e.kind != "compileTime" && e.kind != "macroValue")
       reject("expression '" + e.kind + "' is not allowed");
 
-    if (e.kind == "unary" && (e.token.text == "&" || e.token.text == "*")) reject("pointer access is forbidden");
+    if (e.kind == "unary" && (e.token.text == Tok::Ampersand || e.token.text == Tok::Star)) reject("pointer access is forbidden");
     for (const auto &bound : e.bindings) validateStatement(*bound, owner);
     // A qualified static function's syntactic receiver is a namespace, not a value.
     for (const auto &child : e.args) validateExpression(*child, owner);
@@ -380,7 +380,7 @@ class Interpreter {
     else if (auto floatingConstant = a.floatingConstants.find(&e); floatingConstant != a.floatingConstants.end()) {
       auto bits = std::stoull(floatingConstant->second.substr(2), nullptr, 16);
       double number; std::memcpy(&number, &bits, sizeof(number)); result = real(type, number);
-    } else if (e.kind == "bool") result = integer(Type::Bool, Bits(e.token.text == "true"));
+    } else if (e.kind == "bool") result = integer(Type::Bool, Bits(e.token.text == Tok::True));
     else if (e.kind == "name") {
       if (a.staticFields.count(&e)) reject("static storage reads and writes are forbidden");
 
@@ -423,16 +423,16 @@ class Interpreter {
     } else if (e.kind == "unary") {
       result = expression(*e.args[0], owner, env);
 
-      if (e.token.text == "!") result = integer(Type::Bool, Bits(!result.truth()));
-      else if (e.token.text == "-" && floating(result.type)) result = real(result.type, -result.real);
-      else if (e.token.text == "-") result = integer(result.type, result.bits.negate());
-      else if (e.token.text == "~") result = integer(result.type, result.bits.negate().add(Bits(1).negate()));
+      if (e.token.text == Tok::Bang) result = integer(Type::Bool, Bits(!result.truth()));
+      else if (e.token.text == Tok::Minus && floating(result.type)) result = real(result.type, -result.real);
+      else if (e.token.text == Tok::Minus) result = integer(result.type, result.bits.negate());
+      else if (e.token.text == Tok::Tilde) result = integer(result.type, result.bits.negate().add(Bits(1).negate()));
       else reject("unsupported unary operator");
     } else if (e.kind == "binary") {
       auto left = expression(*e.args[0], owner, env);
 
-      if (e.token.text == "&&" || e.token.text == "||") {
-        const bool skip = e.token.text == "&&" ? !left.truth() : left.truth();
+      if (e.token.text == Tok::AndAnd || e.token.text == Tok::OrOr) {
+        const bool skip = e.token.text == Tok::AndAnd ? !left.truth() : left.truth();
         result = skip ? left : expression(*e.args[1], owner, env);
       } else {
         auto right = expression(*e.args[1], owner, env);
@@ -440,7 +440,7 @@ class Interpreter {
         if (e.args.size() == 3) {
           const auto tolerance = expression(*e.args[2], owner, env);
           const bool same = floatsMatch(left, right, &tolerance);
-          result = integer(Type::Bool, Bits(e.token.text == "==" ? same : !same));
+          result = integer(Type::Bool, Bits(e.token.text == Tok::EqualEqual ? same : !same));
         } else
           result = binary(e.token.text, left, right);
       }
