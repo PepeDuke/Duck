@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -8,11 +9,27 @@
 #include <vector>
 
 namespace duck {
+// Source file paths are stored once, in a table shared by the whole process,
+// and a token names its file by index into it. Index 0 is the empty path of
+// text that came from no file, and a path keeps its index for the life of the
+// process. The table has no lock: paths are registered only while one thread
+// runs, and while worker threads run it is frozen, so they only read it.
+using SourceId = std::uint32_t;
+// Adds a path, or gives the index it already has. Adding one while the table
+// is frozen is a compiler bug, and throws std::logic_error.
+SourceId registerSource(const std::string &path);
+// The index of a path registered earlier. A path never registered is a
+// compiler bug, and throws std::logic_error.
+SourceId findSource(const std::string &path);
+const std::string &sourcePath(SourceId id);
+// Brackets the parallel phases: worker threads may read the table only while it is frozen.
+void freezeSources(bool frozen);
+
 struct Token {
   std::string text;
   int line, column;
   bool string = false;
-  std::string source;
+  SourceId source = 0;
   bool character = false; // A 'x' literal; also marked string so it is never punctuation.
   // Set on tokens copied from a macro body. `mark` is unique per expansion
   // and keeps the names that body declares apart from every other scope.
@@ -28,7 +45,8 @@ struct Expansion {
 };
 // "file:line:column" of a token, for diagnostics that point at a second place.
 inline std::string where(const Token &t) {
-  return (t.source.empty() ? "<input>" : t.source) + ":" + std::to_string(t.line) + ":" +
+  const auto &path = sourcePath(t.source);
+  return (path.empty() ? "<input>" : path) + ":" + std::to_string(t.line) + ":" +
          std::to_string(t.column);
 }
 // A rejected program. what() is the complete plain text; the token lets the

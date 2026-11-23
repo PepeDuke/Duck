@@ -8,9 +8,9 @@
 #include <tuple>
 
 namespace duck {
-// Stage artifacts belong to the caller. No stage uses global mutable state.
-std::vector<Token> lex(const std::string &source,
-                       const std::string &sourceName = "");
+// Stage artifacts belong to the caller. No stage uses global mutable state,
+// except the table of source paths that tokens index (see SourceId).
+std::vector<Token> lex(const std::string &source, SourceId sourceName = 0);
 // Collects type names across all units, qualified by the static bodies that
 // enclose them (`Name.Space`). An enum name is recorded both as Name and as
 // #@Name so the parser can tell enums from containers.
@@ -45,7 +45,17 @@ Program parse(std::vector<Token> tokens, const std::set<std::string> &names, con
 // the parse of `tokens`. `key` identifies the inputs the file was made from.
 std::vector<Token> interfaceTokens(const std::vector<Token> &tokens, const Program &unit);
 std::string writeInterface(const std::string &key, const std::vector<std::vector<Token>> &files);
-std::vector<std::vector<Token>> readInterface(const std::string &text, const std::string &path, std::string &key);
+// One source file of an interface. Its tokens have no source yet: the caller
+// registers the path, on one thread, and stamps its index onto them.
+struct InterfaceFile {
+  std::string source;
+  std::vector<Token> tokens;
+};
+std::vector<InterfaceFile> readInterface(const std::string &text, const std::string &path, std::string &key);
+// Sets the source of every token to the given file.
+inline void stampSource(std::vector<Token> &tokens, SourceId source) {
+  for (auto &t : tokens) t.source = source;
+}
 // Keep units in input order. Combining is a barrier before declaration
 // collection.
 Program combineUnits(std::vector<Program> units);
@@ -415,7 +425,7 @@ void validateLifetimes(const Symbols &symbols);
 
 // Identifies a declared local across analysis and lowering.
 inline std::string captureKey(const Token &t) {
-  return t.source + ":" + std::to_string(t.line) + ":" + std::to_string(t.column) + ":" + t.text;
+  return sourcePath(t.source) + ":" + std::to_string(t.line) + ":" + std::to_string(t.column) + ":" + t.text;
 }
 // Expression pointers refer to the input AST, which must outlive this artifact.
 // Each function gets its own analysis, suitable for independent worker tasks.

@@ -44,18 +44,31 @@ int main() {
             "duplicate or reserved function");
     std::vector<duck::Program> units;
     units.push_back(
-        duck::parse(duck::lex("Main() { Print(Helper()) }", "main.dk")));
+        duck::parse(duck::lex("Main() { Print(Helper()) }", duck::registerSource("main.dk"))));
     units.push_back(
-        duck::parse(duck::lex("int Helper() { return 4 }", "helper.dk")));
+        duck::parse(duck::lex("int Helper() { return 4 }", duck::registerSource("helper.dk"))));
     auto combined = duck::combineUnits(std::move(units));
-    check(combined[1].name.source == "helper.dk",
+    check(duck::sourcePath(combined[1].name.source) == "helper.dk",
           "combining lost source identity");
+    // Worker threads read the source table without a lock, so it must not
+    // grow while they run: a known path still resolves, a new one throws.
+    duck::freezeSources(true);
+    check(duck::registerSource("helper.dk") == combined[1].name.source,
+          "a frozen source table must still find known paths");
+    bool frozenRejected = false;
+    try {
+      duck::registerSource("never-seen.dk");
+    } catch (const std::logic_error &) {
+      frozenRejected = true;
+    }
+    duck::freezeSources(false);
+    check(frozenRejected, "registering a new path in a frozen source table must throw");
     check(duck::compile(combined) ==
               duck::compile(duck::parse(duck::lex(
                   "Main() { Print(Helper()) }\nint Helper() { return 4 }"))),
           "unit boundaries changed IR");
-    rejects([] { duck::lex("\n/* broken", "lexical.dk"); }, "lexical.dk:2:1:");
-    rejects([] { duck::parse(duck::lex("\nMain() {", "syntax.dk")); },
+    rejects([] { duck::lex("\n/* broken", duck::registerSource("lexical.dk")); }, "lexical.dk:2:1:");
+    rejects([] { duck::parse(duck::lex("\nMain() {", duck::registerSource("syntax.dk"))); },
             "syntax.dk:2:");
 
     const std::string source = R"(
@@ -127,7 +140,7 @@ int BitwiseConditional(bool ready) { return ready ? (1 | 2) | 4 | 8 }
 
     auto native = duck::parse(duck::lex(
         "extern \"C\" int Absolute(int value) = \"abs\"\n"
-        "Main() { Print(Absolute(-7)) }", "native.dk"));
+        "Main() { Print(Absolute(-7)) }", duck::registerSource("native.dk")));
     const auto nativeSymbols = duck::collectSymbols(native);
     auto nativeAnalysis = duck::analyzeFunction(native.front(), nativeSymbols);
     auto nativeFragment = duck::lowerFunction(native.front(), nativeSymbols, nativeAnalysis);
@@ -174,7 +187,7 @@ Main() {
     { f : Pure(6)
       g : Pure(7) }
 }
-)", "effects.dk"));
+)", duck::registerSource("effects.dk")));
     const auto effectSymbols = duck::collectSymbols(effects);
     std::vector<duck::FunctionAnalysis> effectAnalyses;
     for (const auto &f : effects) effectAnalyses.push_back(duck::analyzeFunction(f, effectSymbols));
@@ -242,7 +255,7 @@ Main() {
     c : Sized(large)
     Print(a + b + c)
 }
-)", "conflicts.dk"));
+)", duck::registerSource("conflicts.dk")));
       const auto symbols = duck::collectSymbols(program);
       std::vector<duck::FunctionAnalysis> analyses;
       for (const auto &f : program) analyses.push_back(duck::analyzeFunction(f, symbols));

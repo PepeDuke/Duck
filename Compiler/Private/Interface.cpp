@@ -123,8 +123,9 @@ std::string writeInterface(const std::string &key, const std::vector<std::vector
   out.back() = '\n';
 
   for (const auto &tokens : files) {
-    const std::string source = tokens.empty() ? std::string() : tokens.front().source;
-    out += std::to_string(source.size()) + ' ' + source + '\n';
+    const SourceId source = tokens.empty() ? 0 : tokens.front().source;
+    const auto &path = sourcePath(source);
+    out += std::to_string(path.size()) + ' ' + path + '\n';
     writeNumber(out, static_cast<long long>(tokens.size()));
     out.back() = '\n';
 
@@ -141,19 +142,19 @@ std::string writeInterface(const std::string &key, const std::vector<std::vector
   return out;
 }
 
-std::vector<std::vector<Token>> readInterface(const std::string &text, const std::string &path, std::string &key) {
+std::vector<InterfaceFile> readInterface(const std::string &text, const std::string &path, std::string &key) {
   Reader in(text, path);
   in.expectWord("duck-interface 1\nkey ");
   key = in.bytes();
   in.expectWord("files ");
   const auto count = in.number();
-  std::vector<std::vector<Token>> files;
+  std::vector<InterfaceFile> files;
 
   for (long long f = 0; f < count; ++f) {
-    const auto source = in.bytes();
+    InterfaceFile file;
+    file.source = in.bytes();
     const auto tokens = in.number();
-    std::vector<Token> file;
-    file.reserve(size_t(tokens));
+    file.tokens.reserve(size_t(tokens));
 
     for (long long k = 0; k < tokens; ++k) {
       Token t;
@@ -163,8 +164,7 @@ std::vector<std::vector<Token>> readInterface(const std::string &text, const std
       t.string = flags & 1;
       t.character = flags & 2;
       t.text = in.bytes();
-      t.source = source;
-      file.push_back(std::move(t));
+      file.tokens.push_back(std::move(t));
     }
 
     files.push_back(std::move(file));

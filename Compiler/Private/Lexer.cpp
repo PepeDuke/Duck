@@ -1,9 +1,43 @@
 #include "Literals.h"
 #include "Pipeline.h"
 #include "Unicode.h"
+#include <atomic>
 #include <cctype>
+#include <deque>
+#include <unordered_map>
 
 namespace duck {
+namespace {
+std::atomic<bool> sourcesFrozen{false};
+// A deque, so a path returned by reference stays put while others are added.
+std::deque<std::string> sourcePaths{std::string()};
+std::unordered_map<std::string, SourceId> sourceIds{{std::string(), 0}};
+} // namespace
+
+SourceId registerSource(const std::string &path) {
+  if (const auto found = sourceIds.find(path); found != sourceIds.end()) return found->second;
+
+  if (sourcesFrozen.load())
+    throw std::logic_error("source path '" + path + "' registered while worker threads read the table");
+
+  const auto id = static_cast<SourceId>(sourcePaths.size());
+  sourcePaths.push_back(path);
+  sourceIds.emplace(path, id);
+  return id;
+}
+
+SourceId findSource(const std::string &path) {
+  const auto found = sourceIds.find(path);
+
+  if (found == sourceIds.end()) throw std::logic_error("source path '" + path + "' was never registered");
+
+  return found->second;
+}
+
+const std::string &sourcePath(SourceId id) { return sourcePaths.at(id); }
+
+void freezeSources(bool frozen) { sourcesFrozen.store(frozen); }
+
 namespace {
 
 bool isDigit(char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; }
@@ -20,7 +54,7 @@ bool isTwoCharOperator(const std::string &pair) {
 // inside block comments, so statements keep their line structure.
 class Lexer {
   const std::string &source;
-  const std::string &sourceName;
+  const SourceId sourceName;
   std::vector<Token> out;
   size_t i = 0;
   int line = 1, col = 1;
@@ -222,7 +256,7 @@ class Lexer {
   }
 
 public:
-  Lexer(const std::string &source, const std::string &sourceName) : source(source), sourceName(sourceName) {}
+  Lexer(const std::string &source, SourceId sourceName) : source(source), sourceName(sourceName) {}
 
   std::vector<Token> run() {
     while (!atEnd()) {
@@ -245,7 +279,7 @@ public:
 
 } // namespace
 
-std::vector<Token> lex(const std::string &source, const std::string &sourceName) {
+std::vector<Token> lex(const std::string &source, SourceId sourceName) {
   return Lexer(source, sourceName).run();
 }
 

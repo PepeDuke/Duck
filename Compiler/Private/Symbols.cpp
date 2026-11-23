@@ -447,13 +447,13 @@ bool borrowsOnly(const Stmt &s, const std::string &name) {
 // Orders declarations by the input order of their files, then by position
 // within a file.
 class InputOrder {
-  std::map<std::string, size_t> files;
+  std::map<SourceId, size_t> files; // Position in the input order, by file.
 
-  void add(const std::string &source) { files.emplace(source, files.size()); }
+  void add(SourceId source) { files.emplace(source, files.size()); }
 
 public:
   explicit InputOrder(const Program &program) {
-    for (const auto &source : program.sources) add(source);
+    for (const auto &source : program.sources) add(findSource(source));
 
     for (const auto &fragment : program.records) add(fragment.name.source);
 
@@ -725,7 +725,7 @@ static void validateEntryPoint(const Symbols &symbols, bool requireEntry, const 
     }
 
     const auto close = closestName("Main", names);
-    fail({"", 1, 1, false, program.sources.empty() ? "" : program.sources.front()},
+    fail({"", 1, 1, false, program.sources.empty() ? 0 : findSource(program.sources.front())},
          "program requires Main(); " +
              (close.empty() ? "add Main() { ... }, or compile with --library" : "found '" + close + "', but names are case-sensitive and the entry point must be exactly Main"));
   }
@@ -808,7 +808,7 @@ const std::string *Symbols::execTarget(const Expr &call) const {
 
   const auto &written = argument.token.text;
   // Relative to the file making the call, so moving the project keeps working.
-  const auto path = fs::path(call.token.source).parent_path() / fs::u8path(written);
+  const auto path = fs::path(sourcePath(call.token.source)).parent_path() / fs::u8path(written);
   const auto key = sourceKey(path.string());
 
   if (importedSources.count(key))

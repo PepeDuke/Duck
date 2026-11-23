@@ -405,7 +405,7 @@ std::string compileModule(const Program &program, const Program &imports,
   for (const auto &source : imports.sources) symbols.importedSources.insert(sourceKey(source));
 
   for (const auto &function : program)
-    if (function.script) symbols.scripts.emplace(sourceKey(function.name.source), function.name.text);
+    if (function.script) symbols.scripts.emplace(sourceKey(sourcePath(function.name.source)), function.name.text);
 
   if (!entry && !tests && symbols.count("Main"))
     for (const auto &f : program)
@@ -517,7 +517,7 @@ std::string compileModule(const Program &program, const Program &imports,
   std::sort(lowering.begin(), lowering.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
   for (size_t i = 0; i < lowering.size() && i < 10; ++i)
     std::fprintf(stderr, "duckc:   lower %-40s %8.3fs  %s:%d\n", lowering[i].second->name.text.c_str(), lowering[i].first,
-                 lowering[i].second->name.source.c_str(), lowering[i].second->name.line);
+                 sourcePath(lowering[i].second->name.source).c_str(), lowering[i].second->name.line);
 
   // Generated initializers run sequentially; they are never task candidates.
   for (size_t i = 0; i < generated.size(); ++i)

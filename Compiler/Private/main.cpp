@@ -8,10 +8,14 @@
 #include "NetInterface.h"
 #endif
 #include <algorithm>
+#include <condition_variable>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <sstream>
+#include <thread>
 
 namespace {
 
@@ -26,9 +30,29 @@ struct Options {
   std::string interface, interfaceKey;
 };
 
+// One input from the command line: a source file, or an interface file given with --import.
+struct InputFile {
+  std::string path;
+  bool import = false;
+  bool dependency = false;
+  duck::SourceId source = 0; // Registered before the workers start; unused for an interface.
+};
+
 struct SourceFile {
   bool dependency;
   std::vector<duck::Token> tokens;
+  // Position on the command line, then the part of an interface file. Workers
+  // finish in any order; sorting on this restores the order of the arguments.
+  std::pair<size_t, size_t> order{};
+  // A part of an interface file read by a worker: its path, registered and
+  // stamped onto the tokens once the workers stop.
+  std::string unregistered;
+};
+
+struct ParsedSource {
+  duck::Program unit;
+  std::vector<duck::Token> interface; // What importers read, when writing an interface file.
+  std::exception_ptr failure;
 };
 
 struct Inputs {
@@ -100,19 +124,20 @@ void printSourceLine(const duck::Token &token, const SourceTexts &sources) {
 
   // A dependency read from its interface file was never loaded as text.
   static SourceTexts imported;
-  auto source = sources.find(token.source);
+  const auto &path = duck::sourcePath(token.source);
+  auto source = sources.find(path);
 
   if (source == sources.end()) {
-    source = imported.find(token.source);
+    source = imported.find(path);
 
     if (source == imported.end()) {
-      std::ifstream input(token.source, std::ios::binary);
+      std::ifstream input(path, std::ios::binary);
 
       if (!input) return;
 
       std::ostringstream text;
       text << input.rdbuf();
-      source = imported.emplace(token.source, text.str()).first;
+      source = imported.emplace(path, text.str()).first;
     }
   }
 
@@ -168,7 +193,15 @@ void printHelp() {
                "(default: CPU count).\n";
 }
 
-std::string readSource(const std::string &path, const fs::path &outputPath) {
+// Reads the whole stream into buffer, reusing its capacity from earlier files.
+void readAll(std::ifstream &input, std::string &buffer) {
+  buffer.clear();
+  char chunk[16384];
+
+  while (input.read(chunk, sizeof chunk), input.gcount() > 0) buffer.append(chunk, size_t(input.gcount()));
+}
+
+void readSource(std::string &buffer, const std::string &path, const fs::path &outputPath) {
   if (path == "-o") throw std::runtime_error("-o must occur once, after all input files");
 
   std::ifstream input(path, std::ios::binary);
@@ -180,46 +213,26 @@ std::string readSource(const std::string &path, const fs::path &outputPath) {
   if (fs::equivalent(fs::path(path), outputPath, error))
     throw std::runtime_error(path + ": output must not overwrite an input file");
 
-  std::ostringstream source;
-  source << input.rdbuf();
+  readAll(input, buffer);
 
   if (input.bad()) throw std::runtime_error(path + ": cannot read input file");
-
-  return source.str();
-}
-
-void addSource(Inputs &inputs, SourceTexts &texts, const std::string &path, bool dependency, const fs::path &outputPath) {
-  const auto &text = texts[path] = readSource(path, outputPath);
-  auto tokens = duck::preprocess(duck::lex(text, path));
-  duck::collectContainerNames(tokens, inputs.containerNames);
-  duck::collectMacros(tokens, inputs.macros);
-  inputs.sources.push_back({dependency, std::move(tokens)});
 }
 
 // A dependency read from its interface file: tokens already lexed and
 // preprocessed, with the bodies importers never read left empty.
 void addInterface(Inputs &inputs, const std::string &text, const std::string &path) {
   std::string key;
-  for (auto &tokens : duck::readInterface(text, path, key)) {
-    duck::collectContainerNames(tokens, inputs.containerNames);
-    duck::collectMacros(tokens, inputs.macros);
-    inputs.sources.push_back({true, std::move(tokens)});
+  for (auto &file : duck::readInterface(text, path, key)) {
+    duck::stampSource(file.tokens, duck::registerSource(file.source));
+    duck::collectContainerNames(file.tokens, inputs.containerNames);
+    duck::collectMacros(file.tokens, inputs.macros);
+    inputs.sources.push_back({true, std::move(file.tokens)});
   }
 }
 
-void addImport(Inputs &inputs, const std::string &path) {
-  std::ifstream input(path, std::ios::binary);
-
-  if (!input) throw std::runtime_error(path + ": cannot open interface file");
-
-  std::ostringstream text;
-  text << input.rdbuf();
-  addInterface(inputs, text.str(), path);
-}
-
 // Flags and inputs may mix freely; the last two arguments are always -o <path>.
-Inputs readArguments(int argc, char **argv, const fs::path &outputPath, Options &options, SourceTexts &texts) {
-  Inputs inputs;
+std::vector<InputFile> readArguments(int argc, char **argv, Options &options) {
+  std::vector<InputFile> inputs;
 
   for (int i = 1; i < argc - 2; ++i) {
     std::string path = argv[i];
@@ -251,7 +264,7 @@ Inputs readArguments(int argc, char **argv, const fs::path &outputPath, Options 
     if (path == "--import" || path == "--interface" || path == "--interface-key") {
       if (++i >= argc - 2) throw std::runtime_error(path + " requires a value");
 
-      if (path == "--import") addImport(inputs, argv[i]);
+      if (path == "--import") inputs.push_back({argv[i], true, true});
       else if (path == "--interface") options.interface = argv[i];
       else options.interfaceKey = argv[i];
 
@@ -266,7 +279,7 @@ Inputs readArguments(int argc, char **argv, const fs::path &outputPath, Options 
       path = argv[i];
     }
 
-    addSource(inputs, texts, path, dependency, outputPath);
+    inputs.push_back({path, false, dependency});
   }
 
   return inputs;
@@ -279,9 +292,189 @@ void stripDependencyBody(duck::Program &unit) {
   unit.tests.clear();
 }
 
+// Loads the inputs on a few worker threads in two rounds. In the first, each
+// worker takes the next file from the command line, reads and lexes it, and
+// adds its tokens to the second queue. Parsing needs every file's container
+// names and macros, so the second round starts only once all files are lexed:
+// then the same workers take lexed files from the second queue and parse them.
+// Results keep command-line order, so the output and the first reported error
+// never depend on which worker finished first.
+class Loader {
+public:
+  static constexpr size_t Workers = 4;
+  // A guess at a source file's length. Each worker reserves it once and
+  // reuses the buffer, so most files are read without growing it.
+  static constexpr size_t ExpectedFileSize = 10000;
+
+  Inputs inputs; // Its sources are the second queue.
+
+  Loader(std::vector<InputFile> files, fs::path outputPath)
+      : files(std::move(files)), outputPath(std::move(outputPath)), texts(this->files.size()),
+        failures(this->files.size()) {
+    // Register the source paths in command-line order, so a file gets the same
+    // index on every run, then freeze the table for the workers to read.
+    for (auto &file : this->files)
+      if (!file.import) file.source = duck::registerSource(file.path);
+
+    duck::freezeSources(true);
+    const auto count = std::min(Workers, std::max<size_t>(this->files.size(), 1));
+
+    for (size_t i = 0; i < count; ++i) workers.emplace_back([this] { work(); });
+  }
+  ~Loader() {
+    {
+      std::lock_guard<std::mutex> guard(lock);
+      stopping = true;
+    }
+
+    wake.notify_all();
+
+    for (auto &worker : workers) worker.join();
+
+    duck::freezeSources(false);
+  }
+  // Waits for the first round, then collects names and macros in command-line
+  // order. Diagnostics need the text of every file that was read.
+  void lexAll(SourceTexts &sourceTexts) {
+    {
+      std::unique_lock<std::mutex> guard(lock);
+      settled.wait(guard, [&] { return lexedFiles == files.size(); });
+    }
+
+    // The workers are idle, so the table may grow again.
+    duck::freezeSources(false);
+    std::stable_sort(inputs.sources.begin(), inputs.sources.end(),
+                     [](const SourceFile &a, const SourceFile &b) { return a.order < b.order; });
+
+    for (auto &source : inputs.sources)
+      if (!source.unregistered.empty()) {
+        duck::stampSource(source.tokens, duck::registerSource(source.unregistered));
+        source.unregistered.clear();
+      }
+
+    for (size_t i = 0; i < files.size(); ++i)
+      if (!files[i].import && read[i]) sourceTexts[files[i].path] = std::move(texts[i]);
+
+    for (size_t i = 0; i < files.size(); ++i)
+      if (failures[i]) std::rethrow_exception(failures[i]);
+
+    for (const auto &source : inputs.sources) {
+      duck::collectContainerNames(source.tokens, inputs.containerNames);
+      duck::collectMacros(source.tokens, inputs.macros);
+    }
+  }
+  // The second round, over every source including ones added after lexing.
+  std::vector<ParsedSource> parseAll(bool writeInterface) {
+    {
+      std::lock_guard<std::mutex> guard(lock);
+      results.resize(inputs.sources.size());
+      wantInterface = writeInterface;
+      parsing = true;
+      duck::freezeSources(true);
+    }
+
+    wake.notify_all();
+    std::unique_lock<std::mutex> guard(lock);
+    settled.wait(guard, [&] { return parsedSources == inputs.sources.size(); });
+    duck::freezeSources(false);
+    return std::move(results);
+  }
+
+private:
+  std::vector<InputFile> files;
+  fs::path outputPath;
+  std::vector<std::string> texts;           // By file, for diagnostics.
+  std::vector<char> read = std::vector<char>(files.size()); // By file: its text was read.
+  std::vector<std::exception_ptr> failures; // By file, from the first round.
+  std::vector<ParsedSource> results;        // By source, from the second round.
+  std::vector<std::thread> workers;
+  std::mutex lock;
+  std::condition_variable wake, settled;
+  size_t nextFile = 0, lexedFiles = 0, nextSource = 0, parsedSources = 0;
+  bool parsing = false, wantInterface = false, stopping = false;
+
+  void work() {
+    std::string buffer;
+    buffer.reserve(ExpectedFileSize);
+    std::unique_lock<std::mutex> guard(lock);
+
+    for (;;) {
+      wake.wait(guard, [&] {
+        return stopping || nextFile < files.size() || (parsing && nextSource < inputs.sources.size());
+      });
+
+      if (stopping) return;
+
+      if (nextFile < files.size()) {
+        const auto i = nextFile++;
+        guard.unlock();
+        auto lexed = lex(i, buffer);
+        guard.lock();
+
+        for (auto &source : lexed) inputs.sources.push_back(std::move(source));
+
+        if (++lexedFiles == files.size()) settled.notify_all();
+      } else {
+        const auto i = nextSource++;
+        guard.unlock();
+        parse(inputs.sources[i], results[i]);
+        guard.lock();
+
+        if (++parsedSources == inputs.sources.size()) settled.notify_all();
+      }
+    }
+  }
+  std::vector<SourceFile> lex(size_t i, std::string &buffer) {
+    const auto &file = files[i];
+    std::vector<SourceFile> lexed;
+
+    try {
+      if (file.import) {
+        std::ifstream input(file.path, std::ios::binary);
+
+        if (!input) throw std::runtime_error(file.path + ": cannot open interface file");
+
+        readAll(input, buffer);
+        std::string key;
+        size_t index = 0;
+
+        for (auto &part : duck::readInterface(buffer, file.path, key))
+          lexed.push_back({true, std::move(part.tokens), {i, index++}, std::move(part.source)});
+      } else {
+        readSource(buffer, file.path, outputPath);
+        texts[i] = buffer;
+        read[i] = true;
+        lexed.push_back({file.dependency, duck::preprocess(duck::lex(buffer, file.source)), {i, 0}});
+      }
+    } catch (...) {
+      failures[i] = std::current_exception();
+      lexed.clear();
+    }
+
+    return lexed;
+  }
+  // The interface is made from the tokens the parser sees, before parsing
+  // consumes them, and the parse that tells which bodies importers read.
+  void parse(SourceFile &source, ParsedSource &result) {
+    try {
+      std::vector<duck::Token> copy;
+
+      if (!source.dependency && wantInterface) copy = source.tokens;
+
+      result.unit = duck::parse(std::move(source.tokens), inputs.containerNames, inputs.macros);
+
+      if (source.dependency) stripDependencyBody(result.unit);
+      else if (wantInterface) result.interface = duck::interfaceTokens(copy, result.unit);
+    } catch (...) {
+      result.failure = std::current_exception();
+    }
+  }
+};
+
 void writeOutput(const fs::path &outputPath, const std::string &ir);
 
-std::string compileInputs(Inputs inputs, const Options &options) {
+std::string compileInputs(Loader &loader, const Options &options) {
+  auto &inputs = loader.inputs;
   std::vector<duck::Program> units, importedUnits;
   std::vector<std::vector<duck::Token>> interface;
 
@@ -303,22 +496,17 @@ std::string compileInputs(Inputs inputs, const Options &options) {
   });
   if (needsNet) addInterface(inputs, netInterface, "<standard Net>");
 #endif
-  for (auto &[dependency, tokens] : inputs.sources) {
-    // The interface is made from the tokens the parser sees, before parsing
-    // consumes them, and the parse that tells which bodies importers read.
-    std::vector<duck::Token> copy;
+  auto parsed = loader.parseAll(!options.interface.empty());
 
-    if (!dependency && !options.interface.empty()) copy = tokens;
+  for (size_t i = 0; i < parsed.size(); ++i) {
+    if (parsed[i].failure) std::rethrow_exception(parsed[i].failure);
 
-    auto unit = duck::parse(std::move(tokens), inputs.containerNames, inputs.macros);
-
-    if (dependency) {
-      stripDependencyBody(unit);
-      importedUnits.push_back(std::move(unit));
+    if (inputs.sources[i].dependency) {
+      importedUnits.push_back(std::move(parsed[i].unit));
     } else {
-      if (!options.interface.empty()) interface.push_back(duck::interfaceTokens(copy, unit));
+      if (!options.interface.empty()) interface.push_back(std::move(parsed[i].interface));
 
-      units.push_back(std::move(unit));
+      units.push_back(std::move(parsed[i].unit));
     }
   }
 
@@ -384,9 +572,10 @@ int main(int argc, char **argv) {
   try {
     const fs::path outputPath(argv[argc - 1]);
     Options options;
-    auto inputs = readArguments(argc, argv, outputPath, options, texts);
+    Loader loader(readArguments(argc, argv, options), outputPath);
+    loader.lexAll(texts);
     duck::phase("read, lex, preprocess");
-    const auto ir = compileInputs(std::move(inputs), options);
+    const auto ir = compileInputs(loader, options);
     writeOutput(outputPath, ir);
     duck::phase("write output");
     return 0;

@@ -3246,7 +3246,7 @@ public:
   Program parse() {
     Program functions;
     output = &functions;
-    functions.sources.push_back(tokens.front().source);
+    functions.sources.push_back(sourcePath(tokens.front().source));
     // The last statement of a file need not end in a newline.
     tokens.insert(tokens.end() - 1, Token{"\n", tokens.back().line, tokens.back().column, false, tokens.back().source});
     declarations(functions, "", false);

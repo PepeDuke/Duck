@@ -13,7 +13,7 @@ int main(int argc, char **argv) {
         if (!input) return 1;
         std::ostringstream source;
         source << input.rdbuf();
-        auto tokens = duck::preprocess(duck::lex(source.str(), argv[1]));
+        auto tokens = duck::preprocess(duck::lex(source.str(), duck::registerSource(argv[1])));
         std::set<std::string> names;
         duck::collectContainerNames(tokens, names);
         auto unit = duck::parse(tokens, names, {});
