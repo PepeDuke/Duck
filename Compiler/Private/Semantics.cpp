@@ -4386,24 +4386,31 @@ class Analyzer {
       checks.push_back({place, &s, frames.size()});
     }
 
+    // Each branch state is used once below, so move rather than copy: a
+    // scope stack holds every visible local and an if is everywhere.
     auto before = scopes;
     bool yes = block(s.body);
 
     if (bound) checks.pop_back();
 
-    auto yesState = scopes;
+    auto yesState = std::move(scopes);
     scopes = before;
     bool no = block(s.alternate);
-    auto noState = scopes;
+    auto noState = std::move(scopes);
 
     if (yes && no)
-      scopes = before;
+      scopes = std::move(before);
     else if (yes)
-      scopes = noState;
+      scopes = std::move(noState);
     else if (no)
-      scopes = yesState;
-    else
-      scopes = merge(before, {yesState, noState});
+      scopes = std::move(yesState);
+    else {
+      std::vector<Scopes> incoming;
+      incoming.reserve(2);
+      incoming.push_back(std::move(yesState));
+      incoming.push_back(std::move(noState));
+      scopes = merge(std::move(before), incoming);
+    }
 
     return yes && no;
   }
@@ -4418,7 +4425,7 @@ class Analyzer {
     auto exits = std::move(loops.back().breaks);
     loops.pop_back();
 
-    if (!terminated) incoming.push_back(scopes);
+    if (!terminated) incoming.push_back(std::move(scopes));
 
     scopes = incoming.empty() ? entry : merge(entry, incoming);
     return {std::move(incoming), std::move(exits)};
@@ -4431,7 +4438,7 @@ class Analyzer {
     if (s.expr) truth(*s.expr, expression(*s.expr), s.token);
 
     if (s.expr && !incoming.empty())
-      exits.push_back(scopes);
+      exits.push_back(std::move(scopes));
 
     scopes = exits.empty() ? entry : merge(entry, exits);
 
@@ -4463,14 +4470,14 @@ class Analyzer {
     } else if (s.expr)
       truth(*s.expr, expression(*s.expr), s.token);
 
-    const auto entry = scopes;
+    auto entry = scopes;
     // Still type-check an unreachable step, using conservative entry facts.
     loopBody(s, entry);
 
     if (s.step)
       statement(*s.step);
 
-    scopes = entry; // A precondition loop can execute zero times.
+    scopes = std::move(entry); // A precondition loop can execute zero times.
     requireCompleteScopes(scopes.size() - 1);
     scopes.pop_back();
 

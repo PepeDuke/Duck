@@ -645,17 +645,28 @@ struct EffectSummary : EffectSet {
   bool threadSafe = false; // Its body exchanges only plain data, so it may run on a worker.
 };
 using EffectTable = std::map<std::string, EffectSummary>;
+// Module-wide lookups the per-function scheduling passes share. Building them
+// once per module, instead of once per function, keeps those passes linear.
+struct SchedulingIndex {
+  // Method keys that some derived container in this module overrides.
+  std::set<std::string> overridden;
+  // Position in the program of every function with a body, by name.
+  std::map<std::string, size_t> functions;
+};
+SchedulingIndex indexScheduling(const Program &program, const Symbols &symbols);
 // Least fixpoint over the call graph, so a recursive group shares its effects.
 // Imported and native functions are unknown. A library (entry = false) can
 // have its methods overridden by importers, so its virtual calls are too.
 EffectTable summarizeEffects(const Program &program, const std::vector<FunctionAnalysis> &analyses,
-                             const Symbols &symbols, bool entry = true);
+                             const Symbols &symbols, bool entry = true, const SchedulingIndex *index = nullptr);
 // Decides what each `${ }` block locks. This is part of the program's meaning,
-// so it runs for sequential builds as well.
+// so it runs for sequential builds as well. Without an index, each call builds its own.
 void planOrderedBlocks(const Function &function, const EffectTable &effects, const Symbols &symbols,
-                       FunctionAnalysis &analysis, bool entry = true, bool parallel = true);
+                       FunctionAnalysis &analysis, bool entry = true, bool parallel = true,
+                       const SchedulingIndex *index = nullptr);
 void scheduleTasks(const Program &program, size_t index, const EffectTable &effects, const Symbols &symbols,
-                   std::vector<FunctionAnalysis> &analyses, bool entry = true);
+                   std::vector<FunctionAnalysis> &analyses, bool entry = true,
+                   const SchedulingIndex *scheduling = nullptr);
 
 struct FunctionIR {
   std::string globals;

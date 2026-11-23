@@ -254,7 +254,6 @@ class NativeInterop(unittest.TestCase):
             ('Main() { void* p = null\np++ }', "type mismatch"),
             ('Main() { void* p = null\nPrint(p + 1) }', "type mismatch"),
             ('Main() { void* p = null\nPrint(p < null) }', "type mismatch"),
-            ('Main() { Print(null) }', "cannot print an opaque pointer"),
             ('Main() { void* p\nPrint(p == null) }', "read before assignment"),
             ('Main() { Print((int)null) }', "casts currently require"),
             ('Main() { cstring s = null }', "type mismatch"),
@@ -347,6 +346,16 @@ int64_t Releases(void) { return releases; }
             self.command(options.clang, optimization, str(ir), str(probe), "-o", str(exe))
             self.assertEqual(self.command(str(exe)).stdout,
                              "17\n17\n1\n1\n2\n3\n1\n42\n1\n1\n2\n3\n1\n")
+
+    def test_print_null(self):
+        # Print(null) pushes pending output to the console and adds no newline.
+        source = self.root / "flush.dk"
+        source.write_text("Main()\n{\n    Print(null)\n    Print(7)\n    Print(null)\n    Print(8)\n    Print(null)\n}\n")
+        ir = self.root / "flush.ll"
+        self.command(options.compiler, str(source), "-o", str(ir))
+        exe = self.root / "flush.exe"
+        self.command(options.clang, str(ir), "-o", str(exe))
+        self.assertEqual(self.command(str(exe)).stdout, "7\n8\n")
 
     def test_imported_native_conflict(self):
         dependency = self.root / "dependency.dk"

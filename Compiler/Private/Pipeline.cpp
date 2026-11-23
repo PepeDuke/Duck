@@ -480,17 +480,18 @@ std::string compileModule(const Program &program, const Program &imports,
   phase("compile-time calls");
   {
     // Imported bodies are not visible, so their effects stay unknown.
-    const auto effects = summarizeEffects(program, analyses, symbols, entry);
+    const auto scheduling = indexScheduling(program, symbols);
+    const auto effects = summarizeEffects(program, analyses, symbols, entry, &scheduling);
     phase("summarize effects");
 
     for (size_t i = 0; i < evaluatedFunctions.size(); ++i)
       if (i < program.size() || !analyses[i].parallelGroups.empty())
-        planOrderedBlocks(*evaluatedFunctions[i], effects, symbols, analyses[i], entry, parallel);
+        planOrderedBlocks(*evaluatedFunctions[i], effects, symbols, analyses[i], entry, parallel, &scheduling);
     phase("plan ordered blocks");
 
     if (parallel)
       for (size_t i = 0; i < program.size(); ++i)
-        scheduleTasks(program, i, effects, symbols, analyses, entry);
+        scheduleTasks(program, i, effects, symbols, analyses, entry, &scheduling);
     phase("schedule tasks");
   }
   std::set<std::string> nativeSymbols;

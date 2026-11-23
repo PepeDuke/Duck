@@ -75,7 +75,15 @@ class EffectWalker {
   const Symbols &symbols;
   const EffectTable &table;
   bool library;
+  const std::set<std::string> &overridden; // From the module's SchedulingIndex.
   Recording *recording;
+  // Every summary this walk read, so the fixpoint knows whom a change affects.
+  std::set<std::string> *consulted = nullptr;
+  EffectTable::const_iterator consult(const std::string &key) const {
+    if (consulted) consulted->insert(key);
+
+    return table.find(key);
+  }
   std::vector<std::map<std::string, Place>> scopes;
   std::map<std::string, std::pair<Token, Type>> locals; // By unique id.
   std::vector<std::set<std::string> *> activeBlocks;    // Locals declared inside each open `${ }`.
@@ -195,30 +203,11 @@ class EffectWalker {
 
     if (alsoRead) current.reads.insert(found->resource);
   }
-  // Cached per method for this walker: the answer scans every container, and
-  // a function calls the same methods over and over.
-  mutable std::map<std::string, bool> overridableCache;
   bool overridable(const std::string &key) const {
     if (!dispatched(key, true)) return false;
     if (library) return true;
 
-    if (auto cached = overridableCache.find(key); cached != overridableCache.end()) return cached->second;
-
-    const auto owner = key.substr(0, key.rfind('.'));
-    const auto member = memberName(key);
-    bool result = false;
-
-    for (const auto &[record, info] : symbols.records) {
-      (void)info;
-
-      if (record != owner && symbols.derivesFrom(record, owner) && symbols.count(methodKey(record, member))) {
-        result = true;
-        break;
-      }
-    }
-
-    overridableCache.emplace(key, result);
-    return result;
+    return overridden.count(methodKey(key.substr(0, key.rfind('.')), memberName(key))) != 0;
   }
   // Rewrites a callee's parameter-relative effects in the caller's terms.
   EffectSet apply(const EffectSummary &callee, const std::map<size_t, std::optional<Place>> &bound) {
@@ -316,7 +305,7 @@ class EffectWalker {
       if (built == a.constructions.end()) return;
 
       for (const auto &part : built->second) {
-        const auto callee = table.find(part.key);
+        const auto callee = consult(part.key);
 
         if (callee == table.end() || (inBranch && !callee->second.threadSafe)) {
           current.unknown = true;
@@ -362,7 +351,7 @@ class EffectWalker {
       return;
     }
 
-    const auto callee = table.find(target->second);
+    const auto callee = consult(target->second);
 
     if (callee == table.end() || !symbols.count(target->second)) {
       current.unknown = true;
@@ -679,7 +668,7 @@ class EffectWalker {
     EffectSet effects;
     effects.unknown = true;
     if (const auto target = a.functionValues.find(&e); target != a.functionValues.end()) {
-      const auto found = table.find(target->second);
+      const auto found = consult(target->second);
       if (found != table.end() && found->second.threadSafe) return found->second;
       return effects;
     }
@@ -840,8 +829,10 @@ class EffectWalker {
 
 public:
   EffectWalker(const Function &f, const FunctionAnalysis &a, const Symbols &symbols, const EffectTable &table,
-               bool library, Recording *recording)
-      : f(f), a(a), symbols(symbols), table(table), library(library), recording(recording) {}
+               bool library, const std::set<std::string> &overridden, Recording *recording)
+      : f(f), a(a), symbols(symbols), table(table), library(library), overridden(overridden),
+        recording(recording) {}
+  void recordReads(std::set<std::string> *into) { consulted = into; }
   void validateGroups() {
     checkingGroups = true;
     std::set<const Expr *> operands;
@@ -870,7 +861,8 @@ public:
       auto ignore = [](const Expr &) {};
       for (const auto &s : lambda->lambda->body) visitStatement(*s, ignore, group);
       if (!needed) continue;
-      EffectWalker inner(*lambda->lambda, a, symbols, table, library, nullptr);
+      EffectWalker inner(*lambda->lambda, a, symbols, table, library, overridden, nullptr);
+      inner.consulted = consulted;
       inner.checkingGroups = true;
       inner.branchNames = branchNames;
       inner.otherUses = otherUses;
@@ -934,7 +926,7 @@ class CostModel {
   const Program &program;
   const std::vector<FunctionAnalysis> &analyses;
   const Symbols &symbols;
-  std::map<std::string, size_t> index;
+  const std::map<std::string, size_t> &index;
   std::set<std::string> active;
   std::map<std::string, double> memo;
 
@@ -1098,11 +1090,9 @@ class CostModel {
   }
 
 public:
-  CostModel(const Program &program, const std::vector<FunctionAnalysis> &analyses, const Symbols &symbols)
-      : program(program), analyses(analyses), symbols(symbols) {
-    for (size_t i = 0; i < program.size(); ++i)
-      if (program[i].nativeSymbol.empty()) index[program[i].name.text] = i;
-  }
+  CostModel(const Program &program, const std::vector<FunctionAnalysis> &analyses, const Symbols &symbols,
+            const std::map<std::string, size_t> &index)
+      : program(program), analyses(analyses), symbols(symbols), index(index) {}
   double estimate(const Expr &e, const std::string &target, const Function &f, const FunctionAnalysis &a) {
     static const Sizes none;
     return call(e, target, frameFor(f, a, none));
@@ -1211,16 +1201,59 @@ class Scheduler {
 
 public:
   Scheduler(const Function &function, const EffectTable &table, FunctionAnalysis &analysis, CostModel &cost,
-            const Symbols &symbols, bool library)
+            const Symbols &symbols, bool library, const std::set<std::string> &overridden)
       : function(function), table(table), analysis(analysis), cost(cost) {
-    EffectWalker(function, analysis, symbols, table, library, &recorded).run();
+    EffectWalker(function, analysis, symbols, table, library, overridden, &recorded).run();
   }
   void run() { list(function.body); }
 };
 } // namespace
 
+SchedulingIndex indexScheduling(const Program &program, const Symbols &symbols) {
+  SchedulingIndex result;
+
+  for (size_t i = 0; i < program.size(); ++i)
+    if (program[i].nativeSymbol.empty()) result.functions[program[i].name.text] = i;
+
+  // A method is overridden when a container that derives from its owner,
+  // directly or through other parents, has a method of the same name.
+  for (const auto &[key, signature] : symbols) {
+    (void)signature;
+    const auto dot = key.rfind('.');
+
+    if (dot == std::string::npos || dot + 1 >= key.size() || key[dot + 1] != '$') continue;
+
+    const auto record = key.substr(0, dot);
+
+    if (!symbols.records.count(record)) continue;
+
+    const auto member = key.substr(dot + 2);
+    std::set<std::string> seen;
+    std::vector<std::string> pending{record};
+
+    while (!pending.empty()) {
+      const auto found = symbols.records.find(pending.back());
+      pending.pop_back();
+
+      if (found == symbols.records.end()) continue;
+
+      for (const auto &parent : found->second.parents)
+        if (parent.text != record && seen.insert(parent.text).second) {
+          result.overridden.insert(methodKey(parent.text, member));
+          pending.push_back(parent.text);
+        }
+    }
+  }
+
+  return result;
+}
+
 EffectTable summarizeEffects(const Program &program, const std::vector<FunctionAnalysis> &analyses,
-                             const Symbols &symbols, bool entry) {
+                             const Symbols &symbols, bool entry, const SchedulingIndex *shared) {
+  std::optional<SchedulingIndex> own;
+
+  if (!shared) shared = &own.emplace(indexScheduling(program, symbols));
+
   EffectTable table;
   std::map<std::string, size_t> index;
 
@@ -1247,12 +1280,31 @@ EffectTable summarizeEffects(const Program &program, const std::vector<FunctionA
     summary.threadSafe = safe;
   }
 
-  // Least fixpoint: effects only grow, so recursive groups settle on their union.
-  for (bool changed = true; changed;) {
-    changed = false;
+  // Least fixpoint: effects only grow, so recursive groups settle on their
+  // union. A function is walked again only when a summary it read has grown,
+  // instead of rewalking the whole module until a pass changes nothing.
+  // Passes go in name order like a full sweep, but skip functions whose inputs
+  // are unchanged. A reader later in the current pass sees the new summary anyway.
+  std::map<std::string, std::set<std::string>> readers; // Summary -> functions that read it.
+  std::set<std::string> pending;
 
-    for (const auto &[name, i] : index) {
-      auto effects = EffectWalker(program[i], analyses[i], symbols, table, !entry, nullptr).run();
+  for (const auto &[name, i] : index) {
+    (void)i;
+    pending.insert(name);
+  }
+
+  while (!pending.empty()) {
+    std::set<std::string> next;
+
+    for (auto current = pending.begin(); current != pending.end(); ++current) {
+      const auto &name = *current;
+      const auto i = index.at(name);
+      std::set<std::string> consulted;
+      EffectWalker walker(program[i], analyses[i], symbols, table, !entry, shared->overridden, nullptr);
+      walker.recordReads(&consulted);
+      auto effects = walker.run();
+
+      for (const auto &callee : consulted) readers[callee].insert(name);
 
       for (auto *set : {&effects.reads, &effects.writes})
         for (auto it = set->begin(); it != set->end();)
@@ -1266,8 +1318,13 @@ EffectTable summarizeEffects(const Program &program, const std::vector<FunctionA
         continue;
 
       static_cast<EffectSet &>(summary) = std::move(effects);
-      changed = true;
+
+      if (const auto affected = readers.find(name); affected != readers.end())
+        for (const auto &reader : affected->second)
+          if (reader <= name || !pending.count(reader)) next.insert(reader);
     }
+
+    pending = std::move(next);
   }
 
   // Greatest fixpoint: one unsafe callee taints everything that reaches it.
@@ -1296,25 +1353,33 @@ EffectTable summarizeEffects(const Program &program, const std::vector<FunctionA
 }
 
 void planOrderedBlocks(const Function &function, const EffectTable &effects, const Symbols &symbols,
-                       FunctionAnalysis &analysis, bool entry, bool parallel) {
+                       FunctionAnalysis &analysis, bool entry, bool parallel, const SchedulingIndex *shared) {
   if (!function.nativeSymbol.empty()) return;
 
+  std::optional<SchedulingIndex> own;
+
+  if (!shared) shared = &own.emplace(indexScheduling(Program{}, symbols));
+
   Recording recording;
-  EffectWalker(function, analysis, symbols, effects, !entry, &recording).run();
+  EffectWalker(function, analysis, symbols, effects, !entry, shared->overridden, &recording).run();
   analysis.orderedLocks = std::move(recording.ordered);
   if (!analysis.parallelGroups.empty()) {
-    EffectWalker(function, analysis, symbols, effects, !entry, nullptr).validateGroups();
+    EffectWalker(function, analysis, symbols, effects, !entry, shared->overridden, nullptr).validateGroups();
     analysis.parallelWorkers = parallel;
   }
 }
 
 void scheduleTasks(const Program &program, size_t index, const EffectTable &effects, const Symbols &symbols,
-                   std::vector<FunctionAnalysis> &analyses, bool entry) {
+                   std::vector<FunctionAnalysis> &analyses, bool entry, const SchedulingIndex *shared) {
   const auto &function = program[index];
 
   if (!function.nativeSymbol.empty()) return;
 
-  CostModel cost(program, analyses, symbols);
-  Scheduler(function, effects, analyses[index], cost, symbols, !entry).run();
+  std::optional<SchedulingIndex> own;
+
+  if (!shared) shared = &own.emplace(indexScheduling(program, symbols));
+
+  CostModel cost(program, analyses, symbols, shared->functions);
+  Scheduler(function, effects, analyses[index], cost, symbols, !entry, shared->overridden).run();
 }
 } // namespace duck
