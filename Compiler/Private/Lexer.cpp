@@ -337,7 +337,13 @@ class Lexer {
   }
 
 public:
-  Lexer(const std::string &source, SourceId sourceName) : source(source), sourceName(sourceName) {}
+  // Room for a typical file up front: Hellfeather's median file is about
+  // 3,600 tokens, so most files never regrow the vector.
+  static constexpr size_t ExpectedTokens = 5000;
+
+  Lexer(const std::string &source, SourceId sourceName) : source(source), sourceName(sourceName) {
+    out.reserve(ExpectedTokens);
+  }
 
   std::vector<Token> run() {
     while (!atEnd()) {

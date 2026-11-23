@@ -15,9 +15,12 @@ const char *kindName(Constant::Kind kind) {
   return kind == Constant::Bool ? "bool" : kind == Constant::Integer ? "integer" : "string";
 }
 
+// Works in the lexer's token buffer: the output is the input with directives
+// and untaken #if blocks removed, so kept tokens are compacted to the front
+// and the same buffer goes on to the parser.
 class Preprocessor {
-  const std::vector<Token> &in;
-  std::vector<Token> out;
+  std::vector<Token> &in;
+  size_t kept = 0; // Tokens kept so far, at in[0, kept).
   struct Definition {
     Token name;
     Constant value;
@@ -309,21 +312,30 @@ class Preprocessor {
       if (directive(k, Tok::Define)) k = define(k);
       else if (directive(k, Tok::If)) k = conditional(k);
       else if (directive(k, Tok::Else)) fail(in[k + 1], "#else without a matching #if");
-      else out.push_back(in[k]);
+      else keep(k);
     }
   }
 
+  // A write lands at or behind k, never past it, so every token still to be
+  // read is intact: the ones ahead, and in[k - 1] for the line-start check.
+  // A copy, not a move, keeps an overwritten-from token whole for diagnostics.
+  void keep(size_t k) {
+    if (kept != k) in[kept] = in[k];
+
+    ++kept;
+  }
+
 public:
-  explicit Preprocessor(const std::vector<Token> &tokens) : in(tokens) {}
-  std::vector<Token> result() {
-    out.reserve(in.size());
+  explicit Preprocessor(std::vector<Token> &tokens) : in(tokens) {}
+  void run() {
     run(0, in.size());
-    return std::move(out);
+    in.erase(in.begin() + long(kept), in.end());
   }
 };
 } // namespace
 
 std::vector<Token> preprocess(std::vector<Token> tokens) {
-  return Preprocessor(tokens).result();
+  Preprocessor(tokens).run();
+  return tokens;
 }
 } // namespace duck
