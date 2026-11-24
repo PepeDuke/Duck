@@ -55,7 +55,24 @@ void freezeSources(bool frozen);
   X(Func, "func") X(File, "file") X(Markup, "markup") X(Element, "element") X(Vec2, "vec2") X(Vec3, "vec3")     \
   X(Vec4, "vec4") X(Dvec2, "dvec2") X(Dvec3, "dvec3") X(Dvec4, "dvec4") X(Ivec2, "ivec2") X(Ivec3, "ivec3")     \
   X(Ivec4, "ivec4") X(Mat3, "mat3") X(Mat4, "mat4") X(Dmat3, "dmat3") X(Dmat4, "dmat4") X(Quat, "quat")         \
-  X(Rot, "rot")
+  X(Rot, "rot")                                                                                                  \
+  /* Names the compiler looks for or generates: identifiers, not reserved words. */                              \
+  X(Main, "Main") X(Print, "Print") X(Exec, "Exec") X(Status, "Status") X(ThreadSlots, "ThreadSlots")            \
+  X(ThreadCount, "ThreadCount") X(Thread, "Thread") X(P, "P") X(T, "T") X(C, "C") X(Len, "Len")                  \
+  X(Length, "Length") X(CodeUnitAt, "CodeUnitAt") X(IsOpen, "IsOpen") X(CountProperty, "Count") X(Min, "Min")    \
+  X(Max, "Max") X(NameProperty, "Name") X(Value, "Value") X(ImplicitValue, "value") X(AreEqual, "AreEqual")      \
+  X(Fail, "Fail") X(IsTrue, "IsTrue") X(Start, "start") X(End, "end") X(Args, "args") X(Pair, "pair")            \
+  X(Queue, "queue") X(Stack, "stack") X(Lambda, "$lambda") X(Children, "$children") X(Self, "$self")             \
+  X(HeldScope, "$scope") X(HeldUse, "$use") X(Ordered, "$ordered") X(SelfMarkup, "$self.$markup")                \
+  X(FirstScript, "$exec.0") X(MacroValue, "$value") X(MacroResult, "$result") X(MacroEnd, "$end")                \
+  X(AddDays, "AddDays") X(DateOf, "DateOf") X(Day, "Day") X(DayOfWeek, "DayOfWeek")                              \
+  X(DaysBetween, "DaysBetween") X(Hour, "Hour") X(IsValid, "IsValid") X(Minute, "Minute") X(Month, "Month")      \
+  X(Nanosecond, "Nanosecond") X(Second, "Second") X(TimeOf, "TimeOf") X(Year, "Year") X(TestFail, "$T.fail")     \
+  X(TestShow, "$T.show") X(Clear, "Clear") X(CellAssign, "[...] =")                                              \
+  X(Net, "Net") X(NetReceiveEvent, "NetReceiveEvent") X(NetReceiveSettings, "NetReceiveSettings")                \
+  X(NetIncoming, "NetIncoming") X(WebTransportSession, "WebTransportSession")                                    \
+  X(WebTransportStream, "WebTransportStream") X(TcpListener, "TcpListener") X(TcpConnection, "TcpConnection")    \
+  X(UdpSocket, "UdpSocket") X(UdpEndpoint, "UdpEndpoint")
 
 enum class Tok : std::uint16_t {
   Literal, // Text from the literal table.
@@ -64,6 +81,103 @@ enum class Tok : std::uint16_t {
 #undef DUCK_TOKEN_ENUM
   Count
 };
+
+// What an Expr or a Stmt is. The spellings are only for diagnostics.
+#define DUCK_EXPR_KINDS(X)                                                                                       \
+  X(None, "") X(Binary, "binary") X(Bool, "bool") X(Call, "call") X(Cast, "cast") X(Char, "char")                \
+  X(CompileTime, "compileTime") X(Conditional, "conditional") X(Construct, "construct") X(DuckCall, "duckCall")  \
+  X(DuckCheck, "duckCheck") X(DuckExists, "duckExists") X(Entry, "entry")                                        \
+  X(FieldInitializer, "fieldInitializer") X(Guard, "guard") X(Index, "index") X(Initializer, "initializer")      \
+  X(Int, "int") X(Invoke, "invoke") X(Lambda, "lambda") X(MacroValue, "macroValue") X(MarkupTake, "markupTake")  \
+  X(MoveCheck, "moveCheck") X(Mutation, "mutation") X(Name, "name") X(Null, "null") X(Range, "range")            \
+  X(Real, "real") X(Removal, "removal") X(ScopeActive, "scopeActive") X(Text, "text")                            \
+  X(TypeMember, "typeMember") X(Unary, "unary") X(Member, ".")
+#define DUCK_STMT_KINDS(X)                                                                                       \
+  X(None, "") X(Assign, "assign") X(Block, "block") X(Break, "break") X(Case, "case") X(Continue, "continue")    \
+  X(Do, "do") X(Expr, "expr") X(For, "for") X(ForEach, "foreach") X(If, "if") X(Let, "let")                      \
+  X(MarkupAdd, "markupAdd") X(MarkupSplice, "markupSplice") X(MoveInto, "moveInto") X(Ordered, "ordered")        \
+  X(Own, "own") X(Parallel, "parallel") X(RangeFor, "rangefor") X(Return, "return")                              \
+  X(ReturnOwner, "returnOwner") X(ScopedBody, "scopedBody") X(ScopeEnd, "scopeEnd") X(ScopeStart, "scopeStart")  \
+  X(Switch, "switch") X(While, "while") X(PercentAssign, "%=") X(AmpersandAssign, "&=") X(StarAssign, "*=")      \
+  X(Increment, "++") X(PlusAssign, "+=") X(Decrement, "--") X(MinusAssign, "-=") X(SlashAssign, "/=")            \
+  X(ShiftLeftAssign, "<<=") X(ShiftRightAssign, ">>=") X(CaretAssign, "^=") X(PipeAssign, "|=")
+
+enum class ExprKind : std::uint8_t {
+#define DUCK_KIND_ENUM(name, text) name,
+  DUCK_EXPR_KINDS(DUCK_KIND_ENUM)
+};
+enum class StmtKind : std::uint8_t {
+  DUCK_STMT_KINDS(DUCK_KIND_ENUM)
+#undef DUCK_KIND_ENUM
+};
+inline const char *kindName(ExprKind kind) {
+#define DUCK_KIND_TEXT(name, text) text,
+  static const char *const names[] = {DUCK_EXPR_KINDS(DUCK_KIND_TEXT)};
+  return names[static_cast<size_t>(kind)];
+}
+inline const char *kindName(StmtKind kind) {
+  static const char *const names[] = {DUCK_STMT_KINDS(DUCK_KIND_TEXT)};
+#undef DUCK_KIND_TEXT
+  return names[static_cast<size_t>(kind)];
+}
+// The statement an assignment operator makes: `x += 1` is a PlusAssign.
+inline StmtKind assignmentKind(Tok op) {
+  switch (op) {
+  case Tok::Assign: return StmtKind::Assign;
+  case Tok::PlusAssign: return StmtKind::PlusAssign;
+  case Tok::MinusAssign: return StmtKind::MinusAssign;
+  case Tok::StarAssign: return StmtKind::StarAssign;
+  case Tok::SlashAssign: return StmtKind::SlashAssign;
+  case Tok::PercentAssign: return StmtKind::PercentAssign;
+  case Tok::AmpersandAssign: return StmtKind::AmpersandAssign;
+  case Tok::PipeAssign: return StmtKind::PipeAssign;
+  case Tok::CaretAssign: return StmtKind::CaretAssign;
+  case Tok::ShiftLeftAssign: return StmtKind::ShiftLeftAssign;
+  case Tok::ShiftRightAssign: return StmtKind::ShiftRightAssign;
+  case Tok::PlusPlus: return StmtKind::Increment;
+  case Tok::MinusMinus: return StmtKind::Decrement;
+  default: return StmtKind::None;
+  }
+}
+// The operator an assignment statement was written with, or Empty for any
+// other statement.
+inline Tok assignmentOperator(StmtKind kind) {
+  switch (kind) {
+  case StmtKind::Assign: return Tok::Assign;
+  case StmtKind::PlusAssign: return Tok::PlusAssign;
+  case StmtKind::MinusAssign: return Tok::MinusAssign;
+  case StmtKind::StarAssign: return Tok::StarAssign;
+  case StmtKind::SlashAssign: return Tok::SlashAssign;
+  case StmtKind::PercentAssign: return Tok::PercentAssign;
+  case StmtKind::AmpersandAssign: return Tok::AmpersandAssign;
+  case StmtKind::PipeAssign: return Tok::PipeAssign;
+  case StmtKind::CaretAssign: return Tok::CaretAssign;
+  case StmtKind::ShiftLeftAssign: return Tok::ShiftLeftAssign;
+  case StmtKind::ShiftRightAssign: return Tok::ShiftRightAssign;
+  case StmtKind::Increment: return Tok::PlusPlus;
+  case StmtKind::Decrement: return Tok::MinusMinus;
+  default: return Tok::Empty;
+  }
+}
+inline bool assignment(StmtKind kind) { return assignmentOperator(kind) != Tok::Empty; }
+// The binary operator a compound assignment applies: + for += and ++.
+inline Tok compoundOperator(StmtKind kind) {
+  switch (kind) {
+  case StmtKind::PlusAssign:
+  case StmtKind::Increment: return Tok::Plus;
+  case StmtKind::MinusAssign:
+  case StmtKind::Decrement: return Tok::Minus;
+  case StmtKind::StarAssign: return Tok::Star;
+  case StmtKind::SlashAssign: return Tok::Slash;
+  case StmtKind::PercentAssign: return Tok::Percent;
+  case StmtKind::AmpersandAssign: return Tok::Ampersand;
+  case StmtKind::PipeAssign: return Tok::Pipe;
+  case StmtKind::CaretAssign: return Tok::Caret;
+  case StmtKind::ShiftLeftAssign: return Tok::ShiftLeft;
+  case StmtKind::ShiftRightAssign: return Tok::ShiftRight;
+  default: return Tok::Empty;
+  }
+}
 
 // A token's text: a fixed spelling, or an index into the shared literal table.
 // The same text always gets the same value, so comparing two of them compares
@@ -81,7 +195,7 @@ public:
   TokenText() = default;
   TokenText(Tok kind) : kind_(kind) {}
   TokenText(const std::string &text) : TokenText(intern(text)) {}
-  TokenText(const char *text) : TokenText(intern(text)) {}
+  TokenText(const char *) = delete; // A known spelling is a Tok.
   static TokenText intern(const std::string &text);
 
   Tok kind() const { return kind_; }
@@ -121,10 +235,11 @@ public:
   friend bool operator!=(const TokenText &a, const std::string &b) { return a.str() != b; }
   friend bool operator==(const std::string &a, const TokenText &b) { return a == b.str(); }
   friend bool operator!=(const std::string &a, const TokenText &b) { return a != b.str(); }
-  friend bool operator==(const TokenText &a, const char *b) { return a.str() == b; }
-  friend bool operator!=(const TokenText &a, const char *b) { return a.str() != b; }
-  friend bool operator==(const char *a, const TokenText &b) { return a == b.str(); }
-  friend bool operator!=(const char *a, const TokenText &b) { return a != b.str(); }
+  // Against a quoted string: a known spelling is a Tok, so write that instead.
+  friend bool operator==(const TokenText &, const char *) = delete;
+  friend bool operator!=(const TokenText &, const char *) = delete;
+  friend bool operator==(const char *, const TokenText &) = delete;
+  friend bool operator!=(const char *, const TokenText &) = delete;
   friend bool operator<(const TokenText &a, const TokenText &b) { return a.str() < b.str(); }
   friend std::string operator+(const TokenText &a, const TokenText &b) { return a.str() + b.str(); }
   friend std::string operator+(const TokenText &a, const std::string &b) { return a.str() + b; }
@@ -547,7 +662,7 @@ inline Type arbitraryCommon(const Type &a, const Type &b) {
 struct Function;
 struct Expr {
   Token token;
-  std::string kind;
+  ExprKind kind = ExprKind::None;
   Type castType = Type::Void;
   std::vector<std::unique_ptr<Expr>> args;
   std::unique_ptr<Expr> receiver;
@@ -557,12 +672,13 @@ struct Expr {
   // its result in args[0] and evaluated only when the expression is reached.
   std::vector<std::unique_ptr<struct Stmt>> bindings;
   bool addressable() const {
-    return kind == "name" || kind == "." || kind == "index" || (kind == "unary" && token.text == Tok::Star);
+    return kind == ExprKind::Name || kind == ExprKind::Member || kind == ExprKind::Index || (kind == ExprKind::Unary && token.text == Tok::Star);
   }
 };
 struct Stmt {
   Token token;
-  std::string kind, name;
+  StmtKind kind = StmtKind::None;
+  std::string name;
   std::string key;      // A foreach's key variable, as in `for k, v : pair`.
   bool reverse = false; // A foreach written `for -x : c`.
   Type type = Type::Void;

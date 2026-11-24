@@ -151,39 +151,39 @@ class Interpreter {
     const double larger = real(a.type, std::fmax(std::fabs(a.real), std::fabs(b.real))).real;
     return gap <= real(a.type, epsilon * std::fmax(larger, 1.0)).real;
   }
-  Value binary(const std::string &op, Value a, Value b) {
+  Value binary(const TokenText &op, Value a, Value b) {
     tick();
-    const bool comparison = op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=";
+    const bool comparison = op == Tok::EqualEqual || op == Tok::NotEqual || op == Tok::Less || op == Tok::Greater || op == Tok::LessEqual || op == Tok::GreaterEqual;
 
     if (comparison) {
       bool result = false;
 
       if (floating(a.type)) {
-        if (op == "==") result = floatsMatch(a, b, nullptr);
-        if (op == "!=") result = !floatsMatch(a, b, nullptr);
-        if (op == "<") result = a.real < b.real;
-        if (op == ">") result = a.real > b.real;
-        if (op == "<=") result = a.real <= b.real;
-        if (op == ">=") result = a.real >= b.real;
+        if (op == Tok::EqualEqual) result = floatsMatch(a, b, nullptr);
+        if (op == Tok::NotEqual) result = !floatsMatch(a, b, nullptr);
+        if (op == Tok::Less) result = a.real < b.real;
+        if (op == Tok::Greater) result = a.real > b.real;
+        if (op == Tok::LessEqual) result = a.real <= b.real;
+        if (op == Tok::GreaterEqual) result = a.real >= b.real;
       } else {
         const int order = a.negative() != b.negative() ? (a.negative() ? -1 : 1) : a.bits.compare(b.bits);
 
-        if (op == "==") result = order == 0;
-        if (op == "!=") result = order != 0;
-        if (op == "<") result = order < 0;
-        if (op == ">") result = order > 0;
-        if (op == "<=") result = order <= 0;
-        if (op == ">=") result = order >= 0;
+        if (op == Tok::EqualEqual) result = order == 0;
+        if (op == Tok::NotEqual) result = order != 0;
+        if (op == Tok::Less) result = order < 0;
+        if (op == Tok::Greater) result = order > 0;
+        if (op == Tok::LessEqual) result = order <= 0;
+        if (op == Tok::GreaterEqual) result = order >= 0;
       }
 
       return integer(Type::Bool, Bits(result));
     }
 
     if (floating(a.type)) {
-      if (op == "+") return real(a.type, a.real + b.real);
-      if (op == "-") return real(a.type, a.real - b.real);
-      if (op == "*") return real(a.type, a.real * b.real);
-      if (op == "/") return real(a.type, a.real / b.real);
+      if (op == Tok::Plus) return real(a.type, a.real + b.real);
+      if (op == Tok::Minus) return real(a.type, a.real - b.real);
+      if (op == Tok::Star) return real(a.type, a.real * b.real);
+      if (op == Tok::Slash) return real(a.type, a.real / b.real);
 
       reject("unsupported floating operator '" + op + "'");
     }
@@ -191,14 +191,14 @@ class Interpreter {
     const unsigned n = width(a.type);
     Bits bits;
 
-    if (op == "+") bits = a.bits.add(b.bits);
-    else if (op == "-") bits = a.bits.add(b.bits.negate());
-    else if (op == "*") bits = a.bits.multiply(b.bits);
-    else if (op == "<<" || op == ">>") {
+    if (op == Tok::Plus) bits = a.bits.add(b.bits);
+    else if (op == Tok::Minus) bits = a.bits.add(b.bits.negate());
+    else if (op == Tok::Star) bits = a.bits.multiply(b.bits);
+    else if (op == Tok::ShiftLeft || op == Tok::ShiftRight) {
       if (b.negative() || b.bits.compare(Bits(n)) >= 0) reject("shift count is outside the operand width");
 
-      bits = a.bits.shift(b.bits.words[0], n, op == ">>", a.negative());
-    } else if (op == "/" || op == "%") {
+      bits = a.bits.shift(b.bits.words[0], n, op == Tok::ShiftRight, a.negative());
+    } else if (op == Tok::Slash || op == Tok::Percent) {
       if (b.bits.zero()) reject("integer division or remainder by zero");
 
       auto x = a.negative() ? a.bits.negate() : a.bits;
@@ -211,13 +211,13 @@ class Interpreter {
 
       tick(n);
       const auto qr = x.divide(y, n);
-      bits = op == "/" ? qr.first : qr.second;
+      bits = op == Tok::Slash ? qr.first : qr.second;
 
-      if (op == "/" ? a.negative() != b.negative() : a.negative()) bits = bits.negate();
-    } else if (op == "&" || op == "|" || op == "^") {
+      if (op == Tok::Slash ? a.negative() != b.negative() : a.negative()) bits = bits.negate();
+    } else if (op == Tok::Ampersand || op == Tok::Pipe || op == Tok::Caret) {
       for (size_t i = 0; i < bits.words.size(); ++i)
-        bits.words[i] = op == "&" ? a.bits.words[i] & b.bits.words[i]
-                      : op == "|" ? a.bits.words[i] | b.bits.words[i] : a.bits.words[i] ^ b.bits.words[i];
+        bits.words[i] = op == Tok::Ampersand ? a.bits.words[i] & b.bits.words[i]
+                      : op == Tok::Pipe ? a.bits.words[i] | b.bits.words[i] : a.bits.words[i] ^ b.bits.words[i];
     } else reject("unsupported operator '" + op + "'");
 
     return integer(a.type, bits);
@@ -225,7 +225,7 @@ class Interpreter {
   size_t target(const Expr &e, size_t owner) {
     const auto &a = analyses[owner];
 
-    if (e.token.text == "Exec" || e.token.text == "Print")
+    if (e.token.text == Tok::Exec || e.token.text == Tok::Print)
       reject("I/O and Exec are forbidden");
 
     auto call = a.callTargets.find(&e);
@@ -251,38 +251,54 @@ class Interpreter {
     if (a.staticFields.count(&e)) reject("static storage reads and writes are forbidden");
 
     if (!scalar(a.expressionTypes.at(&e)) &&
-        !((e.kind == "call" || e.kind == "compileTime") && a.expressionTypes.at(&e) == Type::Void))
+        !((e.kind == ExprKind::Call || e.kind == ExprKind::CompileTime) && a.expressionTypes.at(&e) == Type::Void))
       reject("only fixed-width numbers and bool are supported");
 
     if (a.integerConstants.count(&e) || a.floatingConstants.count(&e)) return;
 
-    if (e.kind == "call") {
+    if (e.kind == ExprKind::Call) {
       if (!a.mathCalls.count(&e)) validate(target(e, owner));
-    } else if (e.kind != "int" && e.kind != "real" && e.kind != "bool" && e.kind != "name" &&
-             e.kind != "typeMember" && e.kind != "cast" && e.kind != "unary" && e.kind != "binary" &&
-             e.kind != "conditional" && e.kind != "compileTime" && e.kind != "macroValue")
-      reject("expression '" + e.kind + "' is not allowed");
+    } else if (e.kind != ExprKind::Int && e.kind != ExprKind::Real && e.kind != ExprKind::Bool && e.kind != ExprKind::Name &&
+             e.kind != ExprKind::TypeMember && e.kind != ExprKind::Cast && e.kind != ExprKind::Unary && e.kind != ExprKind::Binary &&
+             e.kind != ExprKind::Conditional && e.kind != ExprKind::CompileTime && e.kind != ExprKind::MacroValue)
+      reject("expression '" + std::string(kindName(e.kind)) + "' is not allowed");
 
-    if (e.kind == "unary" && (e.token.text == Tok::Ampersand || e.token.text == Tok::Star)) reject("pointer access is forbidden");
+    if (e.kind == ExprKind::Unary && (e.token.text == Tok::Ampersand || e.token.text == Tok::Star)) reject("pointer access is forbidden");
     for (const auto &bound : e.bindings) validateStatement(*bound, owner);
     // A qualified static function's syntactic receiver is a namespace, not a value.
     for (const auto &child : e.args) validateExpression(*child, owner);
   }
   void validateStatement(const Stmt &s, size_t owner) {
     tick();
-    const std::set<std::string> allowed{"let", "expr", "assign", "++", "--", "+=", "-=", "*=", "/=", "%=",
-      "&=", "|=", "^=", "<<=", ">>=", "block", "ordered", "if", "while", "for", "rangefor", "do", "break", "continue", "return",
-      "switch", "case"};
+    auto allowed = [](StmtKind kind) {
+      switch (kind) {
+      case StmtKind::Let:
+      case StmtKind::Expr:
+      case StmtKind::Block:
+      case StmtKind::Ordered:
+      case StmtKind::If:
+      case StmtKind::While:
+      case StmtKind::For:
+      case StmtKind::RangeFor:
+      case StmtKind::Do:
+      case StmtKind::Break:
+      case StmtKind::Continue:
+      case StmtKind::Return:
+      case StmtKind::Switch:
+      case StmtKind::Case: return true;
+      default: return assignment(kind);
+      }
+    };
 
-    if (!allowed.count(s.kind)) reject("statement '" + s.kind + "' is not allowed");
-    if (s.kind == "let" && !scalar(analyses[owner].localTypes.at(&s))) reject("only scalar locals are allowed");
+    if (!allowed(s.kind)) reject("statement '" + std::string(kindName(s.kind)) + "' is not allowed");
+    if (s.kind == StmtKind::Let && !scalar(analyses[owner].localTypes.at(&s))) reject("only scalar locals are allowed");
 
     if (s.target) {
-      if (s.target->kind != "name" || analyses[owner].staticFields.count(s.target.get()))
+      if (s.target->kind != ExprKind::Name || analyses[owner].staticFields.count(s.target.get()))
         reject("only local scalar mutation is allowed");
     }
 
-    if (s.kind == "rangefor") {
+    if (s.kind == StmtKind::RangeFor) {
       for (const auto &endpoint : s.expr->args) validateExpression(*endpoint, owner);
     } else if (s.expr) validateExpression(*s.expr, owner);
 
@@ -349,10 +365,10 @@ class Interpreter {
     tick();
     const auto &x = v[0];
     const Type type = x.type;
-    auto less = [&](const Value &a, const Value &b) { return binary("<", a, b).truth(); };
+    auto less = [&](const Value &a, const Value &b) { return binary(Tok::Less, a, b).truth(); };
 
     if (name == "Clamp") return less(x, v[1]) ? v[1] : less(v[2], x) ? v[2] : x;
-    if (name == "Lerp") return binary("+", x, binary("*", binary("-", v[1], x), v[2]));
+    if (name == "Lerp") return binary(Tok::Plus, x, binary(Tok::Star, binary(Tok::Minus, v[1], x), v[2]));
 
     if (!floating(type)) {
       if (name == "Abs") return x.negative() ? integer(type, x.bits.negate()) : x;
@@ -380,8 +396,8 @@ class Interpreter {
     else if (auto floatingConstant = a.floatingConstants.find(&e); floatingConstant != a.floatingConstants.end()) {
       auto bits = std::stoull(floatingConstant->second.substr(2), nullptr, 16);
       double number; std::memcpy(&number, &bits, sizeof(number)); result = real(type, number);
-    } else if (e.kind == "bool") result = integer(Type::Bool, Bits(e.token.text == Tok::True));
-    else if (e.kind == "name") {
+    } else if (e.kind == ExprKind::Bool) result = integer(Type::Bool, Bits(e.token.text == Tok::True));
+    else if (e.kind == ExprKind::Name) {
       if (a.staticFields.count(&e)) reject("static storage reads and writes are forbidden");
 
       auto value = binding(env, e.token.text);
@@ -389,9 +405,9 @@ class Interpreter {
       if (!value) reject("'" + e.token.text + "' is not a constant argument");
 
       result = *value;
-    } else if (e.kind == "cast") result = convert(expression(*e.args[0], owner, env), e.castType);
-    else if (e.kind == "compileTime") result = expression(*e.args[0], owner, env);
-    else if (e.kind == "macroValue") {
+    } else if (e.kind == ExprKind::Cast) result = convert(expression(*e.args[0], owner, env), e.castType);
+    else if (e.kind == ExprKind::CompileTime) result = expression(*e.args[0], owner, env);
+    else if (e.kind == ExprKind::MacroValue) {
       env.emplace_back();
 
       for (const auto &bound : e.bindings) statement(*bound, owner, env);
@@ -399,7 +415,7 @@ class Interpreter {
       result = expression(*e.args[0], owner, env);
       env.pop_back();
     } else if (a.mathCalls.count(&e)) result = math(e, owner, env);
-    else if (e.kind == "call") {
+    else if (e.kind == ExprKind::Call) {
       const size_t index = target(e, owner);
       validate(index);
 
@@ -417,10 +433,10 @@ class Interpreter {
       const auto flow = sequence(f.body, index, frame);
       --depth;
       result = flow.value;
-    } else if (e.kind == "conditional") {
+    } else if (e.kind == ExprKind::Conditional) {
       const bool yes = expression(*e.args[0], owner, env).truth();
       result = expression(*e.args[yes ? 1 : 2], owner, env);
-    } else if (e.kind == "unary") {
+    } else if (e.kind == ExprKind::Unary) {
       result = expression(*e.args[0], owner, env);
 
       if (e.token.text == Tok::Bang) result = integer(Type::Bool, Bits(!result.truth()));
@@ -428,7 +444,7 @@ class Interpreter {
       else if (e.token.text == Tok::Minus) result = integer(result.type, result.bits.negate());
       else if (e.token.text == Tok::Tilde) result = integer(result.type, result.bits.negate().add(Bits(1).negate()));
       else reject("unsupported unary operator");
-    } else if (e.kind == "binary") {
+    } else if (e.kind == ExprKind::Binary) {
       auto left = expression(*e.args[0], owner, env);
 
       if (e.token.text == Tok::AndAnd || e.token.text == Tok::OrOr) {
@@ -444,7 +460,7 @@ class Interpreter {
         } else
           result = binary(e.token.text, left, right);
       }
-    } else reject("expression '" + e.kind + "' is not a constant argument");
+    } else reject("expression '" + std::string(kindName(e.kind)) + "' is not a constant argument");
 
     auto conversion = a.conversions.find(&e);
     return conversion == a.conversions.end() ? result : convert(result, conversion->second);
@@ -461,13 +477,13 @@ class Interpreter {
   Flow statement(const Stmt &s, size_t owner, Environment &env) {
     tick();
 
-    if (s.kind == "block" || s.kind == "ordered") return sequence(s.body, owner, env);
-    if (s.kind == "return") return {Flow::Return, s.expr ? expression(*s.expr, owner, env) : Value{}};
-    if (s.kind == "break") return {Flow::Break, {}};
-    if (s.kind == "continue") return {Flow::Continue, {}};
-    if (s.kind == "if") return sequence(expression(*s.expr, owner, env).truth() ? s.body : s.alternate, owner, env);
+    if (s.kind == StmtKind::Block || s.kind == StmtKind::Ordered) return sequence(s.body, owner, env);
+    if (s.kind == StmtKind::Return) return {Flow::Return, s.expr ? expression(*s.expr, owner, env) : Value{}};
+    if (s.kind == StmtKind::Break) return {Flow::Break, {}};
+    if (s.kind == StmtKind::Continue) return {Flow::Continue, {}};
+    if (s.kind == StmtKind::If) return sequence(expression(*s.expr, owner, env).truth() ? s.body : s.alternate, owner, env);
 
-    if (s.kind == "switch") {
+    if (s.kind == StmtKind::Switch) {
       env.emplace_back();
       statement(*s.initializer, owner, env);
 
@@ -480,7 +496,7 @@ class Interpreter {
         if (section->isDefault) otherwise = section.get();
 
         for (const auto &label : section->labels)
-          if (!chosen && binary("==", selected, expression(*label, owner, env)).truth()) chosen = section.get();
+          if (!chosen && binary(Tok::EqualEqual, selected, expression(*label, owner, env)).truth()) chosen = section.get();
       }
 
       if (!chosen) chosen = otherwise;
@@ -493,10 +509,10 @@ class Interpreter {
       return result.kind == Flow::Break ? Flow{} : result;
     }
 
-    if (s.kind == "rangefor") {
+    if (s.kind == StmtKind::RangeFor) {
       const auto first = expression(*s.expr->args[0], owner, env);
       const auto last = expression(*s.expr->args[1], owner, env);
-      const bool ascending = binary("<=", first, last).truth();
+      const bool ascending = binary(Tok::LessEqual, first, last).truth();
       env.emplace_back(); env.back()[s.name] = first;
       Flow result;
 
@@ -508,15 +524,15 @@ class Interpreter {
 
         auto &counter = binding(env, s.name);
 
-        if (binary(ascending ? ">=" : "<=", *counter, last).truth()) break;
+        if (binary(ascending ? Tok::GreaterEqual : Tok::LessEqual, *counter, last).truth()) break;
 
-        counter = binary(ascending ? "+" : "-", *counter, integer(first.type, Bits(1)));
+        counter = binary(ascending ? Tok::Plus : Tok::Minus, *counter, integer(first.type, Bits(1)));
       }
 
       env.pop_back(); return result.kind == Flow::Return ? result : Flow{};
     }
 
-    if (s.kind == "while" || s.kind == "for" || s.kind == "do") {
+    if (s.kind == StmtKind::While || s.kind == StmtKind::For || s.kind == StmtKind::Do) {
       env.emplace_back();
 
       if (s.initializer) statement(*s.initializer, owner, env);
@@ -527,7 +543,7 @@ class Interpreter {
       for (;;) {
         tick();
 
-        if (s.kind != "do" || !first) if (s.expr && !expression(*s.expr, owner, env).truth()) break;
+        if (s.kind != StmtKind::Do || !first) if (s.expr && !expression(*s.expr, owner, env).truth()) break;
 
         first = false;
         result = sequence(s.body, owner, env);
@@ -539,21 +555,21 @@ class Interpreter {
       env.pop_back(); return result.kind == Flow::Return ? result : Flow{};
     }
 
-    if (s.kind == "let") {
+    if (s.kind == StmtKind::Let) {
       env.back()[s.name] = s.expr ? std::optional<Value>(expression(*s.expr, owner, env)) : std::nullopt;
       return {};
     }
 
-    if (s.kind == "expr") { expression(*s.expr, owner, env); return {}; }
+    if (s.kind == StmtKind::Expr) { expression(*s.expr, owner, env); return {}; }
 
     auto &slot = binding(env, s.target->token.text);
 
-    if (s.kind == "assign") slot = expression(*s.expr, owner, env);
+    if (s.kind == StmtKind::Assign) slot = expression(*s.expr, owner, env);
     else {
       if (!slot) reject("read of uninitialized local");
 
       const auto old = *slot;
-      const auto op = s.kind == "++" ? "+" : s.kind == "--" ? "-" : s.kind.substr(0, s.kind.size() - 1);
+      const TokenText op = compoundOperator(s.kind);
       auto right = s.expr ? expression(*s.expr, owner, env) : convert(integer(Type::Int, Bits(1)), old.type);
       slot = convert(binary(op, old, right), old.type);
     }
@@ -580,7 +596,7 @@ class MarkerPass {
   size_t owner = 0;
   Environment env;
   void expression(const Expr &e) {
-    if (e.kind == "compileTime") {
+    if (e.kind == ExprKind::CompileTime) {
       try {
         const auto v = interpreter.evaluate(*e.args[0], owner, env);
         auto &a = analyses[owner];
@@ -594,7 +610,7 @@ class MarkerPass {
       return;
     }
 
-    if (e.kind == "macroValue") {
+    if (e.kind == ExprKind::MacroValue) {
       env.emplace_back();
 
       for (const auto &bound : e.bindings) statement(*bound);
@@ -617,8 +633,8 @@ class MarkerPass {
     }
   }
   void statement(const Stmt &s) {
-    const bool isSwitch = s.kind == "switch";
-    const bool loop = s.kind == "for" || s.kind == "rangefor" || s.kind == "foreach" || isSwitch;
+    const bool isSwitch = s.kind == StmtKind::Switch;
+    const bool loop = s.kind == StmtKind::For || s.kind == StmtKind::RangeFor || s.kind == StmtKind::ForEach || isSwitch;
 
     if (loop) env.emplace_back();
     if (s.initializer) statement(*s.initializer);
@@ -628,13 +644,13 @@ class MarkerPass {
     // A Switch's macro bindings are visible to its sections.
     if (isSwitch) for (const auto &bound : s.alternate) statement(*bound);
 
-    if (s.kind == "rangefor" || s.kind == "foreach") {
+    if (s.kind == StmtKind::RangeFor || s.kind == StmtKind::ForEach) {
       env.back()[s.name] = std::nullopt;
 
       if (!s.key.empty()) env.back()[s.key] = std::nullopt;
     }
 
-    if (s.kind == "let" || s.kind == "own") {
+    if (s.kind == StmtKind::Let || s.kind == StmtKind::Own) {
       std::optional<Value> value;
 
       if (s.constant && s.expr) {

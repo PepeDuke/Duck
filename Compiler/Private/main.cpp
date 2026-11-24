@@ -480,17 +480,17 @@ std::string compileInputs(Loader &loader, const Options &options) {
 
   const bool webNet = options.target == duck::Target::Wasm64 && std::any_of(inputs.sources.begin(), inputs.sources.end(), [&](const SourceFile &file) {
     return std::any_of(file.tokens.begin(), file.tokens.end(), [&](const duck::Token &t) {
-      return !t.string && (t.text == "Net" || t.text == "NetReceiveEvent" || t.text == "WebTransportSession" ||
-                           t.text == "WebTransportStream") && !inputs.containerNames.count(t.text);
+      return !t.string && (t.text == duck::Tok::Net || t.text == duck::Tok::NetReceiveEvent || t.text == duck::Tok::WebTransportSession ||
+                           t.text == duck::Tok::WebTransportStream) && !inputs.containerNames.count(t.text);
     });
   });
   if (webNet) addInterface(inputs, webInterface, "<standard WebTransport>");
 #ifdef DUCK_NET_LIBRARY
   const bool needsNet = options.target == duck::Target::Native && std::any_of(inputs.sources.begin(), inputs.sources.end(), [&](const SourceFile &file) {
     return std::any_of(file.tokens.begin(), file.tokens.end(), [&](const duck::Token &t) {
-      return !t.string && (t.text == "Net" || t.text == "TcpListener" || t.text == "TcpConnection" ||
-                           t.text == "UdpSocket" || t.text == "UdpEndpoint" || t.text == "NetReceiveSettings" ||
-                           t.text == "NetReceiveEvent" || t.text == "NetIncoming") &&
+      return !t.string && (t.text == duck::Tok::Net || t.text == duck::Tok::TcpListener || t.text == duck::Tok::TcpConnection ||
+                           t.text == duck::Tok::UdpSocket || t.text == duck::Tok::UdpEndpoint || t.text == duck::Tok::NetReceiveSettings ||
+                           t.text == duck::Tok::NetReceiveEvent || t.text == duck::Tok::NetIncoming) &&
              !inputs.containerNames.count(t.text);
     });
   });

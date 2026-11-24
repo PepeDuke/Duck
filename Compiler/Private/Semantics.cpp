@@ -8,6 +8,7 @@
 #include <limits>
 #include <locale>
 #include <algorithm>
+#include <bitset>
 #include <mutex>
 #include <functional>
 #include <optional>
@@ -200,38 +201,11 @@ std::pair<std::string, std::string> decimalLiteral(std::string digits, long long
 
   return {(negative ? "-" : "") + digits, std::to_string(exponent)};
 }
-// Construction part ids (ConstructionPart::id), shared by copies of a Local
-// until one of them changes. The scope stack is copied at every branch and
-// loop, and nearly every local has none, so an empty set holds no memory.
-class PartSet {
-  std::shared_ptr<const std::set<std::string>> ids; // Null when empty.
-
-  static const std::set<std::string> &none() {
-    static const std::set<std::string> empty;
-    return empty;
-  }
-
-public:
-  PartSet() = default;
-  PartSet(std::set<std::string> parts) {
-    if (!parts.empty()) ids = std::make_shared<const std::set<std::string>>(std::move(parts));
-  }
-  const std::set<std::string> &get() const { return ids ? *ids : none(); }
-  operator const std::set<std::string> &() const { return get(); }
-  bool empty() const { return !ids; }
-  size_t count(const std::string &id) const { return ids ? ids->count(id) : 0; }
-  std::set<std::string>::const_iterator begin() const { return get().begin(); }
-  std::set<std::string>::const_iterator end() const { return get().end(); }
-  bool operator==(const PartSet &other) const { return ids == other.ids || get() == other.get(); }
-  bool operator!=(const PartSet &other) const { return !(*this == other); }
-  void erase(const std::string &id) {
-    if (!count(id)) return;
-
-    auto parts = *ids;
-    parts.erase(id);
-    *this = PartSet(std::move(parts));
-  }
-};
+// Construction parts of one container, as bits over Symbols::parts(record):
+// bit i is part i, so a local missing none holds 0.
+using PartSet = std::uint64_t;
+inline PartSet partBit(const ConstructionPart &part) { return PartSet(1) << part.index; }
+inline size_t partCount(PartSet parts) { return std::bitset<64>(parts).count(); }
 
 struct Local {
   Type type;
@@ -239,18 +213,22 @@ struct Local {
   bool initialized = true;
   bool receiver = false;
   bool borrowed = false; // A reference parameter: the caller owns the storage.
-  // A for-each variable: the place of the collection it iterates, and whether
-  // its element sits in storage that moves when the collection grows.
-  std::string iterating;
+  // A for-each variable: its loop's position in Analyzer::iterations plus
+  // one (0 for any other local), which holds the place of the collection it
+  // iterates; and whether its element sits in storage that moves when the
+  // collection grows.
+  std::uint32_t iterating = 0;
   bool growable = false;
   // Construction parts a container local may (on some path) or must (on
-  // every path) still be missing, by ConstructionPart::id.
-  PartSet mayMiss, mustMiss;
+  // every path) still be missing.
+  PartSet mayMiss = 0, mustMiss = 0;
   Token declaration;
   bool memberLambda = false; // A func field that can only be called through its object.
   bool callOnly = false;     // Holds a lambda over this frame: it can be called, not copied.
   bool lent = false;         // Received from a function that may lend: it may not own its object.
-  std::string scope;         // A field in a named scope, bound by its bare name.
+  // A field in a named scope, bound by its bare name: the scope's name, owned
+  // by the field's declaration in Symbols. Null for any other local.
+  const std::string *scope = nullptr;
   const Expr *constantValue = nullptr; // A # local's initializer, for Switch label checks.
 };
 // One block's locals. Its move is noexcept, which MSVC's std::map is not, so
@@ -335,7 +313,7 @@ class Analyzer {
   bool method = false;
   // The construction a local declaration may leave incomplete, and what it left.
   const Expr *incompleteAllowed = nullptr;
-  std::set<std::string> incompleteMissing;
+  PartSet incompleteMissing = 0;
   // The local a `return` statement may move instead of copying.
   const Expr *movable = nullptr;
   // Set in a generated static $eval: the static it initializes, and the
@@ -402,13 +380,13 @@ class Analyzer {
 
     auto &info = frames[level].info;
 
-    if (!outer->iterating.empty())
+    if (outer->iterating)
       fail(token, "a lambda cannot capture the for loop variable '" + token.text +
                       "': it names the current element only while the loop runs; copy it into a local first");
 
     if (!outer->initialized) fail(token, "variable '" + token.text + "' may be read before assignment");
 
-    if (!outer->mayMiss.empty())
+    if (outer->mayMiss)
       fail(token, "a lambda cannot capture '" + token.text + "' while it may be incomplete");
 
     if (outer->callOnly)
@@ -416,7 +394,7 @@ class Analyzer {
 
     Local inner = *outer;
     inner.borrowed = inner.growable = false;
-    inner.iterating.clear();
+    inner.iterating = 0;
     auto add = [&](FunctionAnalysis::Capture::Kind kind, Token named, const Type &type) {
       for (const auto &existing : info.captures)
         if (existing.token.text == named.text) return;
@@ -428,7 +406,7 @@ class Analyzer {
     if (outer->receiver) {
       // this and fields are reached through the captured receiver.
       Token self = token;
-      self.text = "this";
+      self.text = Tok::This;
       Type record = Type::Record;
       record.record = container;
       add(Capture::This, self, record);
@@ -464,7 +442,7 @@ class Analyzer {
     if (frames.empty() || !method) return;
 
     Token self = token;
-    self.text = "this";
+    self.text = Tok::This;
     findLocal(self);
   }
   const Local &lookup(const Token &token) {
@@ -582,26 +560,19 @@ class Analyzer {
         for (size_t n = 0; n < incoming.size(); ++n) {
           others[n] = &incoming[n].at(i).at(entry.first);
           initialized = initialized && others[n]->initialized;
-          anyMissing = anyMissing || !others[n]->mayMiss.empty() || !others[n]->mustMiss.empty();
+          anyMissing = anyMissing || others[n]->mayMiss || others[n]->mustMiss;
         }
 
-        Change change{entry.first, initialized, PartSet(), PartSet(), !incoming.empty()};
+        Change change{entry.first, initialized, 0, 0, !incoming.empty()};
 
+        // Missing on some incoming path, or on every one.
         if (anyMissing) {
-          std::set<std::string> may, must = others.front()->mustMiss;
+          change.mustMiss = ~PartSet(0);
 
           for (const auto *other : others) {
-            may.insert(other->mayMiss.begin(), other->mayMiss.end());
-            std::set<std::string> both;
-
-            for (const auto &id : must)
-              if (other->mustMiss.count(id)) both.insert(id);
-
-            must = both;
+            change.mayMiss |= other->mayMiss;
+            change.mustMiss &= other->mustMiss;
           }
-
-          change.mayMiss = may;
-          change.mustMiss = must;
         }
 
         const auto &local = entry.second;
@@ -620,8 +591,8 @@ class Analyzer {
         local.initialized = change.initialized;
 
         if (change.parts) {
-          local.mayMiss = std::move(change.mayMiss);
-          local.mustMiss = std::move(change.mustMiss);
+          local.mayMiss = change.mayMiss;
+          local.mustMiss = change.mustMiss;
         }
       }
     }
@@ -656,12 +627,12 @@ class Analyzer {
   // being read. The enum path resolves like a static name: from the
   // enclosing containers outward, then through using directives.
   const EnumInfo *enumOf(const Expr &e, std::string *name = nullptr) {
-    if (e.kind != ".") return nullptr;
+    if (e.kind != ExprKind::Member) return nullptr;
 
     std::string path;
     const Expr *root = dottedRoot(*e.args[0], path);
 
-    if (root->kind != "name" || findLocal(root->token)) return nullptr;
+    if (root->kind != ExprKind::Name || findLocal(root->token)) return nullptr;
 
     const auto qualified = qualify(root->token.text + path, e.token,
                                    [&](const std::string &n) { return symbols.enums.count(n) != 0; });
@@ -698,7 +669,7 @@ class Analyzer {
       const int order = ma.size() != mb.size() ? (ma.size() < mb.size() ? -1 : 1) : ma.compare(mb) < 0 ? -1 : ma == mb ? 0 : 1;
       return na ? -order : order;
     };
-    const bool largest = token.text == "Max";
+    const bool largest = token.text == Tok::Max;
     size_t best = 0;
 
     for (size_t i = 1; i < info.values.size(); ++i)
@@ -708,12 +679,12 @@ class Analyzer {
   }
   // The enum a name or dotted path such as Game.Mode denotes, or empty.
   std::string enumNamed(const Expr &e) {
-    if (e.kind != "name" && e.kind != ".") return "";
+    if (e.kind != ExprKind::Name && e.kind != ExprKind::Member) return "";
 
     std::string path;
     const Expr *root = dottedRoot(e, path);
 
-    if (root->kind != "name" || findLocal(root->token)) return "";
+    if (root->kind != ExprKind::Name || findLocal(root->token)) return "";
 
     return qualify(root->token.text + path, e.token,
                    [&](const std::string &n) { return symbols.enums.count(n) != 0; });
@@ -737,7 +708,7 @@ class Analyzer {
   // d.Name (the member's name) and d.Value (its underlying value) on an enum
   // value; Void for any other expression.
   Type enumProperty(const Expr &e) {
-    if (e.kind != "." || (e.token.text != "Name" && e.token.text != "Value")) return Type::Void;
+    if (e.kind != ExprKind::Member || (e.token.text != Tok::NameProperty && e.token.text != Tok::Value)) return Type::Void;
     if (analysis.enumProperties.count(&e)) return analysis.expressionTypes.at(&e);
     if (enumOf(e) || !staticPath(e).empty()) return Type::Void;
 
@@ -747,7 +718,7 @@ class Analyzer {
 
     if (!enumValue(type)) return Type::Void;
 
-    const auto result = e.token.text == "Name" ? Type(Type::Name) : symbols.enums.at(type.record).type;
+    const auto result = e.token.text == Tok::NameProperty ? Type(Type::Name) : symbols.enums.at(type.record).type;
     requireComplete(base);
     analysis.expressionTypes[&base] = type;
     analysis.enumProperties[&e] = e.token.text;
@@ -756,7 +727,7 @@ class Analyzer {
   }
   // The function a direct call resolves to, or null.
   const Signature *calledFunction(const Expr &e) const {
-    if (e.kind != "call") return nullptr;
+    if (e.kind != ExprKind::Call) return nullptr;
 
     const auto target = analysis.callTargets.find(&e);
     return target == analysis.callTargets.end() ? nullptr : &symbols.at(target->second);
@@ -780,14 +751,14 @@ class Analyzer {
   // Named storage holding a tracked reference, which an alias can be taken from.
   bool trackedPlace(const Expr &e) {
     std::string owner;
-    return (e.kind == "name" || e.kind == "." || e.kind == "index") && !propertyOf(e, owner) &&
+    return (e.kind == ExprKind::Name || e.kind == ExprKind::Member || e.kind == ExprKind::Index) && !propertyOf(e, owner) &&
            !analysis.collectionMembers.count(&e);
   }
   // How a chain of names and fields was written, without `this`; empty for
   // anything else. Conservative: it ignores shadowing.
   static std::string pathText(const Expr &e) {
-    if (e.kind == "name") return e.token.text;
-    if (e.kind != ".") return "";
+    if (e.kind == ExprKind::Name) return e.token.text;
+    if (e.kind != ExprKind::Member) return "";
 
     const auto base = pathText(*e.args[0]);
 
@@ -805,7 +776,7 @@ class Analyzer {
   static bool writesPlace(const Stmt &s, const std::string &path) {
     if (writesPath(s.target.get(), path)) return true;
 
-    if ((s.kind == "own" || s.kind == "moveInto" || s.kind == "returnOwner") && writesPath(s.expr.get(), path))
+    if ((s.kind == StmtKind::Own || s.kind == StmtKind::MoveInto || s.kind == StmtKind::ReturnOwner) && writesPath(s.expr.get(), path))
       return true;
 
     if ((s.initializer && writesPlace(*s.initializer, path)) || (s.step && writesPlace(*s.step, path))) return true;
@@ -816,7 +787,7 @@ class Analyzer {
   }
   // An owner a transfer can take: a call result or mutable owning storage.
   bool ownerSource(const Expr &e) {
-    return e.kind == "call" || ((e.kind == "name" || e.kind == ".") && !location(e).constant);
+    return e.kind == ExprKind::Call || ((e.kind == ExprKind::Name || e.kind == ExprKind::Member) && !location(e).constant);
   }
   // `target :: source` moves or allocates into an owning field.
   void ownershipMove(const Expr &target, const Expr &source, const Token &token) {
@@ -830,10 +801,10 @@ class Analyzer {
     if (destination.constant) constantTarget(target, token);
 
     const auto payload = destination.type.pointee();
-    const bool literal = source.kind == "int" || source.kind == "real" ||
-                         (source.kind == "unary" && source.token.text == Tok::Minus && source.args[0]->kind == "int");
+    const bool literal = source.kind == ExprKind::Int || source.kind == ExprKind::Real ||
+                         (source.kind == ExprKind::Unary && source.token.text == Tok::Minus && source.args[0]->kind == ExprKind::Int);
     ownerDestination = &source;
-    const auto type = expression(source, (literal && numeric(payload)) || source.kind == "initializer"
+    const auto type = expression(source, (literal && numeric(payload)) || source.kind == ExprKind::Initializer
                                              ? payload : Type(Type::Void));
     ownerDestination = nullptr;
 
@@ -901,9 +872,9 @@ class Analyzer {
   }
   // How storage was written, for diagnostics: rows[...], box.Items.
   static std::string storageText(const Expr &e) {
-    if (e.kind == "index") return storageText(*e.args[0]) + "[...]";
-    if (e.kind == ".") return storageText(*e.args[0]) + "." + e.token.text;
-    if (e.kind == "unary") return "*" + storageText(*e.args[0]);
+    if (e.kind == ExprKind::Index) return storageText(*e.args[0]) + "[...]";
+    if (e.kind == ExprKind::Member) return storageText(*e.args[0]) + "." + e.token.text;
+    if (e.kind == ExprKind::Unary) return "*" + storageText(*e.args[0]);
 
     return e.token.text;
   }
@@ -983,28 +954,28 @@ class Analyzer {
 
     return text + ")";
   }
-  std::string partsText(const std::string &record, const std::set<std::string> &ids) const {
+  std::string partsText(const std::string &record, PartSet ids) const {
     std::string text;
 
     for (const auto &part : symbols.parts(record))
-      if (ids.count(part.id())) text += (text.empty() ? "" : ", ") + part.text();
+      if (ids & partBit(part)) text += (text.empty() ? "" : ", ") + part.text();
 
     return text;
   }
   struct ConstructionSplit {
     std::vector<PartCall> calls;
-    std::set<std::string> missing;
+    PartSet missing = 0;
     bool exact = true;
   };
   ConstructionSplit chooseSplit(const Expr &e, const std::string &record, const std::string &given, const std::vector<ConstructionSplit> &splits) {
-    size_t fewest = splits.front().missing.size();
+    size_t fewest = partCount(splits.front().missing);
 
-    for (const auto &split : splits) fewest = std::min(fewest, split.missing.size());
+    for (const auto &split : splits) fewest = std::min(fewest, partCount(split.missing));
 
     std::vector<ConstructionSplit> best, exact;
 
     for (const auto &split : splits)
-      if (split.missing.size() == fewest) {
+      if (partCount(split.missing) == fewest) {
         best.push_back(split);
 
         if (split.exact) exact.push_back(split);
@@ -1033,7 +1004,7 @@ class Analyzer {
   // The split leaving the fewest parts missing wins, then one whose
   // overloads match the argument types exactly; others are ambiguous.
   std::vector<PartCall> plan(const Expr &e, const std::string &record,
-                             const std::vector<ConstructionPart> &parts, std::set<std::string> &missing) {
+                             const std::vector<ConstructionPart> &parts, PartSet &missing) {
     const auto savedAnalysis = analysis;
     const auto savedScopes = scopes;
     auto restore = [&] {
@@ -1102,7 +1073,7 @@ class Analyzer {
 
       if (part.automatic.empty()) {
         const auto saved = current;
-        current.missing.insert(part.id());
+        current.missing |= partBit(part);
         search(index + 1, position);
         current = saved;
       }
@@ -1144,41 +1115,41 @@ class Analyzer {
       return type;
     }
 
-    std::set<std::string> missing;
+    PartSet missing = 0;
     analysis.constructions[&e] = plan(e, record, parts, missing);
 
     if (&e == incompleteAllowed) incompleteMissing = missing;
-    else if (!missing.empty()) incomplete(e.token, record, missing);
+    else if (missing) incomplete(e.token, record, missing);
 
     return type;
   }
   [[noreturn]] void incomplete(const Token &token, const std::string &record,
-                               const std::set<std::string> &missing) const {
+                               PartSet missing) const {
     fail(token, "this construction of '" + record + "' leaves " + partsText(record, missing) +
                     " missing; pass arguments for every part, or declare a local (" + record +
                     " x(...)) and complete it later with x(...)");
   }
   // The parts a default construction leaves missing: those without an
   // automatic overload.
-  std::set<std::string> defaultMissing(const std::string &record) const {
-    std::set<std::string> missing;
+  PartSet defaultMissing(const std::string &record) const {
+    PartSet missing = 0;
 
     for (const auto &part : symbols.parts(record))
-      if (part.automatic.empty()) missing.insert(part.id());
+      if (part.automatic.empty()) missing |= partBit(part);
 
     return missing;
   }
   // A local that may still miss construction parts cannot be used as a
   // whole: no method calls, references, copies, moves, or assignment.
   void requireComplete(const Expr &e) const {
-    if (e.kind != "name") return;
+    if (e.kind != ExprKind::Name) return;
 
     for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope) {
       auto local = scope->find(e.token.text);
 
       if (local == scope->end()) continue;
 
-      if (!local->second.mayMiss.empty())
+      if (local->second.mayMiss)
         fail(e.token, "'" + e.token.text + "' may be incomplete: " +
                           partsText(local->second.type.record, local->second.mayMiss) +
                           " may still be missing; complete it with " + e.token.text + "(...) first");
@@ -1190,7 +1161,7 @@ class Analyzer {
   void requireCompleteScopes(size_t first) const {
     for (size_t i = first; i < scopes.size(); ++i)
       for (const auto &[name, local] : scopes[i])
-        if (!local.mayMiss.empty())
+        if (local.mayMiss)
           fail(local.declaration, "'" + name + "' may be incomplete when its scope ends: " +
                                       partsText(local.type.record, local.mayMiss) +
                                       " may still be missing; complete it with " + name +
@@ -1215,13 +1186,13 @@ class Analyzer {
     std::vector<ConstructionPart> parts;
 
     for (const auto &part : symbols.parts(record))
-      if (local().mustMiss.count(part.id())) parts.push_back(part);
+      if (local().mustMiss & partBit(part)) parts.push_back(part);
 
     if (parts.empty())
       fail(e.token, "'" + e.token.text + "' was completed on some paths but not others; " +
                         partsText(record, local().mayMiss) + " may already have run");
 
-    std::set<std::string> missing;
+    PartSet missing = 0;
     auto calls = plan(e, record, parts, missing);
 
     if (calls.empty()) fail(e.token, "completing '" + e.token.text + "' requires arguments for " +
@@ -1232,8 +1203,8 @@ class Analyzer {
         if (part.path == call.path && std::find(part.overloads.begin(), part.overloads.end(), call.key) !=
                                           part.overloads.end()) {
           auto &completed = scopes[depth].edit().at(e.token.text);
-          completed.mayMiss.erase(part.id());
-          completed.mustMiss.erase(part.id());
+          completed.mayMiss &= ~partBit(part);
+          completed.mustMiss &= ~partBit(part);
         }
 
     analysis.completions[&e] = std::move(calls);
@@ -1250,9 +1221,9 @@ class Analyzer {
     const auto type = construction(e, record);
     incompleteAllowed = saved;
 
-    if (!incompleteMissing.empty()) {
+    if (incompleteMissing) {
       const auto missing = incompleteMissing;
-      incompleteMissing.clear();
+      incompleteMissing = 0;
       fail(e.token, "reinitializing '" + e.token.text + "' leaves " + partsText(record, missing) +
                         " missing; a reinitialization must pass arguments for every part");
     }
@@ -1361,7 +1332,7 @@ class Analyzer {
   static const Expr *dottedRoot(const Expr &e, std::string &suffix) {
     const Expr *root = &e;
 
-    while (root->kind == ".") {
+    while (root->kind == ExprKind::Member) {
       suffix = "." + root->token.text + suffix;
       root = root->args[0].get();
     }
@@ -1374,7 +1345,7 @@ class Analyzer {
     std::string path;
     const Expr *root = dottedRoot(e, path);
 
-    if (root->kind != "name" || findLocal(root->token)) return "";
+    if (root->kind != ExprKind::Name || findLocal(root->token)) return "";
 
     path = root->token.text + path;
     return qualify(path, e.token, [&](const std::string &n) { return symbols.statics.count(n) != 0; });
@@ -1385,7 +1356,7 @@ class Analyzer {
     std::string path;
     const Expr *root = dottedRoot(*e.args[0], path);
 
-    if (root->kind != "name" || findLocal(root->token) || !staticPath(e).empty()) return;
+    if (root->kind != ExprKind::Name || findLocal(root->token) || !staticPath(e).empty()) return;
 
     if (std::string owner; propertyOf(*root, owner)) return;
 
@@ -1416,7 +1387,7 @@ class Analyzer {
   bool staticStorage(const Expr &e) {
     for (const Expr *part = &e;; part = part->args[0].get()) {
       if (!staticPath(*part).empty()) return true;
-      if (part->kind != ".") return false;
+      if (part->kind != ExprKind::Member) return false;
     }
   }
   bool accessible(bool isProtected, const std::string &declaring) const {
@@ -1436,7 +1407,7 @@ class Analyzer {
              symbols.findMethod(record, "set-" + name, path) != symbols.end();
     };
 
-    if (e.kind == "name") {
+    if (e.kind == ExprKind::Name) {
       if (findLocal(e.token) || !method || !symbols.records.count(container) || !staticPath(e).empty())
         return false;
 
@@ -1447,7 +1418,7 @@ class Analyzer {
       return true;
     }
 
-    if (e.kind != "." || enumOf(e) || !staticPath(e).empty() || enumProperty(e) != Type::Void) return false;
+    if (e.kind != ExprKind::Member || enumOf(e) || !staticPath(e).empty() || enumProperty(e) != Type::Void) return false;
 
     const auto &base = *e.args[0];
     Type type = storage(base) ? location(base).type : expression(base);
@@ -1469,7 +1440,7 @@ class Analyzer {
   // q.Front, s.Top, p.Last, p.LastKey, and .Len on stored collections; Void
   // when e is not such a read.
   Type collectionMember(const Expr &e) {
-    if (e.kind != "." || enumOf(e) || !staticPath(e).empty() || enumProperty(e) != Type::Void) return Type::Void;
+    if (e.kind != ExprKind::Member || enumOf(e) || !staticPath(e).empty() || enumProperty(e) != Type::Void) return Type::Void;
 
     const auto &base = *e.args[0];
 
@@ -1478,7 +1449,7 @@ class Analyzer {
     const auto type = location(base).type;
 
     if (fileValue(type)) {
-      if (e.token.text != "IsOpen")
+      if (e.token.text != Tok::IsOpen)
         fail(e.token, "file has no member '" + e.token.text + "'; a file has IsOpen and the methods Open, Create, "
                       "Append, Read, ReadText, Write, and Close");
 
@@ -1489,7 +1460,7 @@ class Analyzer {
     }
 
     if (arrayValue(type)) {
-      if (e.token.text != "Len") fail(e.token, typeName(type) + " has no member '" + e.token.text + "'; an array has Len");
+      if (e.token.text != Tok::Len) fail(e.token, typeName(type) + " has no member '" + e.token.text + "'; an array has Len");
 
       requireComplete(base);
       analysis.collectionMembers[&e] = "Len";
@@ -1533,7 +1504,7 @@ class Analyzer {
                         " element" + (type.extent == 1 ? "" : "s") + ", got " + std::to_string(e.args.size()));
 
     for (const auto &entry : e.args) {
-      const bool keyed = entry->kind == "entry" || entry->kind == "fieldInitializer";
+      const bool keyed = entry->kind == ExprKind::Entry || entry->kind == ExprKind::FieldInitializer;
 
       if (type.base != Type::Pair) {
         if (keyed)
@@ -1545,7 +1516,7 @@ class Analyzer {
 
       if (!keyed) fail(entry->token, "a literal of type " + typeName(type) + " lists key : value entries");
 
-      if (entry->kind == "entry") {
+      if (entry->kind == ExprKind::Entry) {
         expression(*entry->args[0], *type.key);
         expression(*entry->args[1], *type.element);
         continue;
@@ -1572,13 +1543,13 @@ class Analyzer {
     const auto savedScopes = scopes;
 
     for (const auto &entry : e.args) {
-      if (entry->kind == "entry") {
+      if (entry->kind == ExprKind::Entry) {
         keyed = true;
         keys.push_back(expression(*entry->args[0]));
         keyAt.push_back(entry->args[0].get());
         values.push_back(expression(*entry->args[1]));
         valueAt.push_back(entry->args[1].get());
-      } else if (entry->kind == "fieldInitializer") {
+      } else if (entry->kind == ExprKind::FieldInitializer) {
         keyed = true;
         keys.push_back(Type::Name);
         keyAt.push_back(entry.get());
@@ -1640,7 +1611,7 @@ class Analyzer {
   // stack's top, or the pair's last added entry; a -= [i] and p -= [key]
   // remove one element. Gives the type of the parenthesized form's result:
   // the inserted index for += and ++, the removed element otherwise.
-  Type collectionMutation(const Expr &target, const Type &type, const std::string &op, const Expr *operand,
+  Type collectionMutation(const Expr &target, const Type &type, const TokenText &op, const Expr *operand,
                           const Token &token) {
     if (fixedArray(type))
       fail(token, typeName(type) + " has a fixed length; '" + op + "' needs a dynamic array (" +
@@ -1651,7 +1622,7 @@ class Analyzer {
     if (removesCurrent(target, type, op, operand, token)) return element;
 
     if (gridValue(type)) {
-      if (op != "-=" || operand->kind != "removal")
+      if (op != Tok::MinusAssign || operand->kind != ExprKind::Removal)
         fail(token, "'" + op + "' does not apply to " + typeName(type) +
                         "; write cells as g[x][y] = v and remove them as g -= [x][y]");
 
@@ -1668,17 +1639,17 @@ class Analyzer {
       return element;
     }
 
-    if (op == "-=" && operand->kind == "removal" && operand->args.size() != 1)
+    if (op == Tok::MinusAssign && operand->kind == ExprKind::Removal && operand->args.size() != 1)
       fail(operand->token, "-= [i][j] removes a cell from a grid; remove from a nested array as a[i] -= [j]");
 
     const bool pair = type.base == Type::Pair;
 
-    if (op == "+=") {
-      if (operand->kind == "entry" && !pair)
+    if (op == Tok::PlusAssign) {
+      if (operand->kind == ExprKind::Entry && !pair)
         fail(operand->token, "key : value entries belong in a pair, not in " + typeName(type));
 
       if (pair) {
-        if (operand->kind != "entry") fail(operand->token, "add to a pair as p += key : value");
+        if (operand->kind != ExprKind::Entry) fail(operand->token, "add to a pair as p += key : value");
 
         expression(*operand->args[0], *type.key);
         expression(*operand->args[1], element);
@@ -1688,7 +1659,7 @@ class Analyzer {
       return Type::Long;
     }
 
-    if (op == "++") {
+    if (op == Tok::PlusPlus) {
       if (pair && !integral(*type.key))
         fail(token, "p++ adds the next integer key, but " + typeName(type) + " is keyed by " +
                         typeName(*type.key) + "; add entries as p += key : value");
@@ -1696,10 +1667,10 @@ class Analyzer {
       return Type::Long;
     }
 
-    if (op == "--") return element;
+    if (op == Tok::MinusMinus) return element;
 
-    if (op == "-=") {
-      if (operand->kind != "removal")
+    if (op == Tok::MinusAssign) {
+      if (operand->kind != ExprKind::Removal)
         fail(operand->token, pair ? std::string("remove from a pair as p -= [key]")
                                   : "remove from " + typeName(type) + " with " +
                                         (type.base == Type::Array ? "a -= [i] or a--" : "--"));
@@ -1724,21 +1695,21 @@ class Analyzer {
   // A name for the storage a chain of names and fields reaches, the same
   // for every spelling of it; empty for any other expression.
   std::string placeKey(const Expr &e) const {
-    if (e.kind == "call" && e.receiver) {
+    if (e.kind == ExprKind::Call && e.receiver) {
       const auto prefix = placeKey(*e.receiver);
       return prefix.empty() ? "" : prefix + ".GetChildren()";
     }
 
-    if (e.kind == ".") {
+    if (e.kind == ExprKind::Member) {
       const auto &base = *e.args[0];
 
-      if (base.kind == "name" && base.token.text == Tok::This) return "0:" + e.token.text; // Fields bind in scope 0.
+      if (base.kind == ExprKind::Name && base.token.text == Tok::This) return "0:" + e.token.text; // Fields bind in scope 0.
 
       const auto prefix = placeKey(base);
       return prefix.empty() ? "" : prefix + "." + e.token.text;
     }
 
-    if (e.kind != "name") return "";
+    if (e.kind != ExprKind::Name) return "";
 
     for (size_t i = scopes.size(); i-- > 0;)
       if (scopes[i].count(e.token.text)) return std::to_string(i) + ":" + e.token.text;
@@ -1748,7 +1719,7 @@ class Analyzer {
   // A for-each body changes the length of its collection only by removing
   // the current element, as `c -= x`. Whether op on target does that; any
   // other length change of a collection being iterated is rejected.
-  bool removesCurrent(const Expr &target, const Type &type, const std::string &op, const Expr *operand,
+  bool removesCurrent(const Expr &target, const Type &type, const TokenText &op, const Expr *operand,
                       const Token &token) {
     const auto place = placeKey(target);
     const auto active = std::count_if(iterations.begin(), iterations.end(),
@@ -1756,9 +1727,9 @@ class Analyzer {
 
     if (!active || place.empty()) return false;
 
-    const auto *current = op == "-=" && operand->kind == "name" ? findLocal(operand->token) : nullptr;
+    const auto *current = op == Tok::MinusAssign && operand->kind == ExprKind::Name ? findLocal(operand->token) : nullptr;
 
-    if (!current || current->iterating != place)
+    if (!current || !current->iterating || iterations[current->iterating - 1].place != place)
       fail(token, "'" + op + "' changes '" + target.token.text +
                       "' while a for loop iterates it; the body can only remove the current element, as " +
                       target.token.text + " -= x");
@@ -1795,13 +1766,13 @@ class Analyzer {
 
     const Expr *root = &collection;
 
-    while (root->kind == ".") root = root->args[0].get();
+    while (root->kind == ExprKind::Member) root = root->args[0].get();
 
     iterations.push_back({place, root->token.text});
     Local value{*type.element, source.constant};
     value.borrowed = true;
     value.growable = !fixedArray(type) || growableElement(collection);
-    value.iterating = place;
+    value.iterating = static_cast<std::uint32_t>(iterations.size()); // The entry just pushed.
     auto name = s.token;
     name.text = s.name;
     bind(name, value);
@@ -1819,7 +1790,7 @@ class Analyzer {
   Type rangeEndpoints(const Expr &e, Type expected) {
     const auto &first = *e.args[0], &second = *e.args[1];
     auto literal = [](const Expr &x) {
-      return x.kind == "int" || (x.kind == "unary" && x.token.text == Tok::Minus && x.args[0]->kind == "int");
+      return x.kind == ExprKind::Int || (x.kind == ExprKind::Unary && x.token.text == Tok::Minus && x.args[0]->kind == ExprKind::Int);
     };
     auto integer = [](const Expr &x, const Type &type) {
       if (!integral(type)) fail(x.token, "a range needs integer endpoints, not " + typeName(type));
@@ -1859,7 +1830,7 @@ class Analyzer {
     const Expr *root = &target;
 
     // Stop at a static field, so `G.P[0]` names G.P rather than G.
-    while ((root->kind == "." || root->kind == "index") && !root->args.empty()) {
+    while ((root->kind == ExprKind::Member || root->kind == ExprKind::Index) && !root->args.empty()) {
       if (const auto field = analysis.staticFields.find(root); field != analysis.staticFields.end())
         fail(token, "cannot modify constant '" + field->second + "'");
 
@@ -1876,22 +1847,22 @@ class Analyzer {
 
     std::string owner;
     // q.Front gives a copy of an element, so q.Front.X reads through that.
-    return e.addressable() && !propertyOf(e, owner) && !(e.kind == "index" && pairIndex(e)) &&
-           !(e.kind == "." && collectionMember(e) != Type::Void);
+    return e.addressable() && !propertyOf(e, owner) && !(e.kind == ExprKind::Index && pairIndex(e)) &&
+           !(e.kind == ExprKind::Member && collectionMember(e) != Type::Void);
   }
   // Whether a local-rooted receiver can be read as storage.
   bool localReceiver(const Expr &e) {
     const Expr *root = &e;
 
-    while (root->kind == "." || root->kind == "index" || (root->kind == "call" && root->receiver))
-      root = root->kind == "call" ? root->receiver.get() : root->args[0].get();
+    while (root->kind == ExprKind::Member || root->kind == ExprKind::Index || (root->kind == ExprKind::Call && root->receiver))
+      root = root->kind == ExprKind::Call ? root->receiver.get() : root->args[0].get();
 
-    return root->kind == "name" && findLocal(root->token);
+    return root->kind == ExprKind::Name && findLocal(root->token);
   }
   // x.GetChildren() names x's child storage, so reading it copies nothing.
   // A method the container declares with that name keeps priority.
   bool childrenCall(const Expr &e) {
-    if (e.kind != "call" || !e.receiver || !e.args.empty() || memberName(e.token.text) != "GetChildren" ||
+    if (e.kind != ExprKind::Call || !e.receiver || !e.args.empty() || memberName(e.token.text) != "GetChildren" ||
         !localReceiver(*e.receiver) || !storage(*e.receiver))
       return false;
 
@@ -1920,7 +1891,7 @@ class Analyzer {
     std::vector<const Expr *> found;
     const Expr *root = &e;
 
-    while (root->kind == "index") {
+    while (root->kind == ExprKind::Index) {
       found.insert(found.begin(), root->args[1].get());
       root = root->args[0].get();
     }
@@ -1935,14 +1906,14 @@ class Analyzer {
   bool growableElement(const Expr &e) const {
     const Expr *part = &e;
 
-    for (; part->kind == "." || part->kind == "index"; part = part->args[0].get())
-      if (part->kind == "index") {
+    for (; part->kind == ExprKind::Member || part->kind == ExprKind::Index; part = part->args[0].get())
+      if (part->kind == ExprKind::Index) {
         const auto &holder = analysis.expressionTypes.at(part->args[0].get());
 
         if (dynamicArray(holder) || collectionValue(holder)) return true;
       }
 
-    if (part->kind != "name") return false;
+    if (part->kind != ExprKind::Name) return false;
 
     for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope)
       if (auto local = scope->find(part->token.text); local != scope->end()) return local->second.growable;
@@ -1956,7 +1927,7 @@ class Analyzer {
   // A property's receiver: a constant receiver cannot run accessors, which
   // may modify it, and a setter cannot run on a temporary.
   void propertyReceiver(const Expr &e, const std::string &verb) {
-    if (e.kind != ".") return;
+    if (e.kind != ExprKind::Member) return;
 
     const auto &base = *e.args[0];
 
@@ -2052,7 +2023,7 @@ class Analyzer {
     analysis.staticFields[&e] = qualified;
     local = {info.scope.empty() ? info.type : info.scopedType, info.constant && &e != initializationTarget};
 
-    if (!info.scope.empty()) analysis.scopedPlaces[&e] = {info.scope, info.scopedType};
+    if (!info.scope.empty()) analysis.scopedPlaces[&e] = {&info.scope, info.scopedType};
 
     return local;
   }
@@ -2075,7 +2046,7 @@ class Analyzer {
       gridCoordinates(coordinates);
 
       // The partial indexes in between stand for the grid itself.
-      for (const Expr *part = e.args[0].get(); part->kind == "index"; part = part->args[0].get())
+      for (const Expr *part = e.args[0].get(); part->kind == ExprKind::Index; part = part->args[0].get())
         analysis.expressionTypes[part] = gridType;
 
       local.type = *gridType.element;
@@ -2180,7 +2151,7 @@ class Analyzer {
     analysis.fieldIndices[&e] = path.indices;
     local.type = path.field->scope.empty() ? path.field->type : path.field->scopedType;
 
-    if (!path.field->scope.empty()) analysis.scopedPlaces[&e] = {path.field->scope, local.type};
+    if (!path.field->scope.empty()) analysis.scopedPlaces[&e] = {&path.field->scope, local.type};
 
     return false;
   }
@@ -2194,12 +2165,12 @@ class Analyzer {
 
     if (const auto qualified = staticPath(e); !qualified.empty()) {
       local = staticLocation(e, qualified);
-    } else if (e.kind == "name") {
+    } else if (e.kind == ExprKind::Name) {
       if (std::string owner; !findLocal(e.token) && propertyOf(e, owner)) notStorage(e);
 
       local = lookup(e.token);
 
-      if (!local.scope.empty()) analysis.scopedPlaces[&e] = {local.scope, local.type};
+      if (local.scope) analysis.scopedPlaces[&e] = {local.scope, local.type};
       if (read && local.memberLambda) notFuncValue(e.token);
 
       if (read && local.callOnly && scopedLambda != &e)
@@ -2207,15 +2178,15 @@ class Analyzer {
 
       if (local.receiver) analysis.receiverStorage.insert(&e);
       if (read) requireInitialized(e.token);
-    } else if (e.kind == "index") {
+    } else if (e.kind == ExprKind::Index) {
       if (indexLocation(e, read, local)) return local;
-    } else if (e.kind == "unary" && e.token.text == Tok::Star) {
+    } else if (e.kind == ExprKind::Unary && e.token.text == Tok::Star) {
       auto ptr = expression(*e.args[0]);
 
       if (!ptr.depth || ptr == Type::Pointer) fail(e.token, "dereference requires a typed pointer");
 
       local.type = ptr.pointee();
-    } else if (e.kind == ".") {
+    } else if (e.kind == ExprKind::Member) {
       if (memberLocation(e, read, local)) return local;
     } else fail(e.token, "operand must be a mutable variable, field, or dereference");
 
@@ -2264,7 +2235,7 @@ class Analyzer {
     if (analysis.expressionTypes.at(&e).role != Type::Raw) return true;
     if (analysis.staticFields.count(&e)) return false; // What is left of it is a container name, not storage.
 
-    if (e.kind == "." || e.kind == "index" || (e.kind == "unary" && e.token.text == Tok::Star))
+    if (e.kind == ExprKind::Member || e.kind == ExprKind::Index || (e.kind == ExprKind::Unary && e.token.text == Tok::Star))
       return heapStorage(*e.args[0]);
 
     return false;
@@ -2324,7 +2295,7 @@ class Analyzer {
     for (const auto &path : symbols.visibleFields(container)) {
       Local field{path.field->scope.empty() ? path.field->type : path.field->scopedType, false, true, true};
       field.memberLambda = path.field->memberLambda;
-      field.scope = path.field->scope;
+      if (!path.field->scope.empty()) field.scope = &path.field->scope;
       bind(path.field->name, field);
     }
   }
@@ -2333,7 +2304,7 @@ class Analyzer {
     std::string path;
     const Expr *root = dottedRoot(e, path);
 
-    if (root->kind != "name" || findLocal(root->token) || !staticPath(e).empty()) return Type::Void;
+    if (root->kind != ExprKind::Name || findLocal(root->token) || !staticPath(e).empty()) return Type::Void;
 
     path = root->token.text + path;
     const auto found = resolve(path, e.token);
@@ -2379,7 +2350,7 @@ class Analyzer {
       bindVisibleFields();
       scopes.emplace_back();
       Token self = f.name;
-      self.text = "this";
+      self.text = Tok::This;
       Type record = Type::Record;
       record.record = container;
       bind(self, {record, false, true, true, true});
@@ -2422,7 +2393,7 @@ class Analyzer {
   }
   // The container a reflection path such as this.Example names, or empty.
   std::string reflectedContainer(const Expr &path) {
-    if (path.kind != ".") return "";
+    if (path.kind != ExprKind::Member) return "";
 
     const auto &base = *path.args[0];
     auto record = reflectedContainer(base);
@@ -2467,12 +2438,12 @@ class Analyzer {
     const auto query = memberName(e.token.text);
 
     if (query != "GetName" && query != "GetTags" && query != "GetDeclaringName") return false;
-    if (!e.receiver || e.receiver->kind != ".") return false;
+    if (!e.receiver || e.receiver->kind != ExprKind::Member) return false;
 
     const Expr *root = e.receiver.get();
 
-    while (root->kind == ".") root = root->args[0].get();
-    if (root->kind != "name" || !findLocal(root->token)) return false;
+    while (root->kind == ExprKind::Member) root = root->args[0].get();
+    if (root->kind != ExprKind::Name || !findLocal(root->token)) return false;
 
     FunctionAnalysis::Reflection reflection;
     reflection.query = query;
@@ -2574,12 +2545,12 @@ class Analyzer {
     FunctionAnalysis::DuckCall call;
     call.record = type;
 
-    if (e.kind == "duckExists") {
+    if (e.kind == ExprKind::DuckExists) {
       analysis.duckCalls[&e] = std::move(call);
       return Type::Bool;
     }
 
-    if (constant && e.kind == "duckCall") fail(base.token, "cannot call a mutable method on a constant");
+    if (constant && e.kind == ExprKind::DuckCall) fail(base.token, "cannot call a mutable method on a constant");
 
     std::vector<const Signature *> candidates;
 
@@ -2647,13 +2618,13 @@ class Analyzer {
 
     call.parameters = shape.parameters;
     call.signature = signatureText(call.result, call.parameters, 0);
-    const auto produced = e.kind == "duckCheck" ? Type(Type::Bool) : call.result;
+    const auto produced = e.kind == ExprKind::DuckCheck ? Type(Type::Bool) : call.result;
     analysis.duckCalls[&e] = std::move(call);
     return produced;
   }
   Type checkRecordInitializer(const Expr &e, const Type &expected) {
     for (const auto &field : e.args)
-      if (field->kind != "fieldInitializer")
+      if (field->kind != ExprKind::FieldInitializer)
         fail(field->token, "a '" + expected.record + "' literal names its fields, as in {X: 1}");
 
     if (!symbols.constructors(expected.record).empty())
@@ -2816,7 +2787,7 @@ class Analyzer {
     return e.castType;
   }
   Type checkDecimalLiteral(const Expr &e, const Type &expected) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
     // Exact decimal parsing: 0.1 is one tenth, not the nearest binary float.
     const auto marker = op.find_first_of("eE");
     const auto mantissa = op.substr(0, marker);
@@ -2845,7 +2816,7 @@ class Analyzer {
     return expected;
   }
   Type checkFloatingLiteral(const Expr &e, const Type &expected) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
     Type type = expected == Type::Double ? Type::Double : Type::Float;
     double value = 0;
 
@@ -2856,8 +2827,8 @@ class Analyzer {
     return type;
   }
   Type checkIntegerLiteral(const Expr &e, const Type &expected, bool negativeLiteral) {
-    const std::string &op = e.token.text;
-    const std::string &digits = negativeLiteral ? e.args[0]->token.text.str() : op;
+    const TokenText &op = e.token.text;
+    const std::string &digits = negativeLiteral ? e.args[0]->token.text.str() : op.str();
     const auto base = integerLiteralBase(digits);
     const auto magnitude = base == 10 ? digits : digits.substr(2);
 
@@ -2955,10 +2926,10 @@ class Analyzer {
     // when the index is outside the array or the key is missing.
     const auto type = expression(*e.args[0]);
 
-    if (e.args[0]->kind != "index" && !analysis.scopedPlaces.count(e.args[0].get()))
+    if (e.args[0]->kind != ExprKind::Index && !analysis.scopedPlaces.count(e.args[0].get()))
       fail(e.token, "'?' guards an index such as ?a[i], a method call such as ?p.Foo(), a duck call such as ?e..Foo(), or a scoped variable");
 
-    if (e.args[0]->kind != "index") return type;
+    if (e.args[0]->kind != ExprKind::Index) return type;
 
     if (recordValue(type) && symbols.runtimeDefaults(type.record))
       fail(e.token, "?" + e.args[0]->args[0]->token.text + "[...] cannot read '" + type.record +
@@ -2968,7 +2939,7 @@ class Analyzer {
     return type;
   }
   Type checkMutationResult(const Expr &e) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
     // (s += x) gives the inserted index; (s--) and (s -= [i]) give the
     // removed element.
     const auto &target = *e.args[0];
@@ -2997,7 +2968,7 @@ class Analyzer {
     std::string suffix;
     const Expr *root = dottedRoot(arg, suffix);
 
-    if (root->kind == "name") {
+    if (root->kind == ExprKind::Name) {
       bool local = false;
 
       for (const auto &scope : scopes) local |= scope.count(root->token.text) != 0;
@@ -3035,7 +3006,7 @@ class Analyzer {
     return local.type.pointerTo();
   }
   Type checkCall(const Expr &e, const Type &expected) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
 
     // `Gun g(5)` and `Gun* p(5)` arrive with the constructed type resolved.
     if (nativeMath(e.castType)) return checkNativeConstruct(e);
@@ -3085,9 +3056,9 @@ class Analyzer {
     if (e.receiver) {
       const Expr *root = e.receiver.get();
 
-      while (root->kind == ".") root = root->args[0].get();
+      while (root->kind == ExprKind::Member) root = root->args[0].get();
 
-      instance = root->kind != "name" || findLocal(root->token) || staticStorage(*e.receiver);
+      instance = root->kind != ExprKind::Name || findLocal(root->token) || staticStorage(*e.receiver);
 
       if (instance)
           if (auto handled = checkInstanceCall(e, found)) return *handled;
@@ -3140,16 +3111,16 @@ class Analyzer {
     return signature.result;
   }
   static bool numberLiteral(const Expr &e) {
-    const auto &value = e.kind == "unary" && e.token.text == Tok::Minus ? *e.args[0] : e;
-    return value.kind == "int" || value.kind == "real";
+    const auto &value = e.kind == ExprKind::Unary && e.token.text == Tok::Minus ? *e.args[0] : e;
+    return value.kind == ExprKind::Int || value.kind == ExprKind::Real;
   }
   // The scalar a literal should be parsed as beside a native vector or matrix.
   static Type nativeLiteralHint(const Expr &e, const NativeMath &shape) {
     if (!numberLiteral(e)) return Type::Void;
 
-    const auto &literal = e.kind == "unary" ? *e.args[0] : e;
+    const auto &literal = e.kind == ExprKind::Unary ? *e.args[0] : e;
     const Type scalar = shape.scalar;
-    return (literal.kind == "real" ? floating(scalar) : integral(scalar)) ? scalar : Type(Type::Void);
+    return (literal.kind == ExprKind::Real ? floating(scalar) : integral(scalar)) ? scalar : Type(Type::Void);
   }
   // vec3(x, y, z), vec3(s), vec4(v, w), vec3(other), mat3(s), mat3(a, b, c),
   // mat3(nine scalars) and mat3(other). A constructor is the explicit way to
@@ -3335,40 +3306,40 @@ class Analyzer {
 
     return result;
   }
-  Type nativeOperation(const std::string &op, const Token &token, const Type &first, const Type &second,
+  Type nativeOperation(const TokenText &op, const Token &token, const Type &first, const Type &second,
                        const Expr *left, const Expr &right) {
     const auto a = nativeMath(first), b = nativeMath(second);
     auto refuse = [&]() { fail(token, "operator '" + op + "' does not apply to " + typeName(first) + " and " + typeName(second)); };
-    const bool equality = op == "==" || op == "!=";
+    const bool equality = op == Tok::EqualEqual || op == Tok::NotEqual;
 
-    if (!equality && op != "+" && op != "-" && op != "*" && op != "/") refuse();
+    if (!equality && op != Tok::Plus && op != Tok::Minus && op != Tok::Star && op != Tok::Slash) refuse();
 
     // A quaternion only composes with another and rotates a vec3.
     if (a.quaternion || b.quaternion) {
       if (first == second && equality) return Type::Bool;
-      if (first == second && op == "*") return first;
-      if (a.quaternion && op == "*" && second == nativeNamed("vec3")) return second;
+      if (first == second && op == Tok::Star) return first;
+      if (a.quaternion && op == Tok::Star && second == nativeNamed("vec3")) return second;
 
       refuse();
     }
 
-    if (a.euler && b.euler && (op == "*" || op == "/")) refuse();
+    if (a.euler && b.euler && (op == Tok::Star || op == Tok::Slash)) refuse();
 
     if (a && b) {
       if (first == second) {
-        if (a.matrix() && op == "/") refuse();
+        if (a.matrix() && op == Tok::Slash) refuse();
 
         return equality ? Type(Type::Bool) : first;
       }
 
-      if (op == "*" && a.matrix() && !b.matrix() && !b.euler && a.scalar == b.scalar && a.rows == b.rows) return second;
+      if (op == Tok::Star && a.matrix() && !b.matrix() && !b.euler && a.scalar == b.scalar && a.rows == b.rows) return second;
 
       refuse();
     }
 
     const auto &shape = a ? a : b;
 
-    if (equality || !numeric(a ? second : first) || (shape.matrix() && (op == "+" || op == "-" || (!a && op == "/"))))
+    if (equality || !numeric(a ? second : first) || (shape.matrix() && (op == Tok::Plus || op == Tok::Minus || (!a && op == Tok::Slash))))
       refuse();
 
     convert(a ? right : *left, a ? second : first, shape.scalar);
@@ -3395,7 +3366,7 @@ class Analyzer {
         {"Min", {2, Domain::Number}},   {"Max", {2, Domain::Number}},    {"Clamp", {3, Domain::Number}},
         {"Dot", {2, Domain::Vector}},   {"Length", {1, Domain::Vector}}, {"Distance", {2, Domain::Vector}},
         {"Normalize", {1, Domain::Vector}}, {"Cross", {2, Domain::Vector3}}};
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
     const auto found = functions.find(op.substr(5));
 
     if (found == functions.end()) fail(e.token, "the Math namespace has no function '" + op.substr(5) + "'");
@@ -3426,8 +3397,8 @@ class Analyzer {
     for (size_t i = 0; i < e.args.size(); ++i) {
       if (!numberLiteral(*e.args[i])) continue;
 
-      const auto &literal = e.args[i]->kind == "unary" ? *e.args[i]->args[0] : *e.args[i];
-      const bool fits = literal.kind == "real" ? floating(wanted) : integral(wanted);
+      const auto &literal = e.args[i]->kind == ExprKind::Unary ? *e.args[i]->args[0] : *e.args[i];
+      const bool fits = literal.kind == ExprKind::Real ? floating(wanted) : integral(wanted);
       merge(i, expression(*e.args[i], fits ? wanted : Type(Type::Void)));
     }
 
@@ -3440,7 +3411,7 @@ class Analyzer {
   // Duck has no vector type: a vector is any container whose fields are
   // exactly X, Y and optionally Z and W, all of one floating type.
   Type checkMathVectors(const Expr &e, bool threeOnly) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
     static const std::vector<std::string> names{"X", "Y", "Z", "W"};
     const auto first = expression(*e.args[0]);
 
@@ -3475,7 +3446,7 @@ class Analyzer {
     return memberName(op) == "Cross" || memberName(op) == "Normalize" ? first : fields[0].type;
   }
   std::optional<Type> checkLocalCallee(const Expr &e) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
 
     if (!e.receiver && op.find('.') == std::string::npos)
       if (const auto *local = findLocal(e.token)) {
@@ -3500,7 +3471,7 @@ class Analyzer {
         if ((recordValue(local->type) || pointer) && local->receiver)
           fail(e.token, "cannot reinitialize the receiver inside its own method");
 
-        if (recordValue(local->type) && !local->mayMiss.empty()) return completion(e);
+        if (recordValue(local->type) && local->mayMiss) return completion(e);
 
         if (recordValue(local->type)) {
           if (local->constant) fail(e.token, "cannot reinitialize constant '" + e.token.text + "'");
@@ -3517,30 +3488,30 @@ class Analyzer {
     return std::nullopt;
   }
   std::optional<Type> checkBuiltinCall(const Expr &e) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
 
-    if (op == "Length" || op == "CodeUnitAt") {
-      if (e.args.size() != (op == "Length" ? 1u : 2u))
+    if (op == Tok::Length || op == Tok::CodeUnitAt) {
+      if (e.args.size() != (op == Tok::Length ? 1u : 2u))
         fail(e.token, "wrong argument count for '" + op + "'");
 
       auto text = expression(*e.args[0]);
 
       if (!managedText(text)) fail(e.token, op + " requires string or name");
-      if (op == "CodeUnitAt") expression(*e.args[1], Type::Long);
+      if (op == Tok::CodeUnitAt) expression(*e.args[1], Type::Long);
 
-      return op == "Length" ? Type::Long : Type::UInt32;
+      return op == Tok::Length ? Type::Long : Type::UInt32;
     }
 
-    if (op == "IsValid" && !e.receiver) {
+    if (op == Tok::IsValid && !e.receiver) {
       // IsValid((Day)x) asks whether some member of Day holds x.
-      if (e.args.size() == 1 && e.args[0]->kind == "cast" && enumValue(e.args[0]->castType)) {
+      if (e.args.size() == 1 && e.args[0]->kind == ExprKind::Cast && enumValue(e.args[0]->castType)) {
         probingEnumCast = true;
         expression(*e.args[0]);
         return Type::Bool;
       }
 
       // IsValid(a[i]) checks the index without reading the element.
-      if (e.args.size() != 1 || e.args[0]->kind != "index")
+      if (e.args.size() != 1 || e.args[0]->kind != ExprKind::Index)
         fail(e.token, "IsValid expects one indexed element, as in IsValid(a[i]), or an enum conversion, "
                       "as in IsValid((Day)n)");
 
@@ -3548,7 +3519,7 @@ class Analyzer {
       return Type::Bool;
     }
 
-    if (op == "Exec" && !e.receiver) {
+    if (op == Tok::Exec && !e.receiver) {
       // The call target also makes Exec a barrier for task scheduling.
       if (const auto *script = symbols.execTarget(e)) analysis.callTargets[&e] = *script;
 
@@ -3557,14 +3528,14 @@ class Analyzer {
 
     // Parts of a lowered T assertion. A value Print cannot show is left out
     // of the report rather than rejected: such values can still be compared.
-    if (op == "$T.fail") return Type::Void;
+    if (op == Tok::TestFail) return Type::Void;
 
-    if (op == "$T.show") {
+    if (op == Tok::TestShow) {
       expression(*e.args[0]);
       return Type::Void;
     }
 
-    if (op == "Print") {
+    if (op == Tok::Print) {
       if (e.args.size() != 1)
         fail(e.token, "Print expects one argument");
 
@@ -3580,7 +3551,7 @@ class Analyzer {
 
       if (fileValue(printed)) fail(e.token, "cannot print a file; print its IsOpen or ReadText() instead");
 
-      if (printed.depth && e.args[0]->kind != "null")
+      if (printed.depth && e.args[0]->kind != ExprKind::Null)
         fail(e.token, "cannot print an opaque pointer; compare it with null instead");
 
       if (funcValue(printed)) fail(e.token, "cannot print a func value; call it instead");
@@ -3591,7 +3562,7 @@ class Analyzer {
     return std::nullopt;
   }
   std::optional<Type> checkInstanceCall(const Expr &e, Symbols::const_iterator &found) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
     const auto &base = *e.receiver;
     requireComplete(base);
     Type t;
@@ -3737,7 +3708,7 @@ class Analyzer {
     return result;
   }
   Type checkCollectionClear(const Expr &e, const Expr &base, const Type &t, bool constant) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
 
     // s.Clear() removes every element and frees the storage.
     if (memberName(op) != "Clear")
@@ -3751,7 +3722,7 @@ class Analyzer {
 
     if (constant) constantTarget(base, e.token);
 
-    removesCurrent(base, t, "Clear", nullptr, e.token);
+    removesCurrent(base, t, Tok::Clear, nullptr, e.token);
     return Type::Void;
   }
   Type checkConditional(const Expr &e, const Type &expected, const Type &first) {
@@ -3765,13 +3736,13 @@ class Analyzer {
 
     auto hint = expected;
 
-    if (hint == Type::Void && textType(yes) && e.args[1]->kind != "text") hint = yes;
+    if (hint == Type::Void && textType(yes) && e.args[1]->kind != ExprKind::Text) hint = yes;
 
     auto no = expression(*e.args[2], hint);
 
     if (no.role != Type::Raw) fail(e.token, "tracked aliases require a named source");
 
-    if (expected == Type::Void && e.args[1]->kind == "text" && textType(no)) {
+    if (expected == Type::Void && e.args[1]->kind == ExprKind::Text && textType(no)) {
       yes = no;
       analysis.expressionTypes[e.args[1].get()] = no;
     }
@@ -3793,11 +3764,11 @@ class Analyzer {
       return type;
     }
 
-    if (yes.depth && no.depth && (e.args[1]->kind == "null" || e.args[2]->kind == "null")) {
-      Type t = e.args[1]->kind == "null" ? no : yes;
+    if (yes.depth && no.depth && (e.args[1]->kind == ExprKind::Null || e.args[2]->kind == ExprKind::Null)) {
+      Type t = e.args[1]->kind == ExprKind::Null ? no : yes;
 
-      if (e.args[1]->kind == "null") analysis.expressionTypes[e.args[1].get()] = t;
-      if (e.args[2]->kind == "null") analysis.expressionTypes[e.args[2].get()] = t;
+      if (e.args[1]->kind == ExprKind::Null) analysis.expressionTypes[e.args[1].get()] = t;
+      if (e.args[2]->kind == ExprKind::Null) analysis.expressionTypes[e.args[2].get()] = t;
 
       return t;
     }
@@ -3806,7 +3777,7 @@ class Analyzer {
     return yes;
   }
   Type checkBinary(const Expr &e, const Type &expected, Type first) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
     const Type hint = binaryOperandHint(e, expected, first);
     auto second = decay(*e.args[1], expression(*e.args[1], hint));
 
@@ -3816,20 +3787,20 @@ class Analyzer {
       return nativeOperation(op, e.token, first, second, e.args[0].get(), *e.args[1]);
 
     // Literals adopt the other operand's text type; named values never change encoding implicitly.
-    if (e.args[0]->kind == "text" && textType(second) && textType(first)) {
+    if (e.args[0]->kind == ExprKind::Text && textType(second) && textType(first)) {
       first = second;
       analysis.expressionTypes[e.args[0].get()] = second;
     }
 
-    if ((op == "==" || op == "!=") && first.depth && second.depth &&
+    if ((op == Tok::EqualEqual || op == Tok::NotEqual) && first.depth && second.depth &&
         (first.pointee() == second.pointee() || first == Type::Pointer || second == Type::Pointer))
       return Type::Bool;
 
     if (managedText(first) && managedText(second)) {
       require(second, first, e.token);
 
-      if (op == "+") return first;
-      if (op == "==" || op == "!=") return Type::Bool;
+      if (op == Tok::Plus) return first;
+      if (op == Tok::EqualEqual || op == Tok::NotEqual) return Type::Bool;
 
       fail(e.token, "text supports only concatenation and equality");
     }
@@ -3845,12 +3816,12 @@ class Analyzer {
       return Type::Bool;
     }
 
-    if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") {
+    if (op == Tok::Ampersand || op == Tok::Pipe || op == Tok::Caret || op == Tok::ShiftLeft || op == Tok::ShiftRight) {
       if (!integral(first) || !integral(second))
         fail(e.token, "bitwise operators require integer operands");
 
       // Shift counts retain their own type until the backend checks bounds.
-      if (op == "<<" || op == ">>")
+      if (op == Tok::ShiftLeft || op == Tok::ShiftRight)
         return first;
     }
 
@@ -3867,14 +3838,14 @@ class Analyzer {
       require(second, first, e.token);
     }
 
-    if (op == "==" || op == "!=") {
+    if (op == Tok::EqualEqual || op == Tok::NotEqual) {
       if (!numeric(first) && first != Type::Bool && first != Type::Pointer)
         fail(e.token, "equality supports numeric, bool, and opaque pointer values only");
 
       return Type::Bool;
     }
 
-    if (!numeric(first) || (op == "%" && !integral(first)))
+    if (!numeric(first) || (op == Tok::Percent && !integral(first)))
       require(first, Type::Int, e.token);
 
     return isOrdering(op) ? Type::Bool : first;
@@ -3896,30 +3867,30 @@ class Analyzer {
     convert(tolerance, given, scalar);
   }
   Type binaryOperandHint(const Expr &e, const Type &expected, const Type &first) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
     Type hint = Type::Void;
 
     if (const auto shape = nativeMath(first)) return nativeLiteralHint(*e.args[1], shape);
 
-    if (op == "+" && managedText(expected)) hint = expected;
+    if (op == Tok::Plus && managedText(expected)) hint = expected;
     // Only beyond 64 bits can a literal need its operand's width to be representable.
-    else if (customInteger(first) && integerWidth(first) > 64 && op != "<<" && op != ">>" &&
-             (e.args[1]->kind == "int" ||
-              (e.args[1]->kind == "unary" && e.args[1]->token.text == Tok::Minus &&
-               e.args[1]->args[0]->kind == "int")))
+    else if (customInteger(first) && integerWidth(first) > 64 && op != Tok::ShiftLeft && op != Tok::ShiftRight &&
+             (e.args[1]->kind == ExprKind::Int ||
+              (e.args[1]->kind == ExprKind::Unary && e.args[1]->token.text == Tok::Minus &&
+               e.args[1]->args[0]->kind == ExprKind::Int)))
       hint = first;
-    else if (arbitraryNumber(first) && op != "<<" && op != ">>" &&
-             (e.args[1]->kind == "int" || e.args[1]->kind == "real" ||
-              (e.args[1]->kind == "unary" && e.args[1]->token.text == Tok::Minus &&
-               (e.args[1]->args[0]->kind == "int" || e.args[1]->args[0]->kind == "real"))))
+    else if (arbitraryNumber(first) && op != Tok::ShiftLeft && op != Tok::ShiftRight &&
+             (e.args[1]->kind == ExprKind::Int || e.args[1]->kind == ExprKind::Real ||
+              (e.args[1]->kind == ExprKind::Unary && e.args[1]->token.text == Tok::Minus &&
+               (e.args[1]->args[0]->kind == ExprKind::Int || e.args[1]->args[0]->kind == ExprKind::Real))))
       hint = first; // Literals take big/tiny precision from the left operand.
     else if (textType(first) &&
-             (e.args[0]->kind != "text" || e.args[1]->kind == "text")) hint = first;
+             (e.args[0]->kind != ExprKind::Text || e.args[1]->kind == ExprKind::Text)) hint = first;
 
     return hint;
   }
   Type checkArbitraryBinary(const Expr &e, const Type &first, const Type &second) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
     const auto type = arbitraryCommon(first, second);
 
     if (type == Type::Void)
@@ -3928,8 +3899,8 @@ class Analyzer {
 
     const bool comparison = isComparison(op);
 
-    if (!comparison && op != "+" && op != "-" && op != "*" && op != "/" &&
-        !(op == "%" && bigInteger(type)))
+    if (!comparison && op != Tok::Plus && op != Tok::Minus && op != Tok::Star && op != Tok::Slash &&
+        !(op == Tok::Percent && bigInteger(type)))
       fail(e.token, typeName(type) + " supports + - * /" +
                         (bigInteger(type) ? " %" : "") + " and comparisons");
 
@@ -3938,12 +3909,12 @@ class Analyzer {
     return comparison ? Type::Bool : type;
   }
   bool threadProperty(const Expr &e) {
-    if (e.kind != ".") return false;
+    if (e.kind != ExprKind::Member) return false;
     const auto &base = *e.args[0];
     const Expr *root = &base;
-    if (e.token.text == "Status" && base.kind == "index") {
+    if (e.token.text == Tok::Status && base.kind == ExprKind::Index) {
       const auto &threads = *base.args[0];
-      if (threads.kind != "." || threads.token.text != "Thread") return false;
+      if (threads.kind != ExprKind::Member || threads.token.text != Tok::Thread) return false;
       root = threads.args[0].get();
       if (!staticPath(threads).empty()) return false;
     } else {
@@ -3951,7 +3922,7 @@ class Analyzer {
           "Idle", "Running", "WaitingForJoin", "WaitingForLock", "Starting"};
       if (!properties.count(e.token.text)) return false;
     }
-    return root->kind == "name" && root->token.text == "P" && !findLocal(root->token) &&
+    return root->kind == ExprKind::Name && root->token.text == Tok::P && !findLocal(root->token) &&
            staticPath(e).empty() && staticPath(*root).empty();
   }
   Type checkExpression(const Expr &e, Type expected) {
@@ -3961,25 +3932,25 @@ class Analyzer {
       if (const auto state = states.find(e.token.text); state != states.end())
         analysis.integerConstants[&e] = state->second;
       else {
-        if (e.token.text == "Status") expression(*e.args[0]->args[1], Type::Int);
+        if (e.token.text == Tok::Status) expression(*e.args[0]->args[1], Type::Int);
         analysis.threadQueries.insert(&e);
       }
       return Type::Int;
     }
-    if (e.kind == "compileTime") return expression(*e.args[0], expected);
+    if (e.kind == ExprKind::CompileTime) return expression(*e.args[0], expected);
 
-    if (e.kind == "scopeActive") {
+    if (e.kind == ExprKind::ScopeActive) {
       analysis.scopeEffects = true;
       analysis.expressionTypes[&e] = Type::Bool;
       return Type::Bool;
     }
 
-    if (e.kind == "markupTake") {
+    if (e.kind == ExprKind::MarkupTake) {
       analysis.expressionTypes[&e] = markupType();
       return markupType();
     }
 
-    if (e.kind == "macroValue") {
+    if (e.kind == ExprKind::MacroValue) {
       scopes.emplace_back();
 
       for (const auto &binding : e.bindings) statement(*binding);
@@ -3989,12 +3960,12 @@ class Analyzer {
       return type;
     }
 
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
 
-    if (e.kind == "lambda") return lambdaExpression(e);
-    if (e.kind == "duckCall" || e.kind == "duckCheck" || e.kind == "duckExists") return duckCall(e, expected);
+    if (e.kind == ExprKind::Lambda) return lambdaExpression(e);
+    if (e.kind == ExprKind::DuckCall || e.kind == ExprKind::DuckCheck || e.kind == ExprKind::DuckExists) return duckCall(e, expected);
 
-    if (e.kind == "invoke") {
+    if (e.kind == ExprKind::Invoke) {
       const auto callee = expression(*e.receiver);
 
       if (!funcValue(callee)) fail(e.token, "only a func value can be called this way, not " + typeName(callee));
@@ -4003,14 +3974,14 @@ class Analyzer {
     }
 
     // Outside a for header a range is the array of its values.
-    if (e.kind == "range") {
+    if (e.kind == ExprKind::Range) {
       if (expected != Type::Void && (!dynamicArray(expected) || !integral(*expected.element)))
         fail(e.token, "a range makes a dynamic array of integers, not " + typeName(expected));
 
       return Type::array(rangeEndpoints(e, expected == Type::Void ? expected : *expected.element), 0);
     }
 
-    if (e.kind == "initializer" && !recordValue(expected)) {
+    if (e.kind == ExprKind::Initializer && !recordValue(expected)) {
       Type type = expected;
 
       if (expected == Type::Void) type = inferLiteral(e);
@@ -4022,44 +3993,44 @@ class Analyzer {
       return type;
     }
 
-    if (e.kind == "initializer") return checkRecordInitializer(e, expected);
+    if (e.kind == ExprKind::Initializer) return checkRecordInitializer(e, expected);
 
-    if (e.kind == "char")
+    if (e.kind == ExprKind::Char)
       return Type::Char;
 
-    if (e.kind == "typeMember") return typeLimit(e);
-    if (e.kind == "construct" && nativeMath(e.castType)) return checkNativeConstruct(e);
-    if (e.kind == "construct") return checkConstruct(e);
-    if (e.kind == "cast") return checkCast(e);
-    if (e.kind == "real" && decimalValue(expected)) return checkDecimalLiteral(e, expected);
-    if (e.kind == "real") return checkFloatingLiteral(e, expected);
+    if (e.kind == ExprKind::TypeMember) return typeLimit(e);
+    if (e.kind == ExprKind::Construct && nativeMath(e.castType)) return checkNativeConstruct(e);
+    if (e.kind == ExprKind::Construct) return checkConstruct(e);
+    if (e.kind == ExprKind::Cast) return checkCast(e);
+    if (e.kind == ExprKind::Real && decimalValue(expected)) return checkDecimalLiteral(e, expected);
+    if (e.kind == ExprKind::Real) return checkFloatingLiteral(e, expected);
 
     // Parse magnitudes without passing through a signed host integer. A
     // negated literal is checked as a whole, including the signed minima.
-    const bool negativeLiteral = e.kind == "unary" && op == "-" &&
-                                 e.args[0]->kind == "int";
+    const bool negativeLiteral = e.kind == ExprKind::Unary && op == Tok::Minus &&
+                                 e.args[0]->kind == ExprKind::Int;
 
-    if (e.kind == "int" || negativeLiteral) return checkIntegerLiteral(e, expected, negativeLiteral);
+    if (e.kind == ExprKind::Int || negativeLiteral) return checkIntegerLiteral(e, expected, negativeLiteral);
 
-    if (e.kind == "null")
+    if (e.kind == ExprKind::Null)
       return expected.depth || funcValue(expected) ? expected : Type::Pointer;
 
-    if (e.kind == "bool")
+    if (e.kind == ExprKind::Bool)
       return Type::Bool;
 
-    if (e.kind == "text")
+    if (e.kind == ExprKind::Text)
       return textType(expected) ? expected : Type::String;
 
     if (std::string name; auto info = enumOf(e, &name)) {
       const auto index = info->find(e.token.text);
 
       // Day.Count, Day.Min, and Day.Max, unless a member has that name.
-      if (index == info->members.size() && e.token.text == "Count") {
+      if (index == info->members.size() && e.token.text == Tok::CountProperty) {
         analysis.integerConstants[&e] = std::to_string(info->members.size());
         return Type::Int;
       }
 
-      if (index == info->members.size() && (e.token.text == "Min" || e.token.text == "Max")) {
+      if (index == info->members.size() && (e.token.text == Tok::Min || e.token.text == Tok::Max)) {
         analysis.enumMembers[&e] = enumExtreme(*info, name, e.token);
         Type type = Type::Enum;
         type.record = name;
@@ -4083,11 +4054,11 @@ class Analyzer {
 
     if (const auto property = enumProperty(e); property != Type::Void) return property;
 
-    if (e.kind == "guard" && e.args[0]->kind == "duckCall") return checkGuardedDuckCall(e, expected);
-    if (e.kind == "guard" && e.args[0]->kind == "call") return checkGuardedCall(e);
-    if (e.kind == "guard") return checkGuardedRead(e);
+    if (e.kind == ExprKind::Guard && e.args[0]->kind == ExprKind::DuckCall) return checkGuardedDuckCall(e, expected);
+    if (e.kind == ExprKind::Guard && e.args[0]->kind == ExprKind::Call) return checkGuardedCall(e);
+    if (e.kind == ExprKind::Guard) return checkGuardedRead(e);
 
-    if (e.kind == "index" && pairIndex(e)) {
+    if (e.kind == ExprKind::Index && pairIndex(e)) {
       // p[key] reads the value stored for key; a missing key traps.
       const auto &base = *e.args[0];
       requireComplete(base);
@@ -4097,10 +4068,10 @@ class Analyzer {
       return *type.element;
     }
 
-    if (e.kind == "name" || e.kind == ".")
+    if (e.kind == ExprKind::Name || e.kind == ExprKind::Member)
       if (const auto function = functionValue(e); function != Type::Void) return function;
 
-    if (e.kind == ".") rejectUnknownStatic(e);
+    if (e.kind == ExprKind::Member) rejectUnknownStatic(e);
 
     if (e.addressable()) {
       if (std::string owner; propertyOf(e, owner)) return propertyRead(e, owner);
@@ -4109,42 +4080,42 @@ class Analyzer {
       return location(e).type;
     }
 
-    if (e.kind == "entry") fail(e.token, "key : value entries can only be added to a pair, as p += key : value");
-    if (e.kind == "removal") fail(e.token, "-= [i] removes an element from an array or a pair");
-    if (e.kind == "mutation") return checkMutationResult(e);
+    if (e.kind == ExprKind::Entry) fail(e.token, "key : value entries can only be added to a pair, as p += key : value");
+    if (e.kind == ExprKind::Removal) fail(e.token, "-= [i] removes an element from an array or a pair");
+    if (e.kind == ExprKind::Mutation) return checkMutationResult(e);
 
-    if (e.kind == "moveCheck") {
+    if (e.kind == ExprKind::MoveCheck) {
       ownershipMove(*e.args[0], *e.args[1], e.token);
       return Type::Bool;
     }
 
-    if (e.kind == "unary" && op == "&") return checkAddressOf(e);
-    if (e.kind == "call") return checkCall(e, expected);
+    if (e.kind == ExprKind::Unary && op == Tok::Ampersand) return checkAddressOf(e);
+    if (e.kind == ExprKind::Call) return checkCall(e, expected);
 
     auto first = expression(*e.args[0],
-                            (e.kind == "unary" && op == "-" &&
+                            (e.kind == ExprKind::Unary && op == Tok::Minus &&
                              (numeric(expected) || arbitraryNumber(expected))) ||
-                            (e.kind == "binary" && op == "+" && managedText(expected)) ||
+                            (e.kind == ExprKind::Binary && op == Tok::Plus && managedText(expected)) ||
                             leftLiteralAdopts(e, expected)
                                 ? expected
-                                : e.kind == "binary" ? nativeLiteralHint(*e.args[0], nativeMath(expected))
+                                : e.kind == ExprKind::Binary ? nativeLiteralHint(*e.args[0], nativeMath(expected))
                                                      : Type(Type::Void));
 
     // Both conditional branches keep their enum type.
-    if (e.kind != "conditional") first = decay(*e.args[0], first);
+    if (e.kind != ExprKind::Conditional) first = decay(*e.args[0], first);
 
-    if (funcValue(first) && e.kind == "binary") {
-      if ((op != "==" && op != "!=") || e.args[1]->kind != "null")
+    if (funcValue(first) && e.kind == ExprKind::Binary) {
+      if ((op != Tok::EqualEqual && op != Tok::NotEqual) || e.args[1]->kind != ExprKind::Null)
         fail(e.token, "a func value only compares with null, as in f != null");
 
       expression(*e.args[1], first);
       return Type::Bool;
     }
 
-    if (e.kind == "conditional") return checkConditional(e, expected, first);
+    if (e.kind == ExprKind::Conditional) return checkConditional(e, expected, first);
 
-    if (e.kind == "unary" && arbitraryNumber(first)) {
-      if (op != "-") fail(e.token, typeName(first) + " supports only arithmetic negation");
+    if (e.kind == ExprKind::Unary && arbitraryNumber(first)) {
+      if (op != Tok::Minus) fail(e.token, typeName(first) + " supports only arithmetic negation");
 
       if (first == Type::UBig || first == Type::UTiny)
         fail(e.token, "cannot negate unsigned " + typeName(first));
@@ -4152,17 +4123,17 @@ class Analyzer {
       return first;
     }
 
-    if (e.kind == "unary" && nativeMath(first)) {
-      if (op != "-") fail(e.token, "operator '" + op + "' does not apply to " + typeName(first));
+    if (e.kind == ExprKind::Unary && nativeMath(first)) {
+      if (op != Tok::Minus) fail(e.token, "operator '" + op + "' does not apply to " + typeName(first));
 
       return first;
     }
 
-    if (e.kind == "unary") {
-      if (op == "!")
+    if (e.kind == ExprKind::Unary) {
+      if (op == Tok::Bang)
         return truth(*e.args[0], first, e.token);
 
-      if (op == "~" && !integral(first))
+      if (op == Tok::Tilde && !integral(first))
         fail(e.token, "bitwise operators require integer operands");
       else if (!numeric(first))
         require(first, Type::Int, e.token);
@@ -4170,7 +4141,7 @@ class Analyzer {
       return first;
     }
 
-    if (op == "&&" || op == "||") {
+    if (op == Tok::AndAnd || op == Tok::OrOr) {
       truth(*e.args[0], first, e.token);
       truth(*e.args[1], decay(*e.args[1], expression(*e.args[1])), e.token);
       return Type::Bool;
@@ -4226,31 +4197,31 @@ class Analyzer {
   // bits into big, and real literals into tiny. Integer literals into tiny keep
   // integer arithmetic, so tiny x = 1 / 3 is 0, as for double.
   static bool leftLiteralAdopts(const Expr &e, Type expected) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
 
-    if (e.kind != "binary" || e.args.empty() ||
-        (op != "+" && op != "-" && op != "*" && op != "/" && op != "%"))
+    if (e.kind != ExprKind::Binary || e.args.empty() ||
+        (op != Tok::Plus && op != Tok::Minus && op != Tok::Star && op != Tok::Slash && op != Tok::Percent))
       return false;
 
     const Expr *literal = e.args[0].get();
 
-    if (literal->kind == "unary" && literal->token.text == Tok::Minus) literal = literal->args[0].get();
+    if (literal->kind == ExprKind::Unary && literal->token.text == Tok::Minus) literal = literal->args[0].get();
 
-    return (bigInteger(expected) && literal->kind == "int") ||
-           (decimalValue(expected) && literal->kind == "real");
+    return (bigInteger(expected) && literal->kind == ExprKind::Int) ||
+           (decimalValue(expected) && literal->kind == ExprKind::Real);
   }
   // Calendar accessors are built-ins only when no user function or container
   // has the same name, so existing programs keep their own Day or Second.
   bool calendarCall(const Expr &e, Type &type) {
-    const std::string &op = e.token.text;
-    const bool datePart = op == "Year" || op == "Month" || op == "Day" || op == "DayOfWeek";
-    const bool timePart = op == "Hour" || op == "Minute" || op == "Second" || op == "Nanosecond";
+    const TokenText &op = e.token.text;
+    const bool datePart = op == Tok::Year || op == Tok::Month || op == Tok::Day || op == Tok::DayOfWeek;
+    const bool timePart = op == Tok::Hour || op == Tok::Minute || op == Tok::Second || op == Tok::Nanosecond;
 
-    if (!datePart && !timePart && op != "DateOf" && op != "TimeOf" && op != "AddDays" &&
-        op != "DaysBetween")
+    if (!datePart && !timePart && op != Tok::DateOf && op != Tok::TimeOf && op != Tok::AddDays &&
+        op != Tok::DaysBetween)
       return false;
 
-    const size_t count = op == "AddDays" || op == "DaysBetween" ? 2 : 1;
+    const size_t count = op == Tok::AddDays || op == Tok::DaysBetween ? 2 : 1;
 
     if (e.args.size() != count) fail(e.token, "wrong argument count for '" + op + "'");
 
@@ -4267,10 +4238,10 @@ class Analyzer {
     } else if (timePart) {
       accept(value == Type::Time || value == Type::DateTime, "a time or datetime");
       type = Type::Int;
-    } else if (op == "DateOf" || op == "TimeOf") {
+    } else if (op == Tok::DateOf || op == Tok::TimeOf) {
       accept(value == Type::DateTime, "a datetime");
-      type = op == "DateOf" ? Type::Date : Type::Time;
-    } else if (op == "AddDays") {
+      type = op == Tok::DateOf ? Type::Date : Type::Time;
+    } else if (op == Tok::AddDays) {
       accept(value == Type::Date || value == Type::DateTime, "a date or datetime");
       expression(*e.args[1], Type::Long);
       type = value;
@@ -4297,8 +4268,8 @@ class Analyzer {
     for (size_t i = 0; i < statements.size(); ++i) {
       const auto &s = *statements[i];
 
-      if (s.kind != "let" || analysis.localTypes.at(&s).role != Type::Alias ||
-          analysis.expressionTypes.at(s.expr.get()).role != Type::Owner || s.expr->kind != "name" ||
+      if (s.kind != StmtKind::Let || analysis.localTypes.at(&s).role != Type::Alias ||
+          analysis.expressionTypes.at(s.expr.get()).role != Type::Owner || s.expr->kind != ExprKind::Name ||
           analysis.receiverStorage.count(s.expr.get())) continue;
 
       bool scoped = true;
@@ -4323,16 +4294,16 @@ class Analyzer {
   }
   // Literals, enum members, type limits, #Call(...), and # constants.
   bool constantLabel(const Expr &e) {
-    if (e.kind == "int" || e.kind == "bool" || e.kind == "char" || e.kind == "text" || e.kind == "typeMember" ||
-        e.kind == "compileTime" || analysis.enumMembers.count(&e) ||
-        (e.kind == "." && analysis.integerConstants.count(&e)) ||
-        (e.kind == "unary" && e.token.text == Tok::Minus && e.args[0]->kind == "int"))
+    if (e.kind == ExprKind::Int || e.kind == ExprKind::Bool || e.kind == ExprKind::Char || e.kind == ExprKind::Text || e.kind == ExprKind::TypeMember ||
+        e.kind == ExprKind::CompileTime || analysis.enumMembers.count(&e) ||
+        (e.kind == ExprKind::Member && analysis.integerConstants.count(&e)) ||
+        (e.kind == ExprKind::Unary && e.token.text == Tok::Minus && e.args[0]->kind == ExprKind::Int))
       return true;
 
     if (const auto field = analysis.staticFields.find(&e); field != analysis.staticFields.end())
       return symbols.statics.at(field->second).constant;
 
-    if (e.kind != "name") return false;
+    if (e.kind != ExprKind::Name) return false;
 
     const auto *local = findLocal(e.token);
     return local && local->constant;
@@ -4346,9 +4317,9 @@ class Analyzer {
     if (const auto member = analysis.enumMembers.find(&e); member != analysis.enumMembers.end())
       return "member " + std::to_string(member->second);
 
-    if (e.kind == "bool" || e.kind == "char" || e.kind == "text") return e.kind + " " + e.token.text;
+    if (e.kind == ExprKind::Bool || e.kind == ExprKind::Char || e.kind == ExprKind::Text) return kindName(e.kind) + (" " + e.token.text);
 
-    if (e.kind == "name")
+    if (e.kind == ExprKind::Name)
       if (const auto *local = findLocal(e.token); local && local->constantValue)
         return labelKey(*local->constantValue);
 
@@ -4476,7 +4447,7 @@ class Analyzer {
     requireCompleteScopes(0);
 
     // `return local` moves a value with a destructor out of the function.
-    if (s.expr && s.expr->kind == "name" &&
+    if (s.expr && s.expr->kind == ExprKind::Name &&
         (collectionValue(result) || fileValue(result) || (arrayValue(result) && symbols.moveOnly(result)) ||
          (recordValue(result) && symbols.destructible(result.record)))) {
       const auto *local = findLocal(s.expr->token);
@@ -4501,12 +4472,12 @@ class Analyzer {
     requireCompleteScopes(0);
     analysis.handleReturns.insert(&s);
 
-    if (s.expr->kind == "null") {
+    if (s.expr->kind == ExprKind::Null) {
       expression(*s.expr, result);
       return true;
     }
 
-    if (s.expr->kind == "call") ownerDestination = s.expr.get();
+    if (s.expr->kind == ExprKind::Call) ownerDestination = s.expr.get();
 
     const auto type = expression(*s.expr);
     ownerDestination = nullptr;
@@ -4519,7 +4490,7 @@ class Analyzer {
     }
 
     if (type.role == Type::Raw || type.pointee() != result.pointee() ||
-        (s.expr->kind != "call" && !trackedPlace(*s.expr)))
+        (s.expr->kind != ExprKind::Call && !trackedPlace(*s.expr)))
       fail(s.token, "this function returns tracked heap references, so it cannot return " + typeName(type) +
                         "; return a tracked reference, ::owner, or null");
 
@@ -4533,7 +4504,7 @@ class Analyzer {
     // The branch uses the reference `if p` evaluated, unless it replaces p.
     // A local owner needs no binding: nothing else can clear it.
     const auto place = tested.role != Type::Raw ? placeKey(*s.expr) : std::string();
-    const bool localOwner = tested.role == Type::Owner && s.expr->kind == "name" &&
+    const bool localOwner = tested.role == Type::Owner && s.expr->kind == ExprKind::Name &&
                             !analysis.receiverStorage.count(s.expr.get()) && !lookup(s.expr->token).lent;
     bool bound = !place.empty() && !localOwner;
 
@@ -4601,7 +4572,7 @@ class Analyzer {
     scopes = exits.empty() ? entry : merge(entry, exits);
 
     // An @end anywhere below a marked loop leaves it, so it can always finish.
-    if (exits.empty() && !(s.body.size() == 1 && s.body.front()->kind == "scopedBody")) {
+    if (exits.empty() && !(s.body.size() == 1 && s.body.front()->kind == StmtKind::ScopedBody)) {
       analysis.terminatingLoops.insert(&s);
       return true;
     }
@@ -4614,11 +4585,11 @@ class Analyzer {
     if (s.initializer)
       statement(*s.initializer);
 
-    if (const auto record = s.kind == "foreach" ? enumNamed(*s.expr) : ""; !record.empty())
+    if (const auto record = s.kind == StmtKind::ForEach ? enumNamed(*s.expr) : ""; !record.empty())
       bindEnumIteration(s, record);
-    else if (s.kind == "foreach")
+    else if (s.kind == StmtKind::ForEach)
       bindIteration(s);
-    else if (s.kind == "rangefor") {
+    else if (s.kind == StmtKind::RangeFor) {
       const auto type = rangeEndpoints(*s.expr, Type::Void);
       analysis.expressionTypes[s.expr.get()] = type;
       analysis.localTypes[&s] = type;
@@ -4639,7 +4610,7 @@ class Analyzer {
     requireCompleteScopes(scopes.size() - 1);
     scopes.pop_back();
 
-    if (s.kind == "foreach" && !analysis.enumLoops.count(&s)) iterations.pop_back();
+    if (s.kind == StmtKind::ForEach && !analysis.enumLoops.count(&s)) iterations.pop_back();
 
     return false;
   }
@@ -4650,24 +4621,24 @@ class Analyzer {
     const Type hint = declarationHint(s, inferredFunc);
 
     // A fresh inferred local receives a call's result as it comes.
-    if (s.kind == "own" || (s.kind == "let" && s.type == Type::Void && s.expr && s.expr->kind == "call"))
+    if (s.kind == StmtKind::Own || (s.kind == StmtKind::Let && s.type == Type::Void && s.expr && s.expr->kind == ExprKind::Call))
       ownerDestination = s.expr.get();
 
-    std::set<std::string> missing;
+    PartSet missing = 0;
     bool lent = false;
 
-    if (!s.expr && s.kind == "own" && recordValue(s.type.pointee())) {
+    if (!s.expr && s.kind == StmtKind::Own && recordValue(s.type.pointee())) {
       missing = defaultMissing(s.type.pointee().record);
 
-      if (!missing.empty()) incomplete(s.token, s.type.pointee().record, missing);
+      if (missing) incomplete(s.token, s.type.pointee().record, missing);
     } else if (!s.expr && recordValue(s.type))
       missing = defaultMissing(s.type.record);
 
-    if (s.kind == "let" && s.expr && recordValue(s.expr->castType)) incompleteAllowed = s.expr.get();
+    if (s.kind == StmtKind::Let && s.expr && recordValue(s.expr->castType)) incompleteAllowed = s.expr.get();
 
-    incompleteMissing.clear();
+    incompleteMissing = 0;
 
-    if (s.kind == "let" && s.expr && s.expr->kind == "lambda") scopedLambda = s.expr.get();
+    if (s.kind == StmtKind::Let && s.expr && s.expr->kind == ExprKind::Lambda) scopedLambda = s.expr.get();
 
     scopedLambdaBorrowed = false;
     auto type = s.expr ? expression(*s.expr, hint) : s.type;
@@ -4706,10 +4677,10 @@ class Analyzer {
                         leaf.record + " []) and add elements to it");
 
     bind(name, {type, s.constant,
-                s.kind == "own" || s.expr != nullptr || recordValue(type) || collectionValue(type) ||
+                s.kind == StmtKind::Own || s.expr != nullptr || recordValue(type) || collectionValue(type) ||
                     fileValue(type) || arrayValue(type)});
 
-    if (s.kind == "own" && s.type == Type::Void && method && !scopes.empty())
+    if (s.kind == StmtKind::Own && s.type == Type::Void && method && !scopes.empty())
       if (const auto field = scopes.front().find(s.name);
           field != scopes.front().end() && field->second.receiver && field->second.type.role == Type::Owner)
         fail(s.token, "'" + s.name + "' is an owning field; write this." + s.name + " :: ... to move into it");
@@ -4730,21 +4701,21 @@ class Analyzer {
       hint = Type::Void;
     }
 
-    if (s.expr && s.type.depth && s.expr->kind != "null") {
-      const bool literal = s.expr->kind == "int" || s.expr->kind == "real" ||
-          (s.expr->kind == "unary" && s.expr->token.text == Tok::Minus && s.expr->args[0]->kind == "int");
-      hint = (literal && numeric(s.type.pointee())) || s.expr->kind == "initializer"
+    if (s.expr && s.type.depth && s.expr->kind != ExprKind::Null) {
+      const bool literal = s.expr->kind == ExprKind::Int || s.expr->kind == ExprKind::Real ||
+          (s.expr->kind == ExprKind::Unary && s.expr->token.text == Tok::Minus && s.expr->args[0]->kind == ExprKind::Int);
+      hint = (literal && numeric(s.type.pointee())) || s.expr->kind == ExprKind::Initializer
                  ? s.type.pointee() : Type(Type::Void);
     }
 
     return hint;
   }
   void resolveLocalRole(const Stmt &s, Type &type, bool &lent) {
-    if (s.kind == "let" && s.type.depth && heapValue(s.type.pointee()) && heapValue(type)) {
+    if (s.kind == StmtKind::Let && s.type.depth && heapValue(s.type.pointee()) && heapValue(type)) {
       convert(*s.expr, type, s.type.pointee());
       type = s.type;
       type.role = Type::Owner;
-    } else if (s.kind == "own") {
+    } else if (s.kind == StmtKind::Own) {
       if (s.expr && type.depth) {
         if (type.role != Type::Owner || !ownerSource(*s.expr))
           fail(s.token, "ownership transfer requires a mutable owning source");
@@ -4758,7 +4729,7 @@ class Analyzer {
       }
 
       type.role = Type::Owner;
-    } else if (type.role != Type::Raw && s.expr->kind == "call") {
+    } else if (type.role != Type::Raw && s.expr->kind == ExprKind::Call) {
       // Consumes an owning result and keeps a borrowed one as an alias.
       const auto *called = calledFunction(*s.expr);
       lent = called && called->lends;
@@ -4773,90 +4744,90 @@ class Analyzer {
   }
   bool checkAssignment(const Stmt &s) {
     // `?a[i] = v` assigns only when the element exists.
-    const auto &target = s.target->kind == "guard" ? *s.target->args[0] : *s.target;
+    const auto &target = s.target->kind == ExprKind::Guard ? *s.target->args[0] : *s.target;
 
-    if (target.kind == ".") rejectUnknownStatic(target);
+    if (target.kind == ExprKind::Member) rejectUnknownStatic(target);
 
     requireComplete(target);
     std::string owner;
-    auto local = propertyOf(target, owner) ? Local{propertyWrite(target, owner, s.kind != "assign"), false}
-                                           : location(target, s.kind != "assign");
+    auto local = propertyOf(target, owner) ? Local{propertyWrite(target, owner, s.kind != StmtKind::Assign), false}
+                                           : location(target, s.kind != StmtKind::Assign);
 
-    if (&target != s.target.get() && target.kind != "index" && !analysis.scopedPlaces.count(&target))
+    if (&target != s.target.get() && target.kind != ExprKind::Index && !analysis.scopedPlaces.count(&target))
       fail(s.token, "'?' guards an index such as ?a[i], a method call such as ?p.Foo(), a duck call such as ?e..Foo(), or a scoped variable");
 
     if (&target != s.target.get()) analysis.expressionTypes[s.target.get()] = local.type;
     if (local.constant) constantTarget(target, s.token);
 
     // Replacing a collection, or storing a new grid cell, changes its length.
-    if (s.kind == "assign" && (arrayValue(local.type) || collectionValue(local.type)))
-      removesCurrent(target, local.type, "=", nullptr, s.token);
+    if (s.kind == StmtKind::Assign && (arrayValue(local.type) || collectionValue(local.type)))
+      removesCurrent(target, local.type, Tok::Assign, nullptr, s.token);
 
-    if (std::vector<const Expr *> coordinates; &target == s.target.get() && target.kind == "index")
+    if (std::vector<const Expr *> coordinates; &target == s.target.get() && target.kind == ExprKind::Index)
       if (const auto *grid = gridAccess(target, coordinates))
-        removesCurrent(*grid, location(*grid).type, "[...] =", nullptr, s.token);
+        removesCurrent(*grid, location(*grid).type, Tok::CellAssign, nullptr, s.token);
 
     if (local.type.role != Type::Raw) {
-      if (s.kind != "assign") fail(s.token, "tracked binding requires null or an alias assignment");
+      if (s.kind != StmtKind::Assign) fail(s.token, "tracked binding requires null or an alias assignment");
 
       auto source = expression(*s.expr);
 
-      if (s.expr->kind != "null" && (local.type.role != Type::Alias || !trackedPlace(*s.expr)))
+      if (s.expr->kind != ExprKind::Null && (local.type.role != Type::Alias || !trackedPlace(*s.expr)))
         fail(s.token, "tracked binding requires null or an alias assignment");
 
-      if (s.expr->kind != "null" && (source.role == Type::Raw ||
+      if (s.expr->kind != ExprKind::Null && (source.role == Type::Raw ||
           source.pointee() != local.type.pointee()))
         fail(s.token, "incompatible tracked alias source");
 
       return false;
     }
 
-    if ((arrayValue(local.type) || collectionValue(local.type)) && s.kind != "assign") {
-      collectionMutation(target, local.type, s.kind, s.expr.get(), s.token);
+    if ((arrayValue(local.type) || collectionValue(local.type)) && s.kind != StmtKind::Assign) {
+      collectionMutation(target, local.type, assignmentOperator(s.kind), s.expr.get(), s.token);
       return false;
     }
 
-    const bool bitwise = s.kind == "&=" || s.kind == "|=" || s.kind == "^=" ||
-                         s.kind == "<<=" || s.kind == ">>=";
+    const bool bitwise = s.kind == StmtKind::AmpersandAssign || s.kind == StmtKind::PipeAssign || s.kind == StmtKind::CaretAssign ||
+                         s.kind == StmtKind::ShiftLeftAssign || s.kind == StmtKind::ShiftRightAssign;
 
     if (bitwise && !integral(local.type))
       fail(s.token, "bitwise operators require integer operands");
 
     const bool arbitraryArithmetic =
         arbitraryNumber(local.type) &&
-        (s.kind == "+=" || s.kind == "-=" || s.kind == "*=" || s.kind == "/=" ||
-         s.kind == "++" || s.kind == "--" || (s.kind == "%=" && bigInteger(local.type)));
+        (s.kind == StmtKind::PlusAssign || s.kind == StmtKind::MinusAssign || s.kind == StmtKind::StarAssign || s.kind == StmtKind::SlashAssign ||
+         s.kind == StmtKind::Increment || s.kind == StmtKind::Decrement || (s.kind == StmtKind::PercentAssign && bigInteger(local.type)));
 
-    const bool nativeCompound = s.kind != "assign" && nativeMath(local.type);
+    const bool nativeCompound = s.kind != StmtKind::Assign && nativeMath(local.type);
 
     if (nativeCompound) {
-      if (s.kind != "+=" && s.kind != "-=" && s.kind != "*=" && s.kind != "/=")
-        fail(s.token, "'" + s.kind + "' does not apply to " + typeName(local.type));
+      if (s.kind != StmtKind::PlusAssign && s.kind != StmtKind::MinusAssign && s.kind != StmtKind::StarAssign && s.kind != StmtKind::SlashAssign)
+        fail(s.token, "'" + std::string(kindName(s.kind)) + "' does not apply to " + typeName(local.type));
 
       const auto right = decay(*s.expr, expression(*s.expr, nativeLiteralHint(*s.expr, nativeMath(local.type))));
 
-      if (nativeOperation(s.kind.substr(0, 1), s.token, local.type, right, nullptr, *s.expr) != local.type)
-        fail(s.token, "'" + s.kind + "' must leave " + typeName(local.type) + " the same type");
-    } else if (s.kind != "assign" && !(s.kind == "+=" && managedText(local.type)) && !arbitraryArithmetic &&
-               (!numeric(local.type) || (s.kind == "%=" && !integral(local.type))))
+      if (nativeOperation(compoundOperator(s.kind), s.token, local.type, right, nullptr, *s.expr) != local.type)
+        fail(s.token, "'" + std::string(kindName(s.kind)) + "' must leave " + typeName(local.type) + " the same type");
+    } else if (s.kind != StmtKind::Assign && !(s.kind == StmtKind::PlusAssign && managedText(local.type)) && !arbitraryArithmetic &&
+               (!numeric(local.type) || (s.kind == StmtKind::PercentAssign && !integral(local.type))))
       require(local.type, Type::Int, s.token);
 
     if (s.expr && !nativeCompound) {
-      if (s.kind == "<<=" || s.kind == ">>=") {
+      if (s.kind == StmtKind::ShiftLeftAssign || s.kind == StmtKind::ShiftRightAssign) {
         if (!integral(expression(*s.expr)))
           fail(s.expr->token, "bitwise operators require integer operands");
       } else
         expression(*s.expr, local.type);
     }
 
-    if (s.target->kind == "name" && !analysis.staticFields.count(s.target.get()) &&
+    if (s.target->kind == ExprKind::Name && !analysis.staticFields.count(s.target.get()) &&
         !analysis.properties.count(s.target.get()))
       editLocal(s.target->token).initialized = true;
 
     return false;
   }
   bool statement(const Stmt &s) {
-    if (s.kind == "parallel") {
+    if (s.kind == StmtKind::Parallel) {
       analysis.parallelGroups.insert(&s);
       for (const auto &branch : s.labels) {
         scopedLambda = branch.get();
@@ -4868,31 +4839,31 @@ class Analyzer {
       }
       return false;
     }
-    if (s.kind == "block" || s.kind == "ordered")
+    if (s.kind == StmtKind::Block || s.kind == StmtKind::Ordered)
       return block(s.body);
 
-    if (s.kind == "switch") return switchStatement(s);
+    if (s.kind == StmtKind::Switch) return switchStatement(s);
 
-    if (s.kind == "scopeStart" || s.kind == "scopeEnd") {
+    if (s.kind == StmtKind::ScopeStart || s.kind == StmtKind::ScopeEnd) {
       analysis.scopeEffects = true;
-      analysis.endsScope = analysis.endsScope || s.kind == "scopeEnd";
+      analysis.endsScope = analysis.endsScope || s.kind == StmtKind::ScopeEnd;
       return false;
     }
 
-    if (s.kind == "scopedBody") {
+    if (s.kind == StmtKind::ScopedBody) {
       analysis.scopeEffects = true;
       return block(s.body);
     }
 
-    if (s.kind == "markupAdd") {
+    if (s.kind == StmtKind::MarkupAdd) {
       location(*s.target, false);
       expression(*s.expr);
       return false;
     }
 
-    if (s.kind == "markupSplice") return checkMarkupSplice(s);
+    if (s.kind == StmtKind::MarkupSplice) return checkMarkupSplice(s);
 
-    if (s.kind == "break") {
+    if (s.kind == StmtKind::Break) {
       if (loops.empty())
         fail(s.token, "break requires an enclosing loop or Switch");
 
@@ -4901,7 +4872,7 @@ class Analyzer {
       return true;
     }
 
-    if (s.kind == "continue") {
+    if (s.kind == StmtKind::Continue) {
       auto *loop = enclosingLoop();
 
       if (!loop)
@@ -4912,30 +4883,30 @@ class Analyzer {
       return true;
     }
 
-    if (s.kind == "returnOwner") {
+    if (s.kind == StmtKind::ReturnOwner) {
       requireCompleteScopes(0);
 
-      if (!s.expr || s.expr->kind != "name" || lookup(s.expr->token).constant ||
+      if (!s.expr || s.expr->kind != ExprKind::Name || lookup(s.expr->token).constant ||
           expression(*s.expr) != result)
         fail(s.token, "return :: requires a mutable owning local of the declared type");
 
       return true;
     }
 
-    if (s.kind == "return") return checkReturn(s);
+    if (s.kind == StmtKind::Return) return checkReturn(s);
 
-    if (s.kind == "moveInto") {
+    if (s.kind == StmtKind::MoveInto) {
       ownershipMove(*s.target, *s.expr, s.token);
       return false;
     }
 
-    if (s.kind == "if") return checkIf(s);
-    if (s.kind == "do") return checkDo(s);
-    if (s.kind == "while" || s.kind == "for" || s.kind == "foreach" || s.kind == "rangefor") return checkPreconditionLoop(s);
+    if (s.kind == StmtKind::If) return checkIf(s);
+    if (s.kind == StmtKind::Do) return checkDo(s);
+    if (s.kind == StmtKind::While || s.kind == StmtKind::For || s.kind == StmtKind::ForEach || s.kind == StmtKind::RangeFor) return checkPreconditionLoop(s);
 
-    if (s.kind == "let" || s.kind == "own") {
+    if (s.kind == StmtKind::Let || s.kind == StmtKind::Own) {
       checkLocalDeclaration(s);
-    } else if (s.kind == "expr") {
+    } else if (s.kind == StmtKind::Expr) {
       expression(*s.expr);
 
       if (analysis.nativeMethods.count(s.expr.get()) && !analysis.nativeInPlace.count(s.expr.get()))
@@ -4990,21 +4961,21 @@ public:
     scopes.emplace_back();
 
     // A lambda default is built at run time, and analyzed with its generated method.
-    if (e.kind == "lambda") return std::nullopt;
+    if (e.kind == ExprKind::Lambda) return std::nullopt;
 
     expression(e, type);
 
     if (bigInteger(type) || recordValue(type)) return std::nullopt;
     // A string or name literal; lowering emits it as immortal constant storage.
-    if (e.kind == "text" && managedText(type)) return "";
+    if (e.kind == ExprKind::Text && managedText(type)) return "";
 
     const bool converted = analysis.conversions.count(&e) != 0;
     auto encode = [](double value) {
       return floatingConstantText(value);
     };
 
-    if (e.kind == "bool") return e.token.text;
-    if (e.kind == "null") return "null";
+    if (e.kind == ExprKind::Bool) return e.token.text;
+    if (e.kind == ExprKind::Null) return "null";
 
     if (auto member = analysis.enumMembers.find(&e); member != analysis.enumMembers.end() && !converted)
       return std::to_string(member->second);
@@ -5022,7 +4993,7 @@ public:
       return real->second;
 
     // A negated floating literal: flip the sign bit of the encoded value.
-    if (e.kind == "unary" && e.token.text == Tok::Minus && !converted) {
+    if (e.kind == ExprKind::Unary && e.token.text == Tok::Minus && !converted) {
       auto real = analysis.floatingConstants.find(e.args[0].get());
 
       if (real != analysis.floatingConstants.end()) {
@@ -5056,7 +5027,7 @@ public:
     }
 
     if (function.generated && method && !function.body.empty() && function.body.front()->expr &&
-        function.body.front()->expr->kind == "lambda")
+        function.body.front()->expr->kind == ExprKind::Lambda)
       memberLambdaSite = function.body.front()->expr.get();
 
     symbols.validateType(result, function.name);
@@ -5271,7 +5242,7 @@ Function assignment(Token name, std::vector<Parameter> params, std::unique_ptr<E
   Function f{name, Type::Void, std::move(params), {}, false, {}};
   auto s = std::make_unique<Stmt>();
   s->token = value->token;
-  s->kind = "assign";
+  s->kind = StmtKind::Assign;
   s->target = std::move(target);
   s->expr = std::move(value);
   f.body.push_back(std::move(s));
@@ -5288,7 +5259,7 @@ std::vector<Function> generateInitializers(Symbols &symbols, Symbols &declaratio
 
       // A method whose receiver, $self, cannot be named by the default itself.
       Token self = field.name, key = field.name;
-      self.text = "$self";
+      self.text = Tok::Self;
       key.text = defaultKey(name, field.name.text);
       Type type = Type::Record;
       type.record = name;
@@ -5302,15 +5273,15 @@ std::vector<Function> generateInitializers(Symbols &symbols, Symbols &declaratio
       }
 
       auto target = std::make_unique<Expr>();
-      target->kind = ".";
+      target->kind = ExprKind::Member;
       target->token = field.name;
       auto receiver = std::make_unique<Expr>();
-      receiver->kind = "name";
+      receiver->kind = ExprKind::Name;
       receiver->token = self;
       target->args.push_back(std::move(receiver));
       generated.push_back(assignment(key, params, std::move(target), clone(*field.initializer)));
 
-      if (field.type.role == Type::Owner) generated.back().body.front()->kind = "moveInto";
+      if (field.type.role == Type::Owner) generated.back().body.front()->kind = StmtKind::MoveInto;
 
       generated.back().method = true;
       generated.back().usings = field.usings;
@@ -5324,7 +5295,7 @@ std::vector<Function> generateInitializers(Symbols &symbols, Symbols &declaratio
     symbols.emplace(key.text, Signature{Type::Void, {}, "", key, {}, false, false});
     // The bare name resolves to this static from its container's scope.
     auto target = std::make_unique<Expr>();
-    target->kind = "name";
+    target->kind = ExprKind::Name;
     target->token = info.declaration;
     target->token.text = name.substr(name.rfind('.') + 1);
     std::unique_ptr<Expr> value;
@@ -5333,7 +5304,7 @@ std::vector<Function> generateInitializers(Symbols &symbols, Symbols &declaratio
     else {
       // A container whose defaults run at construction: default-construct it.
       value = std::make_unique<Expr>();
-      value->kind = "call";
+      value->kind = ExprKind::Call;
       value->token = info.declaration;
       value->token.text = info.type.record;
     }

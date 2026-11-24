@@ -211,7 +211,7 @@ static void mergeImportedSymbols(Symbols &symbols, const Symbols &imported, cons
                                   "'; add instance members in its defining module");
 
   for (const auto &f : imports) {
-    if (f.name.text == "Main")
+    if (f.name.text == Tok::Main)
       fail(f.name, "cannot import an executable module");
 
     if (!symbols.emplace(f.name.text, imported.at(f.name.text)).second)
@@ -411,7 +411,7 @@ std::string compileModule(const Program &program, const Program &imports,
 
   if (!entry && !tests && symbols.count("Main"))
     for (const auto &f : program)
-      if (f.name.text == "Main")
+      if (f.name.text == Tok::Main)
         fail(f.name, "library module cannot define Main");
 
   auto imported = collectSymbols(imports, false);

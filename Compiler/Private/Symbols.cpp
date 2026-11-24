@@ -62,7 +62,7 @@ const char *constantKind(const EnumConstant &c) {
 std::optional<EnumConstant> literalConstant(const Expr &e) {
   EnumConstant c;
 
-  if (e.kind == "int") {
+  if (e.kind == ExprKind::Int) {
     const std::string &text = e.token.text;
     const int base = integerLiteralBase(text);
     const auto digits = base == 10 ? text : text.substr(2);
@@ -80,7 +80,7 @@ std::optional<EnumConstant> literalConstant(const Expr &e) {
     return c;
   }
 
-  if (e.kind == "real") {
+  if (e.kind == ExprKind::Real) {
     c.kind = EnumConstant::Real;
 
     if (!parseFloatingLiteral(e.token.text, false, c.real))
@@ -89,7 +89,7 @@ std::optional<EnumConstant> literalConstant(const Expr &e) {
     return c;
   }
 
-  if (e.kind == "text" && !e.token.character) {
+  if (e.kind == ExprKind::Text && !e.token.character) {
     c.kind = EnumConstant::Text;
     c.text = e.token.text;
     return c;
@@ -115,10 +115,10 @@ unsigned bitLength(const Bits &v) {
   return 0;
 }
 EnumConstant binaryConstant(const Token &token, EnumConstant a, EnumConstant b) {
-  const std::string &op = token.text;
+  const TokenText &op = token.text;
 
   if (a.kind == EnumConstant::Text || b.kind == EnumConstant::Text) {
-    if (op != "+" || a.kind != b.kind)
+    if (op != Tok::Plus || a.kind != b.kind)
       fail(token, "enum text values can only be joined with '+' to other text");
 
     a.text += b.text;
@@ -131,10 +131,10 @@ EnumConstant binaryConstant(const Token &token, EnumConstant a, EnumConstant b) 
     EnumConstant r;
     r.kind = EnumConstant::Real;
 
-    if (op == "+") r.real = x + y;
-    else if (op == "-") r.real = x - y;
-    else if (op == "*") r.real = x * y;
-    else if (op == "/") r.real = x / y;
+    if (op == Tok::Plus) r.real = x + y;
+    else if (op == Tok::Minus) r.real = x - y;
+    else if (op == Tok::Star) r.real = x * y;
+    else if (op == Tok::Slash) r.real = x / y;
     else fail(token, "operator '" + op + "' does not apply to decimal numbers in an enum value");
 
     if (!std::isfinite(r.real)) fail(token, "enum value is not a finite number");
@@ -146,26 +146,26 @@ EnumConstant binaryConstant(const Token &token, EnumConstant a, EnumConstant b) 
   const bool na = negativeBits(a.bits), nb = negativeBits(b.bits);
   EnumConstant r;
 
-  if (op == "+") r.bits = a.bits.add(b.bits);
-  else if (op == "-") r.bits = a.bits.add(b.bits.negate());
-  else if (op == "*") {
+  if (op == Tok::Plus) r.bits = a.bits.add(b.bits);
+  else if (op == Tok::Minus) r.bits = a.bits.add(b.bits.negate());
+  else if (op == Tok::Star) {
     // Operands stay far below 2^256 in practice; larger ones would wrap.
     if (bitLength(absolute(a.bits)) + bitLength(absolute(b.bits)) > 510) fail(token, "enum value overflows");
 
     r.bits = a.bits.multiply(b.bits);
-  } else if (op == "/" || op == "%") {
+  } else if (op == Tok::Slash || op == Tok::Percent) {
     if (b.bits.zero()) fail(token, "division by zero in an enum value");
 
     auto [q, rem] = absolute(a.bits).divide(absolute(b.bits), 512);
-    r.bits = op == "/" ? (na != nb ? q.negate() : q) : (na ? rem.negate() : rem);
-  } else if (op == "<<" || op == ">>") {
+    r.bits = op == Tok::Slash ? (na != nb ? q.negate() : q) : (na ? rem.negate() : rem);
+  } else if (op == Tok::ShiftLeft || op == Tok::ShiftRight) {
     if (nb || b.bits.compare(Bits(511)) > 0) fail(token, "enum value shift count out of range");
 
-    r.bits = a.bits.shift(b.bits.words[0], 512, op == ">>", na);
-  } else if (op == "&" || op == "|" || op == "^") {
+    r.bits = a.bits.shift(b.bits.words[0], 512, op == Tok::ShiftRight, na);
+  } else if (op == Tok::Ampersand || op == Tok::Pipe || op == Tok::Caret) {
     for (size_t i = 0; i < r.bits.words.size(); ++i)
-      r.bits.words[i] = op == "&" ? a.bits.words[i] & b.bits.words[i]
-                        : op == "|" ? a.bits.words[i] | b.bits.words[i]
+      r.bits.words[i] = op == Tok::Ampersand ? a.bits.words[i] & b.bits.words[i]
+                        : op == Tok::Pipe ? a.bits.words[i] | b.bits.words[i]
                                     : a.bits.words[i] ^ b.bits.words[i];
   } else
     fail(token, "operator '" + op + "' is not allowed in an enum value");
@@ -299,7 +299,7 @@ private:
   EnumConstant evaluate(const Expr &e, const std::string &from) {
     if (auto literal = literalConstant(e)) return *literal;
 
-    if (e.kind == "name") {
+    if (e.kind == ExprKind::Name) {
       const auto &info = enums.at(from).info;
 
       if (info.find(e.token.text) == info.members.size())
@@ -309,16 +309,16 @@ private:
       return member(from, e.token);
     }
 
-    if (e.kind == ".") {
+    if (e.kind == ExprKind::Member) {
       std::string path;
       const Expr *root = e.args[0].get();
 
-      while (root->kind == ".") {
+      while (root->kind == ExprKind::Member) {
         path = "." + root->token.text + path;
         root = root->args[0].get();
       }
 
-      if (root->kind == "name") {
+      if (root->kind == ExprKind::Name) {
         const auto name = qualify(root->token.text + path, from);
 
         if (!name.empty()) return member(name, e.token);
@@ -327,8 +327,8 @@ private:
       fail(e.token, "'" + e.token.text + "' is not an enum member; an enum value can use literals and enum members");
     }
 
-    if (e.kind == "unary") return unaryConstant(e.token, evaluate(*e.args[0], from));
-    if (e.kind == "binary") return binaryConstant(e.token, evaluate(*e.args[0], from), evaluate(*e.args[1], from));
+    if (e.kind == ExprKind::Unary) return unaryConstant(e.token, evaluate(*e.args[0], from));
+    if (e.kind == ExprKind::Binary) return binaryConstant(e.token, evaluate(*e.args[0], from), evaluate(*e.args[1], from));
 
     fail(e.token, "an enum value must be a constant expression of literals and enum members");
   }
@@ -337,7 +337,7 @@ private:
 std::optional<size_t> enumLiteralMember(const EnumInfo &info, const Expr &e) {
   auto c = literalConstant(e);
 
-  if (!c && e.kind == "unary" && e.token.text == Tok::Minus)
+  if (!c && e.kind == ExprKind::Unary && e.token.text == Tok::Minus)
     if ((c = literalConstant(*e.args[0]))) c = unaryConstant(e.token, *c);
 
   if (!c) return std::nullopt;
@@ -402,27 +402,27 @@ namespace {
 // access its pointee. Unknown calls and address-taking can export that storage.
 bool borrowsOnly(const Expr &e, const std::string &name, bool pointee = false,
                  bool mayEscape = false) {
-  if (e.kind == "name" && e.token.text == name) return pointee && !mayEscape;
+  if (e.kind == ExprKind::Name && e.token.text == name) return pointee && !mayEscape;
 
-  const bool indirect = e.kind == "." || (e.kind == "unary" && e.token.text == Tok::Star);
-  const bool nullCheck = e.kind == "binary" && (e.token.text == Tok::EqualEqual || e.token.text == Tok::NotEqual) &&
-                         (e.args[0]->kind == "null" || e.args[1]->kind == "null");
+  const bool indirect = e.kind == ExprKind::Member || (e.kind == ExprKind::Unary && e.token.text == Tok::Star);
+  const bool nullCheck = e.kind == ExprKind::Binary && (e.token.text == Tok::EqualEqual || e.token.text == Tok::NotEqual) &&
+                         (e.args[0]->kind == ExprKind::Null || e.args[1]->kind == ExprKind::Null);
 
   // A lambda body is not inspected, so it may capture or keep anything; the
   // same goes for a macro value's argument bindings.
-  if (e.kind == "lambda" || e.kind == "macroValue" || e.kind == "duckCall" || e.kind == "moveCheck") return false;
+  if (e.kind == ExprKind::Lambda || e.kind == ExprKind::MacroValue || e.kind == ExprKind::DuckCall || e.kind == ExprKind::MoveCheck) return false;
 
-  mayEscape = mayEscape || (e.kind == "unary" && e.token.text == Tok::Ampersand) ||
-              (e.kind == "call" && e.token.text != "Print");
+  mayEscape = mayEscape || (e.kind == ExprKind::Unary && e.token.text == Tok::Ampersand) ||
+              (e.kind == ExprKind::Call && e.token.text != Tok::Print);
 
   if (e.receiver && !borrowsOnly(*e.receiver, name, false, true)) return false;
 
   // Used as a condition, the pointer itself is only compared with null.
-  const bool tests = (e.kind == "unary" && e.token.text == Tok::Bang) ||
-                     (e.kind == "binary" && (e.token.text == Tok::AndAnd || e.token.text == Tok::OrOr));
+  const bool tests = (e.kind == ExprKind::Unary && e.token.text == Tok::Bang) ||
+                     (e.kind == ExprKind::Binary && (e.token.text == Tok::AndAnd || e.token.text == Tok::OrOr));
 
   for (size_t i = 0; i < e.args.size(); ++i) {
-    const bool selects = e.kind == "conditional" && i == 0;
+    const bool selects = e.kind == ExprKind::Conditional && i == 0;
 
     if (!borrowsOnly(*e.args[i], name, indirect || nullCheck || tests || selects, mayEscape)) return false;
   }
@@ -432,8 +432,8 @@ bool borrowsOnly(const Expr &e, const std::string &name, bool pointee = false,
 } // namespace
 bool borrowsOnly(const Stmt &s, const std::string &name) {
   // `if p`, `while p`, and their relatives only test the pointer.
-  const bool nullTest = (s.kind == "if" || s.kind == "while" || s.kind == "do" || s.kind == "for") && s.expr &&
-                        s.expr->kind == "name" && s.expr->token.text == name;
+  const bool nullTest = (s.kind == StmtKind::If || s.kind == StmtKind::While || s.kind == StmtKind::Do || s.kind == StmtKind::For) && s.expr &&
+                        s.expr->kind == ExprKind::Name && s.expr->token.text == name;
 
   if ((s.expr && !nullTest && !borrowsOnly(*s.expr, name)) || (s.target && !borrowsOnly(*s.target, name)) ||
       (s.initializer && !borrowsOnly(*s.initializer, name)) ||
@@ -515,7 +515,7 @@ static void addMarkupFields(Symbols &symbols, const Program &program) {
     if (hasField(record, "$children")) continue;
 
     Token name = host;
-    name.text = "$children";
+    name.text = Tok::Children;
     record.fields.push_back({name, markupType()});
   }
 
@@ -541,7 +541,7 @@ static void addMarkupFields(Symbols &symbols, const Program &program) {
       if (hasField(record, "value")) continue;
 
       Token name = value.tag;
-      name.text = "value";
+      name.text = Tok::ImplicitValue;
       record.fields.push_back({name, value.type});
       implied.emplace(value.tag.text, value);
     }
@@ -555,7 +555,7 @@ static void validateNativeDeclaration(const Function &f, const std::map<std::str
     return found != enums.end() ? nativeScalar(found->second.type) : nativeScalar(t);
   };
 
-  if (f.name.text == "Main")
+  if (f.name.text == Tok::Main)
     fail(f.name, "Main cannot be a native declaration");
 
   if (!std::regex_match(f.nativeSymbol, std::regex("[A-Za-z_][A-Za-z0-9_]*")) ||
@@ -675,8 +675,8 @@ static void addNativeMathTypes(Symbols &symbols) {
       // An unassigned quat means no rotation, not the invalid all-zero value.
       if (shape.quaternion && i == 3) {
         field.initializer = std::make_shared<Expr>();
-        field.initializer->kind = "real";
-        field.initializer->token.text = "1.0";
+        field.initializer->kind = ExprKind::Real;
+        field.initializer->token.text = TokenText::intern("1.0"); // A real literal.
         field.initialValue = "1.0";
       }
 
@@ -725,7 +725,7 @@ static void validateEntryPoint(const Symbols &symbols, bool requireEntry, const 
     }
 
     const auto close = closestName("Main", names);
-    fail({"", 1, 1, false, program.sources.empty() ? 0 : findSource(program.sources.front())},
+    fail({Tok::Empty, 1, 1, false, program.sources.empty() ? 0 : findSource(program.sources.front())},
          "program requires Main(); " +
              (close.empty() ? "add Main() { ... }, or compile with --library" : "found '" + close + "', but names are case-sensitive and the entry point must be exactly Main"));
   }
@@ -762,7 +762,7 @@ Symbols collectSymbols(const Program &program, bool requireEntry) {
     if (!f.nativeSymbol.empty()) validateNativeDeclaration(f, symbols.enums);
     if (f.method) rejectMethodClash(symbols, f, before);
 
-    if (f.name.text == "Print" || f.name.text == "Length" || f.name.text == "CodeUnitAt" || f.name.text == "Exec" ||
+    if (f.name.text == Tok::Print || f.name.text == Tok::Length || f.name.text == Tok::CodeUnitAt || f.name.text == Tok::Exec ||
         !symbols.emplace(f.name.text, Signature{f.result, f.params, f.nativeSymbol, f.name, {}, f.method, f.protectedAccess, f.inferred, f.tags}).second)
       fail(f.name, "duplicate or reserved function '" + f.name.text + "'" +
                        (symbols.count(f.name.text) ? "; it is already declared at " + where(symbols.at(f.name.text).declaration) : ""));
@@ -803,7 +803,7 @@ const std::string *Symbols::execTarget(const Expr &call) const {
 
   const auto &argument = *call.args[0];
 
-  if (argument.kind != "text" || argument.token.character)
+  if (argument.kind != ExprKind::Text || argument.token.character)
     fail(argument.token, "Exec requires a string literal path; computed paths are not supported yet");
 
   const std::string &written = argument.token.text;
@@ -922,6 +922,14 @@ void collectParts(const Symbols &symbols, const std::string &record, const std::
 std::vector<ConstructionPart> Symbols::parts(const std::string &record) const {
   std::vector<ConstructionPart> result;
   collectParts(*this, record, {}, result);
+
+  // Sets of parts are 64-bit masks over this order.
+  if (result.size() > 64)
+    fail(records.at(record).name, "'" + record + "' has " + std::to_string(result.size()) +
+                                      " construction parts, counting its parents' constructors; a container may have at most 64");
+
+  for (size_t i = 0; i < result.size(); ++i) result[i].index = static_cast<std::uint32_t>(i);
+
   return result;
 }
 bool Symbols::zeroDefault(const Type &type) const {
@@ -1365,7 +1373,7 @@ void validateLifetimes(const Symbols &symbols) {
 
       while (fixedArray(next)) next = *next.element;
 
-      const bool eager = field.type.role == Type::Owner && field.initializer && field.initializer->kind == "call" &&
+      const bool eager = field.type.role == Type::Owner && field.initializer && field.initializer->kind == ExprKind::Call &&
                          recordValue(field.initializer->castType);
 
       if (eager) next = field.initializer->castType;

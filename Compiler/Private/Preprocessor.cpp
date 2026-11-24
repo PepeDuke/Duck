@@ -28,7 +28,6 @@ class Preprocessor {
   std::map<std::string, Definition> defines;
 
   bool punct(size_t k, Tok kind) const { return k < in.size() && !in[k].string && in[k].text == kind; }
-  bool punct(size_t k, const char *text) const { return k < in.size() && !in[k].string && in[k].text == text; }
   bool directive(size_t k, Tok word) const { return punct(k, Tok::Hash) && punct(k + 1, word); }
   void requireLineStart(size_t k) const {
     if (k && !punct(k - 1, Tok::Newline) && !punct(k - 1, Tok::LeftBrace) && !punct(k - 1, Tok::RightBrace))
@@ -55,15 +54,8 @@ class Preprocessor {
   // over the tokens in [cursor, end).
   size_t cursor = 0, end = 0;
   bool at(Tok kind) const { return cursor < end && punct(cursor, kind); }
-  bool at(const char *text) const { return cursor < end && punct(cursor, text); }
   bool accept(Tok kind) {
     if (!at(kind)) return false;
-
-    ++cursor;
-    return true;
-  }
-  bool accept(const char *text) {
-    if (!at(text)) return false;
 
     ++cursor;
     return true;

@@ -21,8 +21,8 @@ template <class Work> void rejects(Work work, const std::string &message) {
 int main() {
   try {
     const auto tokens = duck::lex("// comment\nMain() { Print(\"text\") }");
-    check(tokens.size() > 1 && tokens[0].text == "\n" &&
-              tokens[1].text == "Main" && tokens[1].line == 2 &&
+    check(tokens.size() > 1 && tokens[0].text == duck::Tok::Newline &&
+              tokens[1].text == duck::Tok::Main && tokens[1].line == 2 &&
               tokens[1].column == 1,
           "token source locations must survive tokenization");
     rejects([] { duck::lex("/* unterminated"); }, "unterminated comment");
@@ -200,7 +200,7 @@ Main() {
     check(!summaries.at("Pointer").threadSafe && !summaries.at("Text").threadSafe && !summaries.at("Local").threadSafe,
           "text and pointers must stay on the calling thread");
     size_t mainIndex = 0;
-    while (effects[mainIndex].name.text != "Main") ++mainIndex;
+    while (effects[mainIndex].name.text != duck::Tok::Main) ++mainIndex;
     auto &mainAnalysis = effectAnalyses[mainIndex];
     duck::scheduleTasks(effects, mainIndex, summaries, effectSymbols, effectAnalyses);
     const auto &body = effects[mainIndex].body;
@@ -268,7 +268,7 @@ Main() {
       check(table.at("Down").writes.size() == 1 && table.at("Up").writes.size() == 1 && table.at("Down").reads.size() == 1,
             "a recursive group must share its effects");
       size_t main = 0;
-      while (program[main].name.text != "Main") ++main;
+      while (program[main].name.text != duck::Tok::Main) ++main;
       duck::scheduleTasks(program, main, table, symbols, analyses);
       const auto &analysis = analyses[main];
       const auto &body = program[main].body;

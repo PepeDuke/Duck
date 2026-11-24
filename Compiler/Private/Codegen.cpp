@@ -297,12 +297,12 @@ class Generator {
   // Whether evaluating e can run Duck code, which could release an object
   // this statement is using.
   bool runsCode(const Expr &e) const {
-    if (e.kind == "invoke" || e.kind == "duckCall" || e.kind == "duckCheck" || e.kind == "duckExists" ||
-        e.kind == "mutation" || e.kind == "moveCheck" || analysis.properties.count(&e) ||
+    if (e.kind == ExprKind::Invoke || e.kind == ExprKind::DuckCall || e.kind == ExprKind::DuckCheck || e.kind == ExprKind::DuckExists ||
+        e.kind == ExprKind::Mutation || e.kind == ExprKind::MoveCheck || analysis.properties.count(&e) ||
         analysis.indirectCalls.count(&e))
       return true;
 
-    if (e.kind == "call" && !analysis.mathCalls.count(&e) && !analysis.nativeMethods.count(&e) &&
+    if (e.kind == ExprKind::Call && !analysis.mathCalls.count(&e) && !analysis.nativeMethods.count(&e) &&
         (e.receiver || analysis.callTargets.count(&e) || analysis.constructions.count(&e) ||
          analysis.reinitializations.count(&e)))
       return true;
@@ -328,11 +328,11 @@ class Generator {
   // Whether a dereference of e needs a use of its own. A local owner does
   // not: only this function can clear it.
   bool pinnable(const Expr &e, const Type &type) const {
-    if (!e.addressable() || e.kind == "unary" || analysis.properties.count(&e) ||
+    if (!e.addressable() || e.kind == ExprKind::Unary || analysis.properties.count(&e) ||
         analysis.collectionMembers.count(&e) || analysis.staticFields.count(&e) || analysis.enumProperties.count(&e))
       return false;
 
-    if (e.kind != "name") return true;
+    if (e.kind != ExprKind::Name) return true;
 
     const auto binding = findBinding(e.token);
     return !binding.scopedBorrow &&
@@ -399,14 +399,14 @@ class Generator {
   // an expression starts at, and the parent-view path it takes from there,
   // as in this.Animal; false for storage of a known exact type.
   bool tableRoot(const Expr &e, std::vector<size_t> &path, Binding &root) {
-    if (e.kind == "name") {
+    if (e.kind == ExprKind::Name) {
       if (analysis.staticFields.count(&e)) return false;
 
       root = variable(e.token);
       return !root.table.empty() && recordValue(root.type);
     }
 
-    if (e.kind != "." || analysis.staticFields.count(&e)) return false;
+    if (e.kind != ExprKind::Member || analysis.staticFields.count(&e)) return false;
 
     const auto base = analysis.expressionTypes.find(e.args[0].get());
 
@@ -435,7 +435,7 @@ class Generator {
 
     if (!e) {
       Token self = at;
-      self.text = "this";
+      self.text = Tok::This;
       r.root = variable(self);
       r.rooted = true;
       r.address = r.root.value;
@@ -951,7 +951,7 @@ class Generator {
     require(fresh_);
     return result;
   }
-  Value mutateAppend(const Expr &target, const std::string &op, const Expr *operand, bool result, const Type &type) {
+  Value mutateAppend(const Expr &target, const TokenText &op, const Expr *operand, bool result, const Type &type) {
     const auto &element = *type.element;
     const bool pair = type.base == Type::Pair;
 
@@ -959,7 +959,7 @@ class Generator {
       Value key, value;
       std::string holder;
 
-      if (op == "+=") {
+      if (op == Tok::PlusAssign) {
         key = expression(*operand->args[0]);
         value = expression(*operand->args[1]);
         holder = location(target).value;
@@ -981,7 +981,7 @@ class Generator {
 
     // The value moves into the new last slot; growing moves the existing
     // elements bytewise into the larger buffer.
-    const auto value = op == "+=" ? expression(*operand) : missingElement(element);
+    const auto value = op == Tok::PlusAssign ? expression(*operand) : missingElement(element);
     const auto holder = location(target).value;
     auto c = fresh(), index = fresh(), slot = fresh();
     emit(c + " = load ptr, ptr " + holder);
@@ -1090,18 +1090,18 @@ class Generator {
   // Lowers a collection mutation (see Analyzer::collectionMutation). With
   // result, gives the inserted index for += and ++ or the removed element
   // for -- and -= [i]; a removed element moves out instead of being released.
-  Value mutate(const Expr &target, const std::string &op, const Expr *operand, bool result) {
+  Value mutate(const Expr &target, const TokenText &op, const Expr *operand, bool result) {
     usesCollectionRuntime = true;
     const auto type = analysis.expressionTypes.at(&target);
 
-    if (op == "+=" || op == "++") return mutateAppend(target, op, operand, result, type);
+    if (op == Tok::PlusAssign || op == Tok::PlusPlus) return mutateAppend(target, op, operand, result, type);
 
     const auto holder = location(target).value;
 
     // c -= x removes the element a for-each is on. A forward loop's next
     // element shifts into the removed position; a reverse loop's does not move.
-    if (op == "-=" && operand->kind == "name") return mutateRemoveCurrent(operand, result, type, holder);
-    if (op == "--") return mutatePopLast(result, type, holder);
+    if (op == Tok::MinusAssign && operand->kind == ExprKind::Name) return mutateRemoveCurrent(operand, result, type, holder);
+    if (op == Tok::MinusMinus) return mutatePopLast(result, type, holder);
 
     // -= [i] or -= [key]: the element must exist.
     return mutateRemoveAt(operand, result, type, holder);
@@ -1164,14 +1164,14 @@ class Generator {
 
       Value key;
 
-      if (entry->kind == "entry") key = expression(*entry->args[0]);
+      if (entry->kind == ExprKind::Entry) key = expression(*entry->args[0]);
       else if (*type.key == Type::Name) {
         key = {Type::Name, "@str." + symbolPrefix + "." + std::to_string(strings++)};
         globals << managedTextGlobal(key.value, entry->token, Type::Name);
       } else
         key = expression(*entry->args[1]);
 
-      const auto value = expression(*(entry->kind == "entry" ? entry->args[1] : entry->args[0]));
+      const auto value = expression(*(entry->kind == ExprKind::Entry ? entry->args[1] : entry->args[0]));
       pairPut(holder, type, key, value);
     }
 
@@ -1397,8 +1397,8 @@ class Generator {
   static std::string ownerFlag(Type type) { return type.role == Type::Owner ? "true" : "false"; }
   // Whether this owner-role value can turn out to be borrowed at run time.
   bool mayBeBorrowed(const Expr &source) const {
-    if (source.kind == "name") return findBinding(source.token).lent;
-    if (source.kind != "call") return false;
+    if (source.kind == ExprKind::Name) return findBinding(source.token).lent;
+    if (source.kind != ExprKind::Call) return false;
 
     const auto target = analysis.callTargets.find(&source);
     return target != analysis.callTargets.end() && functions.at(target->second).lends;
@@ -1414,7 +1414,7 @@ class Generator {
     return word;
   }
   std::string aliasWord(const Expr &source) {
-    if (source.kind == "null") return "null";
+    if (source.kind == ExprKind::Null) return "null";
 
     usesHeapRuntime = true;
     auto binding = location(source);
@@ -1494,9 +1494,9 @@ class Generator {
     // Follow embedded containers down to the object holding the slot.
     const Expr *root = target.args[0].get();
 
-    while (root->kind == "." && !analysis.expressionTypes.at(root).depth) root = root->args[0].get();
+    while (root->kind == ExprKind::Member && !analysis.expressionTypes.at(root).depth) root = root->args[0].get();
 
-    if (root->kind == "name") {
+    if (root->kind == ExprKind::Name) {
       const auto type = analysis.expressionTypes.at(root);
       const auto binding = findBinding(root->token);
 
@@ -1523,7 +1523,7 @@ class Generator {
     usesHeapRuntime = true;
     const auto type = analysis.expressionTypes.at(&target);
     const auto from = analysis.expressionTypes.at(&source);
-    const bool place = from.depth && source.kind != "call";
+    const bool place = from.depth && source.kind != ExprKind::Call;
     std::string word, sourceSlot;
 
     if (place) sourceSlot = location(source).value;
@@ -1922,7 +1922,7 @@ class Generator {
   }
   // Operands already have the common big/ubig type. Unsigned results that
   // would be negative trap.
-  Value bigBinary(const std::string &op, Value a, Value b) {
+  Value bigBinary(const TokenText &op, Value a, Value b) {
     auto id = fresh();
     const std::map<std::string, std::string> predicates{
         {"<", "slt"}, {">", "sgt"}, {"<=", "sle"}, {">=", "sge"}, {"==", "eq"}, {"!=", "ne"}};
@@ -1942,17 +1942,17 @@ class Generator {
       return {Type::Bool, id};
     }
 
-    if (op == "+" || op == "-")
+    if (op == Tok::Plus || op == Tok::Minus)
       emit(id + " = call " + type + " " + prefix + "add(" + operands + ", i1 " +
-           (op == "-" ? "true" : "false") + ")");
-    else if (op == "*")
+           (op == Tok::Minus ? "true" : "false") + ")");
+    else if (op == Tok::Star)
       emit(id + " = call " + type + " " + prefix + "multiply(" + operands + ")");
     else if (big)
-      emit(id + " = call ptr @duck.big.divide(" + operands + ", i1 " + (op == "%" ? "true" : "false") + ")");
+      emit(id + " = call ptr @duck.big.divide(" + operands + ", i1 " + (op == Tok::Percent ? "true" : "false") + ")");
     else
       emit(id + " = call " + type + " @duck.tiny.divide(" + operands + ")");
 
-    if (op == "-" && (a.type == Type::UBig || a.type == Type::UTiny)) {
+    if (op == Tok::Minus && (a.type == Type::UBig || a.type == Type::UTiny)) {
       auto checked = fresh();
       emit(checked + " = call " + type + " " + prefix + "requireUnsigned(" + type + " " + id + ")");
       id = checked;
@@ -1989,16 +1989,16 @@ class Generator {
     globals << " }, align 8\n";
     return {type, symbol};
   }
-  Value textBinary(const std::string &op, const Value &a, const Value &b) {
+  Value textBinary(const TokenText &op, const Value &a, const Value &b) {
     usesTextRuntime = true;
     auto id = fresh();
-    bool concat = op == "+";
+    bool concat = op == Tok::Plus;
     emit(id + " = call " + (concat ? "ptr @duck.text.concat" : "i1 @duck.text.equal") +
          "(ptr " + a.value + ", ptr " + b.value + ", i64 " + textWidth(a.type) + ")");
     release(a);
     release(b);
 
-    if (op == "!=") {
+    if (op == Tok::NotEqual) {
       auto inverse = fresh();
       emit(inverse + " = xor i1 " + id + ", true");
       id = inverse;
@@ -2059,7 +2059,7 @@ class Generator {
         {"!=", "fcmp une"}};
     return reals;
   }
-  Value compareDateTimes(const std::string &op, const Value &a, const Value &b, const std::string &id) {
+  Value compareDateTimes(const TokenText &op, const Value &a, const Value &b, const std::string &id) {
     // Compare dates first and use the time of day only for equal dates.
     auto ad = fresh(), at = fresh(), bd = fresh(), bt = fresh();
     auto sameDay = fresh(), dayOrder = fresh(), timeOrder = fresh();
@@ -2073,36 +2073,36 @@ class Generator {
     emit(id + " = select i1 " + sameDay + ", i1 " + timeOrder + ", i1 " + dayOrder);
     return {Type::Bool, id};
   }
-  std::string binaryInstruction(const std::string &op, const Value &a) {
+  std::string binaryInstruction(const TokenText &op, const Value &a) {
     auto instruction = (floating(a.type) ? floatingInstructions() : integerInstructions()).at(op);
 
     if (unsignedInteger(a.type)) {
-      if (op == "/") instruction = "udiv";
-      else if (op == "%") instruction = "urem";
-      else if (op == "<") instruction = "icmp ult";
-      else if (op == ">") instruction = "icmp ugt";
-      else if (op == "<=") instruction = "icmp ule";
-      else if (op == ">=") instruction = "icmp uge";
-      else if (op == ">>") instruction = "lshr";
+      if (op == Tok::Slash) instruction = "udiv";
+      else if (op == Tok::Percent) instruction = "urem";
+      else if (op == Tok::Less) instruction = "icmp ult";
+      else if (op == Tok::Greater) instruction = "icmp ugt";
+      else if (op == Tok::LessEqual) instruction = "icmp ule";
+      else if (op == Tok::GreaterEqual) instruction = "icmp uge";
+      else if (op == Tok::ShiftRight) instruction = "lshr";
     }
 
     return instruction;
   }
-  Value binary(const std::string &op, Value a, Value b) {
+  Value binary(const TokenText &op, Value a, Value b) {
     if (nativeMath(a.type) || nativeMath(b.type)) return nativeBinary(op, a, b);
-    if (floating(a.type) && (op == "==" || op == "!=")) return floatEquality(op, a, b);
+    if (floating(a.type) && (op == Tok::EqualEqual || op == Tok::NotEqual)) return floatEquality(op, a, b);
 
     if (funcValue(a.type)) {
       auto compared = fresh();
-      emit(compared + " = icmp " + (op == "==" ? "eq" : "ne") + " ptr " + a.value + ", null");
+      emit(compared + " = icmp " + (op == Tok::EqualEqual ? "eq" : "ne") + " ptr " + a.value + ", null");
       release(a);
       return {Type::Bool, compared};
     }
 
     if (arbitraryNumber(a.type)) return bigBinary(op, a, b);
     if (managedText(a.type)) return textBinary(op, a, b);
-    if (op == "<<" || op == ">>") checkShiftCount(a, b);
-    if (integral(a.type) && (op == "/" || op == "%")) checkDivision(a, b);
+    if (op == Tok::ShiftLeft || op == Tok::ShiftRight) checkShiftCount(a, b);
+    if (integral(a.type) && (op == Tok::Slash || op == Tok::Percent)) checkDivision(a, b);
 
     auto id = fresh();
 
@@ -2110,7 +2110,7 @@ class Generator {
 
     const auto instruction = binaryInstruction(op, a);
 
-    if ((op == "/" || op == "%") && needsWideOperation(a.type)) {
+    if ((op == Tok::Slash || op == Tok::Percent) && needsWideOperation(a.type)) {
       const auto wide = wideOperationType(a.type);
       auto x = convert(a, wide), y = convert(b, wide);
       emit(id + " = " + instruction + " " + irType(wide) + " " + x.value + ", " + y.value);
@@ -2626,22 +2626,22 @@ class Generator {
       const std::string address = "@duck$static." + field->second;
 
       if (auto place = analysis.scopedPlaces.find(&e); place != analysis.scopedPlaces.end())
-        return {analysis.expressionTypes.at(&e), scopedData(address, place->second.scope, place->second.type)};
+        return {analysis.expressionTypes.at(&e), scopedData(address, *place->second.scope, place->second.type)};
 
       return {analysis.expressionTypes.at(&e), address};
     }
 
-    if (e.kind == "name") return variable(e.token);
+    if (e.kind == ExprKind::Name) return variable(e.token);
 
     auto type = analysis.expressionTypes.at(&e);
 
-    if (e.kind == "unary") return {type, dereference(*e.args[0]).value};
-    if (e.kind == "index") return {type, elementSlot(e, false)};
+    if (e.kind == ExprKind::Unary) return {type, dereference(*e.args[0]).value};
+    if (e.kind == ExprKind::Index) return {type, elementSlot(e, false)};
 
     const auto id = memberAddress(*e.args[0], analysis.fieldIndices.at(&e));
 
     if (auto place = analysis.scopedPlaces.find(&e); place != analysis.scopedPlaces.end())
-      return {type, scopedData(id, place->second.scope, place->second.type)};
+      return {type, scopedData(id, *place->second.scope, place->second.type)};
 
     return {type, id};
   }
@@ -2672,7 +2672,7 @@ class Generator {
     const auto holderType = analysis.expressionTypes.at(e.args[0].get());
     const auto &base = *e.args[0];
 
-    if (guarded && base.kind == "index") {
+    if (guarded && base.kind == ExprKind::Index) {
       // ?a[i][j]: a missing outer element skips the inner index.
       const auto outer = elementSlot(base, true);
       auto ok = fresh(), inside = label(), done = label(), slot = fresh();
@@ -2760,7 +2760,7 @@ class Generator {
     std::vector<const Expr *> found;
     const Expr *root = &e;
 
-    while (root->kind == "index") {
+    while (root->kind == ExprKind::Index) {
       found.insert(found.begin(), root->args[1].get());
       root = root->args[0].get();
     }
@@ -2963,7 +2963,7 @@ class Generator {
     return {Type::Long, moved};
   }
   Value lowerCall(const Expr &e) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
 
     if (auto file = analysis.fileCalls.find(&e); file != analysis.fileCalls.end()) return lowerFileCall(e, file->second);
 
@@ -3001,9 +3001,9 @@ class Generator {
     if (analysis.nativeMethods.count(&e)) return lowerNativeMethod(e);
     if (analysis.mathCalls.count(&e)) return lowerMath(e);
 
-    if (op == "Length" || op == "CodeUnitAt") return lowerTextQuery(e);
+    if (op == Tok::Length || op == Tok::CodeUnitAt) return lowerTextQuery(e);
 
-    if (op == "IsValid" && !e.receiver && e.args[0]->kind == "cast") {
+    if (op == Tok::IsValid && !e.receiver && e.args[0]->kind == ExprKind::Cast) {
       const auto &cast = *e.args[0];
       const auto &compared = analysis.enumCasts.at(&cast);
       auto v = expression(*cast.args[0]);
@@ -3013,13 +3013,13 @@ class Generator {
       return {Type::Bool, enumLookup(v, cast.castType.record, compared).second};
     }
 
-    if (op == "IsValid" && !e.receiver) {
+    if (op == Tok::IsValid && !e.receiver) {
       auto valid = fresh();
       emit(valid + " = icmp ne ptr " + elementSlot(*e.args[0], true) + ", null");
       return {Type::Bool, valid};
     }
 
-    if (op == "Exec" && !e.receiver) {
+    if (op == Tok::Exec && !e.receiver) {
       // A file with only declarations has nothing to run.
       if (auto script = analysis.callTargets.find(&e); script != analysis.callTargets.end())
         emit("call void @duck." + script->second + "()");
@@ -3032,21 +3032,21 @@ class Generator {
       return {Type::Text, load(load(location(*e.receiver).value))};
     }
 
-    if (op == "$T.fail") {
+    if (op == Tok::TestFail) {
       emit("call i32 (ptr, ...) @printf(ptr " + textConstant("%s\n") + ", ptr " +
            textConstant(e.args[0]->token.text) + ")");
       emit("store i1 true, ptr @duck$test.failed");
       return {Type::Void, ""};
     }
 
-    if (op == "$T.show") {
+    if (op == Tok::TestShow) {
       if (!printable(analysis.expressionTypes.at(e.args[0].get()))) return {Type::Void, ""};
 
       emit("call i32 (ptr, ...) @printf(ptr " + textConstant("%s") + ", ptr " +
            textConstant(e.args[1]->token.text) + ")");
     }
 
-    if (op == "Print" || op == "$T.show") return lowerPrint(e);
+    if (op == Tok::Print || op == Tok::TestShow) return lowerPrint(e);
 
     if (analysis.calendarCalls.count(&e))
       return calendarCall(e);
@@ -3184,35 +3184,35 @@ class Generator {
 
     return nativeBuild(type, parts);
   }
-  Value nativeBinary(const std::string &op, const Value &a, const Value &b) {
+  Value nativeBinary(const TokenText &op, const Value &a, const Value &b) {
     const auto left = nativeMath(a.type), right = nativeMath(b.type);
     const auto &shape = left ? left : right;
     const Type scalar = shape.scalar;
     const auto x = left ? nativeParts(a) : std::vector<std::string>(), y = right ? nativeParts(b) : std::vector<std::string>();
-    auto apply = [&](const char *code, const std::string &p, const std::string &q) {
+    auto apply = [&](const TokenText &code, const std::string &p, const std::string &q) {
       return binary(code, {scalar, p}, {scalar, q}).value;
     };
 
-    if (op == "==" || op == "!=") { // Equal only if every component is.
+    if (op == Tok::EqualEqual || op == Tok::NotEqual) { // Equal only if every component is.
       auto same = std::string("true");
 
-      for (size_t i = 0; i < x.size(); ++i) same = mathInstruction("and", Type::Bool, same, apply("==", x[i], y[i]));
+      for (size_t i = 0; i < x.size(); ++i) same = mathInstruction("and", Type::Bool, same, apply(Tok::EqualEqual, x[i], y[i]));
 
-      return {Type::Bool, op == "==" ? same : mathInstruction("xor", Type::Bool, same, "true")};
+      return {Type::Bool, op == Tok::EqualEqual ? same : mathInstruction("xor", Type::Bool, same, "true")};
     }
 
     if (left.quaternion) return right.quaternion ? nativeBuild(a.type, quatProduct(x, y)) : nativeBuild(b.type, quatRotate(x, y));
 
-    if (op == "*" && left.matrix() && right) { // Linear algebra, not componentwise.
+    if (op == Tok::Star && left.matrix() && right) { // Linear algebra, not componentwise.
       const auto n = left.rows;
       const auto columns = right.columns;
       std::vector<std::string> result;
 
       for (unsigned column = 0; column < columns; ++column)
         for (unsigned row = 0; row < n; ++row) {
-          auto sum = apply("*", x[row], y[column * n]);
+          auto sum = apply(Tok::Star, x[row], y[column * n]);
 
-          for (unsigned k = 1; k < n; ++k) sum = apply("+", sum, apply("*", x[k * n + row], y[column * n + k]));
+          for (unsigned k = 1; k < n; ++k) sum = apply(Tok::Plus, sum, apply(Tok::Star, x[k * n + row], y[column * n + k]));
 
           result.push_back(sum);
         }
@@ -3224,7 +3224,7 @@ class Generator {
     const auto count = shape.columns * shape.rows;
 
     for (unsigned i = 0; i < count; ++i)
-      result.push_back(apply(op.c_str(), left ? x[i] : a.value, right ? y[i] : b.value));
+      result.push_back(apply(op, left ? x[i] : a.value, right ? y[i] : b.value));
 
     return nativeBuild(left ? a.type : b.type, result);
   }
@@ -3539,7 +3539,7 @@ class Generator {
       return nativeBuild(self.type, parts);
     }
 
-    if (name == "Lerp") return binary("+", self, binary("*", binary("-", values[1], self), values[2]));
+    if (name == "Lerp") return binary(Tok::Plus, self, binary(Tok::Star, binary(Tok::Minus, values[1], self), values[2]));
 
     const auto result = lowerMathVector(name, values);
 
@@ -3751,12 +3751,12 @@ class Generator {
     return convert({Type::Double, mathCall(inDouble.at(name), Type::Double, operands)}, type);
   }
   Value lowerTextQuery(const Expr &e) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
     usesTextRuntime = true;
     auto text = expression(*e.args[0]);
     auto id = fresh();
 
-    if (op == "Length")
+    if (op == Tok::Length)
       emit(id + " = call i64 @duck.text.length(ptr " + text.value + ")");
     else {
       auto index = expression(*e.args[1]);
@@ -3765,10 +3765,10 @@ class Generator {
     }
 
     release(text);
-    return {op == "Length" ? Type::Long : Type::UInt32, id};
+    return {op == Tok::Length ? Type::Long : Type::UInt32, id};
   }
   Value lowerPrint(const Expr &e) {
-    if (e.token.text == "Print" && e.args[0]->kind == "null") {
+    if (e.token.text == Tok::Print && e.args[0]->kind == ExprKind::Null) {
       emit("call i32 @fflush(ptr null)");
       return {Type::Void, ""};
     }
@@ -3891,36 +3891,36 @@ class Generator {
     return {f.result, id};
   }
   std::optional<Value> lowerLiteral(const Expr &e) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
     auto member = analysis.enumMembers.find(&e);
 
     if (member != analysis.enumMembers.end())
       return Value{analysis.expressionTypes.at(&e), std::to_string(member->second)};
 
     // Day.Count.
-    if (e.kind == ".")
+    if (e.kind == ExprKind::Member)
       if (const auto count = analysis.integerConstants.find(&e); count != analysis.integerConstants.end())
         return Value{analysis.expressionTypes.at(&e), count->second};
 
-    if (e.kind == "char")
+    if (e.kind == ExprKind::Char)
       return Value{Type::Char, std::to_string(decodeUTF8(e.token).front())};
 
-    if (e.kind == "construct" && nativeMath(e.castType)) return lowerNativeConstruct(e);
+    if (e.kind == ExprKind::Construct && nativeMath(e.castType)) return lowerNativeConstruct(e);
 
-    if (e.kind == "construct")
+    if (e.kind == ExprKind::Construct)
       return construct(e);
 
-    if (e.kind == "real" || e.kind == "typeMember")
+    if (e.kind == ExprKind::Real || e.kind == ExprKind::TypeMember)
       return Value{analysis.expressionTypes.at(&e),
               analysis.floatingConstants.at(&e)};
 
-    if (e.kind == "null")
+    if (e.kind == ExprKind::Null)
       return Value{analysis.expressionTypes.at(&e), "null"};
 
-    if (e.kind == "bool")
-      return Value{Type::Bool, op == "true" ? "1" : "0"};
+    if (e.kind == ExprKind::Bool)
+      return Value{Type::Bool, op == Tok::True ? "1" : "0"};
 
-    if (e.kind == "text") {
+    if (e.kind == ExprKind::Text) {
       auto type = analysis.expressionTypes.at(&e);
 
       if (managedText(type)) return managedLiteral(e, type);
@@ -3948,16 +3948,16 @@ class Generator {
     return {b.type, id};
   }
   Value lowerShortCircuit(const Expr &e, const Value &a, const std::string &id) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
     auto leftEnd = currentBlock, right = label(), end = label();
-    emit("br i1 " + a.value + ", label %" + (op == "&&" ? right : end) +
-         ", label %" + (op == "&&" ? end : right));
+    emit("br i1 " + a.value + ", label %" + (op == Tok::AndAnd ? right : end) +
+         ", label %" + (op == Tok::AndAnd ? end : right));
     startBlock(right);
     auto b = expression(*e.args[1]);
     auto rightEnd = currentBlock;
     emit("br label %" + end);
     startBlock(end);
-    emit(id + " = phi i1 [ " + (op == "&&" ? "0" : "1") + ", %" + leftEnd +
+    emit(id + " = phi i1 [ " + (op == Tok::AndAnd ? "0" : "1") + ", %" + leftEnd +
          " ], [ " + b.value + ", %" + rightEnd + " ]");
     return {Type::Bool, id};
   }
@@ -3965,18 +3965,18 @@ class Generator {
     if (analysis.threadQueries.count(&e)) {
       usesTaskRuntime = true;
       const auto result = fresh();
-      if (e.token.text == "Status") {
+      if (e.token.text == Tok::Status) {
         auto index = expression(*e.args[0]->args[1]);
         emit(result + " = call i32 @duck.thread$status(i32 " + index.value + ")");
       } else {
-        const auto mode = e.token.text == "ThreadSlots" ? "0" : e.token.text == "ThreadCount" ? "1" : "2";
+        const auto mode = e.token.text == Tok::ThreadSlots ? "0" : e.token.text == Tok::ThreadCount ? "1" : "2";
         emit(result + " = call i32 @duck.thread$count(i32 " + std::string(mode) + ")");
       }
       return {Type::Int, result};
     }
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
 
-    if (e.kind == "compileTime") {
+    if (e.kind == ExprKind::CompileTime) {
       const auto type = analysis.expressionTypes.at(&e);
 
       if (type == Type::Void) return {type, ""};
@@ -3985,11 +3985,11 @@ class Generator {
       return {type, analysis.integerConstants.at(&e)};
     }
 
-    if (e.kind == "mutation") return mutate(*e.args[0], op, e.args.size() > 1 ? e.args[1].get() : nullptr, true);
-    if (e.kind == "moveCheck") return moveIntoField(*e.args[0], *e.args[1], true);
-    if (e.kind == "lambda") return closure(e);
+    if (e.kind == ExprKind::Mutation) return mutate(*e.args[0], op, e.args.size() > 1 ? e.args[1].get() : nullptr, true);
+    if (e.kind == ExprKind::MoveCheck) return moveIntoField(*e.args[0], *e.args[1], true);
+    if (e.kind == ExprKind::Lambda) return closure(e);
 
-    if (e.kind == "invoke" || analysis.indirectCalls.count(&e)) {
+    if (e.kind == ExprKind::Invoke || analysis.indirectCalls.count(&e)) {
       const auto value = indirectCall(e);
 
       if (analysis.unwindIndirect) unwindCheck();
@@ -3997,25 +3997,25 @@ class Generator {
       return value;
     }
 
-    if (e.kind == "duckCall" || e.kind == "duckCheck" || e.kind == "duckExists") {
+    if (e.kind == ExprKind::DuckCall || e.kind == ExprKind::DuckCheck || e.kind == ExprKind::DuckExists) {
       const auto value = duckCall(e, false);
 
-      if (e.kind == "duckCall" && analysis.unwindIndirect) unwindCheck();
+      if (e.kind == ExprKind::DuckCall && analysis.unwindIndirect) unwindCheck();
 
       return value;
     }
 
-    if (e.kind == "guard" && e.args[0]->kind == "duckCall") return duckCall(*e.args[0], true);
+    if (e.kind == ExprKind::Guard && e.args[0]->kind == ExprKind::DuckCall) return duckCall(*e.args[0], true);
     if (analysis.reflections.count(&e)) return reflect(e);
 
     if (auto function = analysis.functionValues.find(&e); function != analysis.functionValues.end())
       return functionClosure(function->second, analysis.expressionTypes.at(&e));
 
-    if (e.kind == "guard" && e.args[0]->kind == "call") return guardedCall(e);
-    if (e.kind == "guard") return readOrDefault(elementSlot(*e.args[0], true), analysis.expressionTypes.at(&e));
+    if (e.kind == ExprKind::Guard && e.args[0]->kind == ExprKind::Call) return guardedCall(e);
+    if (e.kind == ExprKind::Guard) return readOrDefault(elementSlot(*e.args[0], true), analysis.expressionTypes.at(&e));
 
     // Reading an unwritten grid cell gives the default without storing it.
-    if (std::vector<const Expr *> coordinates; e.kind == "index")
+    if (std::vector<const Expr *> coordinates; e.kind == ExprKind::Index)
       if (const auto *grid = gridRoot(e, coordinates))
         return readOrDefault(gridSlot(*grid, coordinates, false), analysis.expressionTypes.at(&e));
 
@@ -4036,32 +4036,32 @@ class Generator {
       return {analysis.expressionTypes.at(&e),
               "{ i256 " + decimal->second.first + ", i32 " + decimal->second.second + " }"};
 
-    if (e.kind == "range") return rangeArray(e);
+    if (e.kind == ExprKind::Range) return rangeArray(e);
 
-    if (e.kind == "initializer" && !recordValue(analysis.expressionTypes.at(&e)))
+    if (e.kind == ExprKind::Initializer && !recordValue(analysis.expressionTypes.at(&e)))
       return literal(e, analysis.expressionTypes.at(&e));
 
-    if (e.kind == "initializer") return lowerRecordInitializer(e);
+    if (e.kind == ExprKind::Initializer) return lowerRecordInitializer(e);
 
-    if (e.kind == "cast" && enumValue(e.castType)) return lowerEnumCast(e);
+    if (e.kind == ExprKind::Cast && enumValue(e.castType)) return lowerEnumCast(e);
 
-    if (e.kind == "cast")
+    if (e.kind == ExprKind::Cast)
       return convert(expression(*e.args[0]), e.castType);
 
-    if (e.kind == "scopeActive") {
+    if (e.kind == ExprKind::ScopeActive) {
       auto id = fresh();
       emit(id + " = call i1 @duck.scope$active(ptr " + scopeDescriptor(e.token.text) + ")");
       return {Type::Bool, id};
     }
 
-    if (e.kind == "markupTake") {
+    if (e.kind == ExprKind::MarkupTake) {
       const auto binding = variable(e.token);
       const auto value = load(binding.value);
       emit("store ptr null, ptr " + binding.value);
       return {binding.type, value};
     }
 
-    if (e.kind == "macroValue") {
+    if (e.kind == ExprKind::MacroValue) {
       // The result holds its own reference, so the bindings can end first.
       scopes.emplace_back();
 
@@ -4075,7 +4075,7 @@ class Generator {
 
     if (auto value = lowerLiteral(e)) return std::move(*value);
 
-    if (e.kind == "unary" && op == "&") {
+    if (e.kind == ExprKind::Unary && op == Tok::Ampersand) {
       auto target = analysis.callTargets.find(&e);
 
       if (target != analysis.callTargets.end()) {
@@ -4088,7 +4088,7 @@ class Generator {
 
     if (auto property = analysis.properties.find(&e); property != analysis.properties.end()) {
       const auto &access = property->second;
-      const auto r = receiver(e.kind == "." ? e.args[0].get() : nullptr, e.token);
+      const auto r = receiver(e.kind == ExprKind::Member ? e.args[0].get() : nullptr, e.token);
       auto v = accessorCall(r, access.owner, access.getter, access.getterPath);
       releaseTemporary(r);
       return v;
@@ -4100,7 +4100,7 @@ class Generator {
     if (auto property = analysis.enumProperties.find(&e); property != analysis.enumProperties.end())
       return lowerEnumProperty(e, property->second);
 
-    if (e.kind == "index" && analysis.expressionTypes.at(e.args[0].get()).base == Type::Pair &&
+    if (e.kind == ExprKind::Index && analysis.expressionTypes.at(e.args[0].get()).base == Type::Pair &&
         !analysis.expressionTypes.at(e.args[0].get()).depth) {
       return loadSlot(elementSlot(e, false), analysis.expressionTypes.at(&e));
     }
@@ -4120,22 +4120,22 @@ class Generator {
       return {v.type, id};
     }
 
-    if (e.kind == "call") return lowerCall(e);
+    if (e.kind == ExprKind::Call) return lowerCall(e);
 
     auto a = expression(*e.args[0]);
     auto id = fresh();
 
-    if (e.kind == "conditional") return lowerConditional(e, a, id);
-    if (op == "&&" || op == "||") return lowerShortCircuit(e, a, id);
+    if (e.kind == ExprKind::Conditional) return lowerConditional(e, a, id);
+    if (op == Tok::AndAnd || op == Tok::OrOr) return lowerShortCircuit(e, a, id);
 
-    if (e.kind == "unary" && bigInteger(a.type)) {
+    if (e.kind == ExprKind::Unary && bigInteger(a.type)) {
       usesBigRuntime = true;
       emit(id + " = call ptr @duck.big.negate(ptr " + a.value + ")");
       release(a);
       return {a.type, id};
     }
 
-    if (e.kind == "unary" && decimalValue(a.type)) {
+    if (e.kind == ExprKind::Unary && decimalValue(a.type)) {
       auto coefficient = fresh(), negated = fresh();
       emit(coefficient + " = extractvalue { i256, i32 } " + a.value + ", 0");
       emit(negated + " = sub i256 0, " + coefficient);
@@ -4143,7 +4143,7 @@ class Generator {
       return {a.type, id};
     }
 
-    if (e.kind == "unary" && nativeMath(a.type)) {
+    if (e.kind == ExprKind::Unary && nativeMath(a.type)) {
       const Type scalar = nativeMath(a.type).scalar;
       auto parts = nativeParts(a);
 
@@ -4157,14 +4157,14 @@ class Generator {
       return nativeBuild(a.type, parts);
     }
 
-    if (e.kind == "unary") {
+    if (e.kind == ExprKind::Unary) {
       if (floating(a.type)) {
         emit(id + " = fneg " + irType(a.type) + " " + a.value);
         return {a.type, id};
       }
 
-      emit(id + (op == "~" ? " = xor " + irType(a.type) + " " + a.value + ", -1"
-                 : op == "!" ? " = xor i1 " + a.value + ", true"
+      emit(id + (op == Tok::Tilde ? " = xor " + irType(a.type) + " " + a.value + ", -1"
+                 : op == Tok::Bang ? " = xor i1 " + a.value + ", true"
                            : " = sub " + irType(a.type) + " 0, " + a.value));
       return {a.type, id};
     }
@@ -4183,7 +4183,7 @@ class Generator {
   }
   // Within the written tolerance, or by default within a small margin that
   // grows with the operands' size. Equal infinities match; NaN never does.
-  Value floatEquality(const std::string &op, const Value &a, const Value &b) {
+  Value floatEquality(const TokenText &op, const Value &a, const Value &b) {
     const auto &type = a.type;
     const std::string suffix = type == Type::Float ? ".f32" : ".f64";
     const auto fabs = "llvm.fabs" + suffix, maxnum = "llvm.maxnum" + suffix;
@@ -4200,7 +4200,7 @@ class Generator {
     const auto close = mathInstruction("fcmp ole", type, gap, limit);
     const auto finite = mathInstruction("fcmp one", type, gap, "0x7FF0000000000000");
     const auto equal = mathInstruction("or", Type::Bool, exact, mathInstruction("and", Type::Bool, close, finite));
-    return {Type::Bool, op == "==" ? equal : mathInstruction("xor", Type::Bool, equal, "true")};
+    return {Type::Bool, op == Tok::EqualEqual ? equal : mathInstruction("xor", Type::Bool, equal, "true")};
   }
   static std::string floatEpsilon(const Type &type) {
     const double value = type == Type::Float ? double(1e-5f) : 1e-9;
@@ -4355,7 +4355,7 @@ class Generator {
       selfRecord = info.record;
       bindVisibleFields(record, self);
       Token token = f.name;
-      token.text = "this";
+      token.text = Tok::This;
       Binding binding{record, self};
       binding.table = vt;
       bind(token, binding);
@@ -4438,7 +4438,7 @@ class Generator {
     std::string closureValue, self;
     Value temporary{Type::Void, ""};
 
-    if (e.kind == "invoke") {
+    if (e.kind == ExprKind::Invoke) {
       closureValue = expression(*e.receiver).value;
     } else {
       if (call.field) {
@@ -4607,7 +4607,7 @@ class Generator {
     const auto *base = e.receiver.get();
     const bool isElement = elementValue(analysis.expressionTypes.at(base));
     const bool pointer = !isElement && analysis.expressionTypes.at(base).depth != 0;
-    const bool check = e.kind != "duckCall";
+    const bool check = e.kind != ExprKind::DuckCall;
     const bool tolerant = guarded || check;
     Receiver r;
 
@@ -4636,7 +4636,7 @@ class Generator {
 
     std::string descriptor, object;
     duckCallTarget(info, r, isElement, descriptor, object);
-    const auto signature = e.kind == "duckExists" ? std::string("null") : textConstant(info.signature);
+    const auto signature = e.kind == ExprKind::DuckExists ? std::string("null") : textConstant(info.signature);
     auto member = fresh(), found = fresh();
     emit(member + " = call ptr @duck.meta$find(ptr " + descriptor + ", ptr " + textConstant(e.token.text) + ", ptr " +
          signature + ")");
@@ -4765,21 +4765,21 @@ class Generator {
   }
   Value calendarCall(const Expr &e) {
     usesCalendarRuntime = true;
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
     auto value = expression(*e.args[0]);
     auto days = [&] { return value.type == Type::DateTime ? part(value, 0) : value.value; };
     auto nanos = [&] { return value.type == Type::DateTime ? part(value, 1) : value.value; };
     auto id = fresh();
 
-    if (op == "Year" || op == "Month" || op == "Day") {
+    if (op == Tok::Year || op == Tok::Month || op == Tok::Day) {
       auto civil = fresh();
       emit(civil + " = call {i32, i32, i32} @duck.date.civil(i32 " + days() + ")");
       emit(id + " = extractvalue {i32, i32, i32} " + civil + ", " +
-           (op == "Year" ? "0" : op == "Month" ? "1" : "2"));
+           (op == Tok::Year ? "0" : op == Tok::Month ? "1" : "2"));
       return {Type::Int, id};
     }
 
-    if (op == "DayOfWeek") {
+    if (op == Tok::DayOfWeek) {
       emit(id + " = call i32 @duck.date.weekday(i32 " + days() + ")");
       return {Type::Int, id};
     }
@@ -4797,12 +4797,12 @@ class Generator {
       return {Type::Int, id};
     }
 
-    if (op == "DateOf") return {Type::Date, days()};
-    if (op == "TimeOf") return {Type::Time, nanos()};
+    if (op == Tok::DateOf) return {Type::Date, days()};
+    if (op == Tok::TimeOf) return {Type::Time, nanos()};
 
     auto other = expression(*e.args[1]);
 
-    if (op == "AddDays") {
+    if (op == Tok::AddDays) {
       emit(id + " = call i32 @duck.date.add(i32 " + days() + ", i64 " + other.value + ")");
 
       if (value.type == Type::Date) return {Type::Date, id};
@@ -4927,7 +4927,7 @@ class Generator {
     emit(slot + " = getelementptr " + layout + ", ptr " + record + ", i32 0, i32 0");
     emit("store ptr " + handle + ", ptr " + slot);
 
-    if (s.kind != "let") {
+    if (s.kind != StmtKind::Let) {
       pending.back().push_back({"", record, layout, result, f.result, &call, {}, &s});
       return;
     }
@@ -5006,7 +5006,7 @@ class Generator {
     Binding held{Type::Int, token};
     held.owned = held.orderedLock = true;
     Token name = s.token;
-    name.text = "$ordered";
+    name.text = Tok::Ordered;
     bind(name, held);
     const bool terminated = blockThenLeaveScope(s.body);
     return terminated;
@@ -5061,7 +5061,7 @@ class Generator {
         const auto value = expression(*test);
         std::string matched;
 
-        if (managedText(selected.type)) matched = binary("==", selected, value).value;
+        if (managedText(selected.type)) matched = binary(Tok::EqualEqual, selected, value).value;
         else {
           matched = fresh();
           emit(matched + " = icmp eq " + irType(selected.type) + " " + selected.value + ", " + value.value);
@@ -5140,7 +5140,7 @@ class Generator {
     Binding iteration{Type::Pointer, scope};
     iteration.owned = iteration.scopeLoop = true;
     Token held = s.token;
-    held.text = "$scope";
+    held.text = Tok::HeldScope;
     bind(held, iteration);
     loops.back().scope = scope;
     const bool terminated = blockThenLeaveScope(s.body);
@@ -5153,8 +5153,8 @@ class Generator {
     // arrives already expired and a surviving owner's stays usable.
     std::string word = "null";
 
-    if (s.expr->kind == "call") word = expression(*s.expr).value;
-    else if (s.expr->kind != "null") {
+    if (s.expr->kind == ExprKind::Call) word = expression(*s.expr).value;
+    else if (s.expr->kind != ExprKind::Null) {
       const auto alias = aliasWord(*s.expr);
       word = fresh();
       emit(word + " = call ptr @duck.heap$lend(ptr " + alias + ")");
@@ -5170,7 +5170,7 @@ class Generator {
     // A bound condition holds a use of the object through its branch, so
     // the branch can keep using it after its owner lets it go.
     const bool bound = analysis.boundConditions.count(&s) &&
-                       !(s.expr->kind == "name" && findBinding(s.expr->token).scopedBorrow);
+                       !(s.expr->kind == ExprKind::Name && findBinding(s.expr->token).scopedBorrow);
     std::string truth, record, payload;
 
     if (bound) {
@@ -5198,7 +5198,7 @@ class Generator {
       Binding use{Type::Pointer, record};
       use.owned = use.pin = true;
       Token held = s.token;
-      held.text = "$use";
+      held.text = Tok::HeldUse;
       bind(held, use);
       checkedPayloads[&s] = payload;
     }
@@ -5266,7 +5266,7 @@ class Generator {
     startBlock(check);
     auto v = s.expr ? condition(*s.expr) : Value{Type::Bool, "1"};
     emit("br i1 " + v.value + ", label %" + body + ", label %" + end);
-    loops.push_back({end, s.kind == "for" ? step : check, scopes.size()});
+    loops.push_back({end, s.kind == StmtKind::For ? step : check, scopes.size()});
     startBlock(body);
 
     if (!block(s.body))
@@ -5274,7 +5274,7 @@ class Generator {
 
     loops.pop_back();
 
-    if (s.kind == "for") {
+    if (s.kind == StmtKind::For) {
       startBlock(step);
 
       if (s.step)
@@ -5289,12 +5289,12 @@ class Generator {
     return false;
   }
   bool statement(const Stmt &s) {
-    if (s.kind == "scopeStart") {
+    if (s.kind == StmtKind::ScopeStart) {
       emit("call void @duck.scope$start(ptr " + scopeDescriptor(s.name) + ")");
       return false;
     }
 
-    if (s.kind == "scopeEnd") {
+    if (s.kind == StmtKind::ScopeEnd) {
       const auto scope = scopeDescriptor(s.name);
       emit("call void @duck.scope$end(ptr " + scope + ")");
       emit("call void @duck.scope$requestUnwind(ptr " + scope + ")");
@@ -5302,34 +5302,34 @@ class Generator {
       return false;
     }
 
-    if (s.kind == "scopedBody") return lowerScopedBody(s);
+    if (s.kind == StmtKind::ScopedBody) return lowerScopedBody(s);
 
-    if (s.kind == "markupAdd") {
+    if (s.kind == StmtKind::MarkupAdd) {
       markupAdd(s);
       return false;
     }
 
-    if (s.kind == "markupSplice") {
+    if (s.kind == StmtKind::MarkupSplice) {
       if (!analysis.markupSplices.count(&s)) return statement(*s.alternate.front());
 
       markupSplice(s);
       return false;
     }
 
-    if (s.kind == "block")
+    if (s.kind == StmtKind::Block)
       return block(s.body);
 
-    if (s.kind == "parallel") return parallelGroup(s);
-    if (s.kind == "ordered") return orderedBlock(s);
-    if (s.kind == "switch") return switchStatement(s);
+    if (s.kind == StmtKind::Parallel) return parallelGroup(s);
+    if (s.kind == StmtKind::Ordered) return orderedBlock(s);
+    if (s.kind == StmtKind::Switch) return switchStatement(s);
 
-    if (s.kind == "break") {
+    if (s.kind == StmtKind::Break) {
       cleanupScopes(loops.back().scopeDepth);
       emit("br label %" + loops.back().exit);
       return true;
     }
 
-    if (s.kind == "continue") {
+    if (s.kind == StmtKind::Continue) {
       auto loop = loops.rbegin();
 
       while (loop->isSwitch) ++loop;
@@ -5339,7 +5339,7 @@ class Generator {
       return true;
     }
 
-    if (s.kind == "returnOwner") {
+    if (s.kind == StmtKind::ReturnOwner) {
       auto word = moveOwner(*s.expr);
       cleanupScopes(0);
       emit("ret ptr " + word);
@@ -5348,7 +5348,7 @@ class Generator {
 
     if (analysis.handleReturns.count(&s)) return lowerHandleReturn(s);
 
-    if (s.kind == "return") {
+    if (s.kind == StmtKind::Return) {
       const auto uses = beginUses(s.expr && runsCode(*s.expr));
       Value v = s.expr ? expression(*s.expr) : Value{Type::Void, ""};
       endUses(uses);
@@ -5358,25 +5358,25 @@ class Generator {
       return true;
     }
 
-    if (s.kind == "if") return lowerIf(s);
-    if (s.kind == "do") return lowerDo(s);
+    if (s.kind == StmtKind::If) return lowerIf(s);
+    if (s.kind == StmtKind::Do) return lowerDo(s);
 
     if (auto loop = analysis.enumLoops.find(&s); loop != analysis.enumLoops.end()) {
       enumFor(s, loop->second);
       return false;
     }
 
-    if (s.kind == "foreach") {
+    if (s.kind == StmtKind::ForEach) {
       forEach(s);
       return false;
     }
 
-    if (s.kind == "rangefor") {
+    if (s.kind == StmtKind::RangeFor) {
       rangeFor(s);
       return false;
     }
 
-    if (s.kind == "while" || s.kind == "for") return lowerPreconditionLoop(s);
+    if (s.kind == StmtKind::While || s.kind == StmtKind::For) return lowerPreconditionLoop(s);
 
     const auto uses = beginUses(statementRuns(s));
     const bool terminated = simpleStatement(s);
@@ -5420,13 +5420,13 @@ class Generator {
     if (!analysis.expressionTypes.count(&e)) return; // A static path, not a value.
     if (analysis.staticFields.count(&e)) return guardLink(e, skip, links);
 
-    if (e.kind == "." || (e.kind == "unary" && e.token.text == Tok::Star)) guardChain(*e.args[0], skip, links);
-    else if (e.kind == "call" && e.receiver) guardChain(*e.receiver, skip, links);
-    else if (e.kind == "index") {
+    if (e.kind == ExprKind::Member || (e.kind == ExprKind::Unary && e.token.text == Tok::Star)) guardChain(*e.args[0], skip, links);
+    else if (e.kind == ExprKind::Call && e.receiver) guardChain(*e.receiver, skip, links);
+    else if (e.kind == ExprKind::Index) {
       // The guarded slot lookup walks any inner indexes itself.
       const Expr *root = &e;
 
-      while (root->kind == "index") root = root->args[0].get();
+      while (root->kind == ExprKind::Index) root = root->args[0].get();
 
       guardChain(*root, skip, links);
       const auto slot = elementSlot(e, true);
@@ -5501,10 +5501,10 @@ class Generator {
     if (scoped) word = expression(*s.expr).value;
     else if (type.role == Type::Alias) word = aliasWord(*s.expr);
     else if (s.expr && analysis.expressionTypes.at(s.expr.get()).role == Type::Owner) {
-      word = s.expr->kind == "call" ? expression(*s.expr).value : moveOwner(*s.expr);
+      word = s.expr->kind == ExprKind::Call ? expression(*s.expr).value : moveOwner(*s.expr);
 
       // `::` needs ownership; a borrowed result has none to give.
-      if (s.kind == "own" && s.expr->kind == "call" && mayBeBorrowed(*s.expr))
+      if (s.kind == StmtKind::Own && s.expr->kind == ExprKind::Call && mayBeBorrowed(*s.expr))
         emit("call void @duck.heap$owned(ptr " + word + ")");
     } else
       word = allocate(type.pointee(), s.expr ? expression(*s.expr).value : defaultValue(type.pointee()));
@@ -5513,20 +5513,20 @@ class Generator {
     name.text = s.name;
     declare(name, {type, word}, s.constant, scoped);
 
-    if (s.kind == "let" && s.expr && s.expr->kind == "call" && mayBeBorrowed(*s.expr))
+    if (s.kind == StmtKind::Let && s.expr && s.expr->kind == ExprKind::Call && mayBeBorrowed(*s.expr))
       scopes.back()[name.text].lent = true;
   }
   void assignProperty(const Stmt &s, const FunctionAnalysis::PropertyAccess &access) {
     const auto &target = *s.target;
-    const auto r = receiver(target.kind == "." ? target.args[0].get() : nullptr, target.token);
+    const auto r = receiver(target.kind == ExprKind::Member ? target.args[0].get() : nullptr, target.token);
     Value v;
 
-    if (s.kind == "assign") v = expression(*s.expr);
+    if (s.kind == StmtKind::Assign) v = expression(*s.expr);
     else {
       const auto old = accessorCall(r, access.owner, access.getter, access.getterPath);
       const auto type = analysis.expressionTypes.at(&target);
       auto operand = s.expr ? expression(*s.expr) : convert({Type::Int, "1"}, type);
-      v = binary(s.kind.substr(0, s.kind.size() - 1), old, operand);
+      v = binary(compoundOperator(s.kind), old, operand);
     }
 
     accessorCall(r, access.owner, access.setter, access.setterPath, &v);
@@ -5534,8 +5534,8 @@ class Generator {
   }
   void lowerAssignment(const Stmt &s) {
     if (const auto type = analysis.expressionTypes.at(s.target.get());
-        (dynamicArray(type) || collectionValue(type)) && s.kind != "assign") {
-      mutate(*s.target, s.kind, s.expr.get(), false);
+        (dynamicArray(type) || collectionValue(type)) && s.kind != StmtKind::Assign) {
+      mutate(*s.target, assignmentOperator(s.kind), s.expr.get(), false);
       return;
     }
 
@@ -5547,7 +5547,7 @@ class Generator {
     // `?a[i] op= v` finds the element first and skips the whole
     // assignment, including evaluating v, when it is missing.
     std::string skip;
-    const auto &target = s.target->kind == "guard" ? *s.target->args[0] : *s.target;
+    const auto &target = s.target->kind == ExprKind::Guard ? *s.target->args[0] : *s.target;
 
     if (&target != s.target.get()) {
       const auto slot = elementSlot(target, true);
@@ -5571,7 +5571,7 @@ class Generator {
 
     Value v;
 
-    if (s.kind == "assign") {
+    if (s.kind == StmtKind::Assign) {
       v = expression(*s.expr);
       requireWhole(address);
     }
@@ -5582,7 +5582,7 @@ class Generator {
       retain({address.type, old});
       auto operand = s.expr ? expression(*s.expr)
                             : convert({Type::Int, "1"}, address.type);
-      v = binary(s.kind.substr(0, s.kind.size() - 1),
+      v = binary(compoundOperator(s.kind),
                  {address.type, old}, operand);
     }
 
@@ -5598,12 +5598,12 @@ class Generator {
   }
   // A statement that evaluates expressions and has no branches of its own.
   bool simpleStatement(const Stmt &s) {
-    if (s.kind == "moveInto") {
+    if (s.kind == StmtKind::MoveInto) {
       moveIntoField(*s.target, *s.expr, false);
       return false;
     }
 
-    if (s.kind == "own" || s.kind == "let") {
+    if (s.kind == StmtKind::Own || s.kind == StmtKind::Let) {
       const auto type = analysis.localTypes.at(&s);
 
       if (type.role != Type::Raw) {
@@ -5616,11 +5616,11 @@ class Generator {
       auto name = s.token;
       name.text = s.name;
       declare(name, v, s.constant);
-    } else if (s.kind == "assign" || s.kind == "++" || s.kind == "--" ||
-               s.kind == "+=" || s.kind == "-=" || s.kind == "*=" ||
-               s.kind == "/=" || s.kind == "%=" || s.kind == "&=" ||
-               s.kind == "|=" || s.kind == "^=" ||
-               s.kind == "<<=" || s.kind == ">>=") {
+    } else if (s.kind == StmtKind::Assign || s.kind == StmtKind::Increment || s.kind == StmtKind::Decrement ||
+               s.kind == StmtKind::PlusAssign || s.kind == StmtKind::MinusAssign || s.kind == StmtKind::StarAssign ||
+               s.kind == StmtKind::SlashAssign || s.kind == StmtKind::PercentAssign || s.kind == StmtKind::AmpersandAssign ||
+               s.kind == StmtKind::PipeAssign || s.kind == StmtKind::CaretAssign ||
+               s.kind == StmtKind::ShiftLeftAssign || s.kind == StmtKind::ShiftRightAssign) {
       lowerAssignment(s);
     } else
       release(expression(*s.expr));

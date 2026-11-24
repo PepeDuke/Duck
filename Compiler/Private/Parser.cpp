@@ -34,19 +34,9 @@ class Parser {
   bool expectMarkup = false;  // The next expression has a declared markup type.
   const Token &peek() const { return tokens[pos]; }
   bool at(Tok t) const { return !peek().string && peek().text == t; }
-  bool at(const std::string &s) const {
-    return !peek().string && peek().text == s;
-  }
   Token pop() { return tokens[pos++]; }
   bool accept(Tok t) {
     if (!at(t)) return false;
-
-    pop();
-    return true;
-  }
-  bool accept(const std::string &s) {
-    if (!at(s))
-      return false;
 
     pop();
     return true;
@@ -83,11 +73,6 @@ class Parser {
   }
   Token expect(Tok t) {
     if (!at(t)) expected(TokenText(t).str());
-
-    return pop();
-  }
-  Token expect(const std::string &s) {
-    if (!at(s)) expected(s);
 
     return pop();
   }
@@ -155,7 +140,6 @@ class Parser {
     return isWord(t);
   }
   static bool punctuation(const Token &t, Tok kind) { return !t.string && t.text == kind; }
-  static bool punctuation(const Token &t, const char *text) { return !t.string && t.text == text; }
   static bool openingBracket(const Token &t) { return punctuation(t, Tok::LeftParen) || punctuation(t, Tok::LeftBracket) || punctuation(t, Tok::LeftBrace); }
   static bool closingBracket(const Token &t) { return punctuation(t, Tok::RightParen) || punctuation(t, Tok::RightBracket) || punctuation(t, Tok::RightBrace); }
   struct MacroUse {
@@ -449,19 +433,19 @@ class Parser {
   }
   std::unique_ptr<Stmt> switchStatement() {
     auto s = std::make_unique<Stmt>();
-    s->kind = "switch";
+    s->kind = StmtKind::Switch;
     s->token = pop();
     expect(Tok::LeftParen);
     lines();
     auto selector = std::make_unique<Stmt>();
-    selector->kind = "let";
+    selector->kind = StmtKind::Let;
     selector->token = peek();
     selector->name = "$switch";
     selector->expr = expression();
     lines();
     expect(Tok::RightParen);
     s->target = std::make_unique<Expr>();
-    s->target->kind = "name";
+    s->target->kind = ExprKind::Name;
     s->target->token = selector->token;
     s->target->token.text = selector->name;
     s->target->token.string = s->target->token.character = false;
@@ -483,7 +467,7 @@ class Parser {
       if (!atSectionLabel()) fail(peek(), "expected 'case' or 'default' in Switch body");
 
       auto section = std::make_unique<Stmt>();
-      section->kind = "case";
+      section->kind = StmtKind::Case;
       section->token = peek();
       sectionLabels(*s, *section);
       hygiene.emplace_back();
@@ -762,7 +746,7 @@ class Parser {
       if (declarationType() || isType()) {
         const auto value = plainType();
 
-        if (collectionWord() && peek().text == "pair") {
+        if (collectionWord() && peek().text == Tok::Pair) {
           pop();
           return Type::collection(Type::Pair, trackedElement(value), t);
         }
@@ -771,15 +755,15 @@ class Parser {
       pos = saved;
     }
 
-    if ((at("queue") || at("stack") || at("pair")) && arraySuffix(pos + 1))
+    if ((at(Tok::Queue) || at(Tok::Stack) || at(Tok::Pair)) && arraySuffix(pos + 1))
       fail(peek(), "arrays of collections are not supported yet");
 
     // `T queue`, `T stack`, and `T pair` (keyed by name).
     if (collectionWord()) {
       const auto word = pop().text;
 
-      if (word == "queue") return Type::collection(Type::Queue, trackedElement(t));
-      if (word == "stack") return Type::collection(Type::Stack, trackedElement(t));
+      if (word == Tok::Queue) return Type::collection(Type::Queue, trackedElement(t));
+      if (word == Tok::Stack) return Type::collection(Type::Stack, trackedElement(t));
 
       return Type::collection(Type::Pair, trackedElement(t), Type::Name);
     }
@@ -807,7 +791,7 @@ class Parser {
   // `queue`, `stack`, or `pair` after an element type, followed by the
   // declared name or a reference marker; elsewhere they are ordinary names.
   bool collectionWord() const {
-    if (!at("queue") && !at("stack") && !at("pair")) return false;
+    if (!at(Tok::Queue) && !at(Tok::Stack) && !at(Tok::Pair)) return false;
 
     const auto &next = tokens.at(pos + 1);
     return !next.string && (next.text == Tok::Ampersand || isIdentifierStart(next.text[0]));
@@ -1008,14 +992,14 @@ class Parser {
   }
   // `@ result(parameters) { body }`, after the '@'.
   void lambdaExpression(Expr &e, bool blockBranch = false) {
-    e.kind = "lambda";
+    e.kind = ExprKind::Lambda;
     Type result = Type::Void;
 
     if (!blockBranch && !at(Tok::LeftParen)) result = type();
 
     requireFuncSignature(result, "a func result");
     Token name = e.token;
-    name.text = "$lambda";
+    name.text = Tok::Lambda;
     Function f{name, result, {}, {}, false, {}};
     f.usings = usings;
     hygiene.emplace_back();
@@ -1093,7 +1077,7 @@ class Parser {
         (namedLength && tokens[pos + namedLength].text == Tok::Star) ||
         (namedLength && containerNames.count("#@" + named) && !tokens[pos + namedLength].string &&
          tokens[pos + namedLength].text == Tok::RightParen)) {
-      e->kind = "cast";
+      e->kind = ExprKind::Cast;
       e->castType = type();
       lines();
       expect(Tok::RightParen);
@@ -1102,11 +1086,11 @@ class Parser {
       e = expression();
       lines();
 
-      if (at(Tok::ColonColon) && e->kind == ".") {
+      if (at(Tok::ColonColon) && e->kind == ExprKind::Member) {
         // `(a.Child :: b)` gives false instead of trapping on an ownership
         // cycle, and leaves b's owner as it was.
         auto move = std::make_unique<Expr>();
-        move->kind = "moveCheck";
+        move->kind = ExprKind::MoveCheck;
         move->token = pop();
         move->args.push_back(std::move(e));
         move->args.push_back(expression());
@@ -1118,7 +1102,7 @@ class Parser {
         // `(s += x)` gives the inserted index; `(s--)` and `(s -= [i])`
         // give the removed element.
         auto mutation = std::make_unique<Expr>();
-        mutation->kind = "mutation";
+        mutation->kind = ExprKind::Mutation;
         mutation->token = pop();
         mutation->args.push_back(std::move(e));
 
@@ -1137,7 +1121,7 @@ class Parser {
     // values, and `{"a" : 1}` lists keyed entries. A bare name before ':'
     // is a field-style entry (its value first, then the name as written);
     // the expected type decides what the literal builds.
-    literal.kind = "initializer";
+    literal.kind = ExprKind::Initializer;
     lines();
 
     while (!at(Tok::RightBrace)) {
@@ -1149,7 +1133,7 @@ class Parser {
       if (!peek().string && isIdentifierStart(peek().text[0]) &&
           !next.string && next.text == Tok::Colon) {
         first = std::make_unique<Expr>();
-        first->kind = "name";
+        first->kind = ExprKind::Name;
         first->token = pop();
       } else
         first = expression();
@@ -1157,13 +1141,13 @@ class Parser {
       if (accept(Tok::Colon)) {
         auto entry = std::make_unique<Expr>();
 
-        if (first->kind == "name") {
-          entry->kind = "fieldInitializer";
+        if (first->kind == ExprKind::Name) {
+          entry->kind = ExprKind::FieldInitializer;
           entry->token = first->token;
           entry->args.push_back(expression());
           entry->args.push_back(std::move(first));
         } else {
-          entry->kind = "entry";
+          entry->kind = ExprKind::Entry;
           entry->token = first->token;
           entry->args.push_back(std::move(first));
           entry->args.push_back(expression());
@@ -1185,40 +1169,40 @@ class Parser {
     auto e = std::make_unique<Expr>();
     e->token = peek();
 
-    if (accept("$value")) {
+    if (accept(Tok::MacroValue)) {
       // An expanded value macro: its argument bindings, then its result.
-      e->kind = "macroValue";
+      e->kind = ExprKind::MacroValue;
       hygiene.emplace_back();
 
-      while (!accept("$result")) {
+      while (!accept(Tok::MacroResult)) {
         e->bindings.push_back(simpleStatement());
         expect(Tok::Newline);
       }
 
       e->args.push_back(expression());
       lines();
-      expect("$end");
+      expect(Tok::MacroEnd);
       hygiene.pop_back();
     } else if (accept(Tok::Hash)) {
-      e->kind = "compileTime";
+      e->kind = ExprKind::CompileTime;
       e->args.push_back(expression(11, stopAtPipe));
 
-      if (e->args[0]->kind != "call")
+      if (e->args[0]->kind != ExprKind::Call)
         fail(e->token, "'#' requires an explicit function call, as in #Call(1); "
                        "a constant declaration requires an explicit type");
     } else if (accept(Tok::Minus) || accept(Tok::Bang) || accept(Tok::Tilde) || accept(Tok::Ampersand) || accept(Tok::Star)) {
-      e->kind = "unary";
+      e->kind = ExprKind::Unary;
       e->args.push_back(expression(11, stopAtPipe));
     } else if (accept(Tok::Question)) {
       // `?p.q.Foo()` skips the call, arguments included, at the first invalid
       // link and reads as the result type's default.
       // `?a[i]` guards an index: a missing element skips a write and reads
       // as the element type's default. `?e..Foo()` skips a missing method.
-      e->kind = "guard";
+      e->kind = ExprKind::Guard;
       e->args.push_back(expression(11, stopAtPipe));
 
-      if (e->args[0]->kind != "index" && e->args[0]->kind != "duckCall" && e->args[0]->kind != "name" &&
-          e->args[0]->kind != "." && !(e->args[0]->kind == "call" && e->args[0]->receiver))
+      if (e->args[0]->kind != ExprKind::Index && e->args[0]->kind != ExprKind::DuckCall && e->args[0]->kind != ExprKind::Name &&
+          e->args[0]->kind != ExprKind::Member && !(e->args[0]->kind == ExprKind::Call && e->args[0]->receiver))
         fail(e->token, "'?' guards an index such as ?a[i], a method call such as ?p.Foo(), "
                        "a duck call such as ?e..Foo(), or a scoped variable");
     } else if (at(Tok::At) && word(tokens.at(pos + 1)) && !punctuation(tokens.at(pos + 2), Tok::LeftParen) &&
@@ -1227,7 +1211,7 @@ class Parser {
       // `@Name` asks whether that scope is active. A lambda's result type is
       // always followed by its parameter list.
       pop();
-      e->kind = "scopeActive";
+      e->kind = ExprKind::ScopeActive;
       e->token = identifier();
     } else if (at(Tok::LeftBrace) && (markupExpected || markupAhead())) {
       markupLiteral(*e, nullptr);
@@ -1238,43 +1222,43 @@ class Parser {
     } else if (accept(Tok::LeftBrace)) {
       braceLiteral(*e);
     } else if (peek().character) {
-      e->kind = "char";
+      e->kind = ExprKind::Char;
       pop();
     } else if (peek().string) {
-      e->kind = "text";
+      e->kind = ExprKind::Text;
       pop();
     } else if (typeMember()) {
-      e->kind = "typeMember";
+      e->kind = ExprKind::TypeMember;
       e->castType = baseType();
       expect(Tok::Dot);
       e->token = identifier();
 
       // vec3.Identity(): a function of the type rather than a limit like int.Max.
       if (nativeMath(e->castType) && accept(Tok::LeftParen)) {
-        e->kind = "call";
+        e->kind = ExprKind::Call;
         e->token.text = e->castType.record + "." + e->token.text;
         e->castType = Type();
         e->args = callArguments();
       }
     } else if (constructorType()) {
-      e->kind = "construct";
+      e->kind = ExprKind::Construct;
       e->castType = baseType();
       expect(Tok::LeftParen);
       e->args = callArguments();
     } else if (accept(Tok::Null)) {
-      e->kind = "null";
+      e->kind = ExprKind::Null;
     } else if (at(Tok::True) || at(Tok::False)) {
-      e->kind = "bool";
+      e->kind = ExprKind::Bool;
       pop();
     } else if (std::isdigit(static_cast<unsigned char>(peek().text[0]))) {
       e->kind = integerLiteralBase(peek().text) != 10 ||
                         peek().text.find_first_of(".eE") == std::string::npos
-                    ? "int" : "real";
+                    ? ExprKind::Int : ExprKind::Real;
       pop();
     } else {
       e->token = identifier();
       resolveLocal(e->token);
-      e->kind = "name";
+      e->kind = ExprKind::Name;
     }
 
     return e;
@@ -1283,19 +1267,19 @@ class Parser {
     // Dynamic dispatch: `e..Foo()`, and the checks `e..?Foo()` (would
     // this call run?) and `e..?Foo` (does any method of that name exist?).
     auto call = std::make_unique<Expr>();
-    call->kind = accept(Tok::Question) ? "duckCheck" : "duckCall";
+    call->kind = accept(Tok::Question) ? ExprKind::DuckCheck : ExprKind::DuckCall;
     call->token = identifier();
     call->receiver = std::move(e);
 
     if (accept(Tok::LeftParen)) call->args = callArguments();
-    else if (call->kind == "duckCheck") call->kind = "duckExists";
+    else if (call->kind == ExprKind::DuckCheck) call->kind = ExprKind::DuckExists;
     else fail(call->token, "a duck call needs an argument list, as in e..Foo()");
 
     e = std::move(call);
   }
   void indexSuffix(std::unique_ptr<Expr> &e) {
     auto index = std::make_unique<Expr>();
-    index->kind = "index";
+    index->kind = ExprKind::Index;
     index->token = pop();
     index->args.push_back(std::move(e));
     lines();
@@ -1332,7 +1316,7 @@ class Parser {
     return 0;
   }
   void postfixChain(std::unique_ptr<Expr> &e) {
-    std::string path = e->kind == "name" ? e->token.text : "";
+    std::string path = e->kind == ExprKind::Name ? e->token.text.str() : std::string();
 
     while (at(Tok::Dot) || (at(Tok::LeftParen) && !toleranceClose()) || at(Tok::LeftBracket) || at(Tok::DotDot)) {
       if (accept(Tok::DotDot)) {
@@ -1349,7 +1333,7 @@ class Parser {
 
       if (accept(Tok::Dot)) {
         auto member = std::make_unique<Expr>();
-        member->kind = ".";
+        member->kind = ExprKind::Member;
         member->token = identifier();
         path += "." + member->token.text;
         member->args.push_back(std::move(e));
@@ -1357,11 +1341,11 @@ class Parser {
       } else {
         expect(Tok::LeftParen);
 
-        if (e->kind == "call" || e->kind == "invoke" || e->kind == "index" || e->kind == "lambda" ||
-            e->kind == "duckCall") {
+        if (e->kind == ExprKind::Call || e->kind == ExprKind::Invoke || e->kind == ExprKind::Index || e->kind == ExprKind::Lambda ||
+            e->kind == ExprKind::DuckCall) {
           // The callee is itself a value, as in MakeAdder(1)(2).
           auto invoke = std::make_unique<Expr>();
-          invoke->kind = "invoke";
+          invoke->kind = ExprKind::Invoke;
           invoke->token = e->token;
           invoke->receiver = std::move(e);
           invoke->args = callArguments();
@@ -1370,14 +1354,14 @@ class Parser {
           continue;
         }
 
-        if (e->kind != "name" && e->kind != ".") fail(e->token, "expected a function or method name");
+        if (e->kind != ExprKind::Name && e->kind != ExprKind::Member) fail(e->token, "expected a function or method name");
 
-        if (e->kind == ".") {
+        if (e->kind == ExprKind::Member) {
           e->receiver = std::move(e->args.front());
           e->args.clear();
         }
 
-        e->kind = "call";
+        e->kind = ExprKind::Call;
         e->token.text = path;
         e->args = callArguments();
         path.clear();
@@ -1385,7 +1369,7 @@ class Parser {
     }
   }
   // A node for the operator token at the cursor, with its left operand.
-  std::unique_ptr<Expr> operatorNode(const char *kind, std::unique_ptr<Expr> left) {
+  std::unique_ptr<Expr> operatorNode(ExprKind kind, std::unique_ptr<Expr> left) {
     auto node = std::make_unique<Expr>();
     node->token = pop();
     node->kind = kind;
@@ -1407,7 +1391,7 @@ class Parser {
         expect(Tok::LeftParen);
         auto tolerance = expression();
         expect(Tok::RightParen);
-        auto parent = operatorNode("binary", std::move(e));
+        auto parent = operatorNode(ExprKind::Binary, std::move(e));
         int p = precedence(parent->token);
         parent->args.push_back(expression(p + 1, stopAtPipe));
         parent->args.push_back(std::move(tolerance)); // A third operand marks a tolerance.
@@ -1417,7 +1401,7 @@ class Parser {
 
       if (precedence(peek()) < minimum || (stopAtPipe && at(Tok::Pipe))) break;
 
-      auto parent = operatorNode("binary", std::move(e));
+      auto parent = operatorNode(ExprKind::Binary, std::move(e));
       int p = precedence(parent->token);
       parent->args.push_back(expression(p + 1, stopAtPipe));
       e = std::move(parent);
@@ -1426,13 +1410,13 @@ class Parser {
     // A range binds looser than every operator, so 0...a.Len-1 needs no
     // parentheses; a bare pipe after it belongs to the enclosing form.
     if (minimum == 1 && at(Tok::Ellipsis)) {
-      auto parent = operatorNode("range", std::move(e));
+      auto parent = operatorNode(ExprKind::Range, std::move(e));
       parent->args.push_back(expression(2, true));
       e = std::move(parent);
     }
 
     if (minimum == 1 && at(Tok::Question)) {
-      auto parent = operatorNode("conditional", std::move(e));
+      auto parent = operatorNode(ExprKind::Conditional, std::move(e));
       parent->args.push_back(expression(1, true));
       expect(Tok::Pipe);
       parent->args.push_back(expression(1, stopAtPipe));
@@ -1473,20 +1457,20 @@ class Parser {
     e->token = at;
     e->token.text = local;
     e->token.string = e->token.character = false;
-    e->kind = "name";
+    e->kind = ExprKind::Name;
     return e;
   }
   static std::unique_ptr<Expr> memberOf(std::unique_ptr<Expr> base, const Token &member) {
     auto e = std::make_unique<Expr>();
     e->token = member;
-    e->kind = ".";
+    e->kind = ExprKind::Member;
     e->args.push_back(std::move(base));
     return e;
   }
   static std::unique_ptr<Stmt> assignment(std::unique_ptr<Expr> target, std::unique_ptr<Expr> value, const Token &at) {
     auto s = std::make_unique<Stmt>();
     s->token = at;
-    s->kind = "assign";
+    s->kind = StmtKind::Assign;
     s->target = std::move(target);
     s->expr = std::move(value);
     return s;
@@ -1547,7 +1531,7 @@ class Parser {
         const auto at = peek();
         auto value = expression(11);
         Token field = at;
-        field.text = "value";
+        field.text = Tok::ImplicitValue;
         field.string = field.character = false;
         out.push_back(assignment(memberOf(self(at), field), std::move(value), at));
         Token tag = ownerToken;
@@ -1562,10 +1546,10 @@ class Parser {
       auto value = expression(11);
       auto splice = std::make_unique<Stmt>();
       splice->token = at;
-      splice->kind = "markupSplice";
+      splice->kind = StmtKind::MarkupSplice;
       splice->target = holder(at);
       Token field = at;
-      field.text = "value";
+      field.text = Tok::ImplicitValue;
       field.string = field.character = false;
       splice->alternate.push_back(assignment(owner.empty() ? nullptr : memberOf(self(at), field), std::move(value), at));
       out.push_back(std::move(splice));
@@ -1612,11 +1596,11 @@ class Parser {
     const auto local = "$element" + std::to_string(markupLocals++);
     auto group = std::make_unique<Stmt>();
     group->token = open;
-    group->kind = "block";
+    group->kind = StmtKind::Block;
     auto own = std::make_unique<Stmt>();
     own->token = tagToken;
     own->token.text = local;
-    own->kind = "own";
+    own->kind = StmtKind::Own;
     own->name = local;
     Type record = Type::Record;
     record.record = tag;
@@ -1629,7 +1613,7 @@ class Parser {
     else {
       expect(Tok::Greater);
       Token field = tagToken;
-      field.text = "$children";
+      field.text = Tok::Children;
       const Place children = [local, field](const Token &at) { return memberOf(localName(at, local), field); };
       tagToken.text = tag;
 
@@ -1640,7 +1624,7 @@ class Parser {
 
     auto add = std::make_unique<Stmt>();
     add->token = open;
-    add->kind = "markupAdd";
+    add->kind = StmtKind::MarkupAdd;
     add->target = holder(open);
     add->expr = localName(open, local);
     group->body.push_back(std::move(add));
@@ -1652,13 +1636,13 @@ class Parser {
   // container's `this{ }` block, root collects what the block declares.
   void markupLiteral(Expr &e, Record *root, const std::string &bare = "", const std::string &tag = "") {
     const auto start = peek();
-    e.kind = "macroValue";
+    e.kind = ExprKind::MacroValue;
     e.token = start;
     const auto local = "$markup" + std::to_string(markupLocals++);
     auto let = std::make_unique<Stmt>();
     let->token = start;
     let->token.text = local;
-    let->kind = "let";
+    let->kind = StmtKind::Let;
     let->name = local;
     let->type = markupType();
     e.bindings.push_back(std::move(let));
@@ -1666,7 +1650,7 @@ class Parser {
     expect(Tok::LeftBrace);
     lines();
     Token receiver = start;
-    receiver.text = "this";
+    receiver.text = Tok::This;
     const Place self = [](const Token &at) { return localName(at, "this"); };
 
     // A block's root may be written out; it is always the container itself.
@@ -1690,7 +1674,7 @@ class Parser {
     auto take = std::make_unique<Expr>();
     take->token = start;
     take->token.text = local;
-    take->kind = "markupTake";
+    take->kind = ExprKind::MarkupTake;
     e.args.push_back(std::move(take));
   }
   // `this{ ... }` in an instance body: children built with each instance, by
@@ -1705,32 +1689,32 @@ class Parser {
     f.usings = usings;
     f.protectedAccess = true;
     Token self = name;
-    self.text = "this";
+    self.text = Tok::This;
     Type type = Type::Record;
     type.record = record.name.text;
     f.params.push_back({self, type, true});
     record.markupClosed = true;
     auto result = std::make_unique<Stmt>();
-    result->kind = "return";
+    result->kind = StmtKind::Return;
     result->token = peek();
     result->expr = std::make_unique<Expr>();
     markupLiteral(*result->expr, &record, bare, record.name.text);
     f.body.push_back(std::move(result));
     program.push_back(std::move(f));
     auto call = std::make_unique<Expr>();
-    call->kind = "call";
+    call->kind = ExprKind::Call;
     call->token = name;
-    call->token.text = "$self.$markup";
+    call->token.text = Tok::SelfMarkup;
     call->receiver = localName(name, "$self");
     Token field = name;
-    field.text = "$children";
+    field.text = Tok::Children;
     record.fields.push_back({field, markupType(), false, false, false, std::shared_ptr<Expr>(std::move(call))});
     record.fields.back().usings = usings;
   }
   // Whether `T.Name(` here is an assertion. A program's own container named
   // T keeps its members, so only the assertion names are claimed.
   bool assertionAhead() const {
-    if (!at("T") || !punctuation(tokens.at(pos + 1), Tok::Dot) || !word(tokens.at(pos + 2)) ||
+    if (!at(Tok::T) || !punctuation(tokens.at(pos + 1), Tok::Dot) || !word(tokens.at(pos + 2)) ||
         !punctuation(tokens.at(pos + 3), Tok::LeftParen))
       return false;
 
@@ -1745,7 +1729,7 @@ class Parser {
         {"AreEqual", {2, 2}}, {"AreNotEqual", {2, 2}}, {"IsTrue", {1, 1}}, {"IsFalse", {1, 1}}, {"Fail", {0, 1}}};
     return names;
   }
-  std::unique_ptr<Expr> syntheticExpr(const Token &start, const std::string &kind, const std::string &text) {
+  std::unique_ptr<Expr> syntheticExpr(const Token &start, ExprKind kind, const std::string &text) {
     auto e = std::make_unique<Expr>();
     e->token = start;
     e->token.text = text;
@@ -1753,24 +1737,24 @@ class Parser {
     return e;
   }
   std::unique_ptr<Expr> syntheticText(const Token &start, const std::string &value) {
-    auto e = syntheticExpr(start, "text", value);
+    auto e = syntheticExpr(start, ExprKind::Text, value);
     e->token.string = true;
     return e;
   }
   std::unique_ptr<Expr> syntheticNot(const Token &start, std::unique_ptr<Expr> operand) {
-    auto e = syntheticExpr(start, "unary", "!");
+    auto e = syntheticExpr(start, ExprKind::Unary, "!");
     e->args.push_back(std::move(operand));
     return e;
   }
   void assertionFailureStep(std::vector<std::unique_ptr<Stmt>> &failure, const Token &start, const std::string &op, std::unique_ptr<Expr> first, std::unique_ptr<Expr> second = nullptr) {
-    auto call = syntheticExpr(start, "call", op);
+    auto call = syntheticExpr(start, ExprKind::Call, op);
     call->args.push_back(std::move(first));
 
     if (second) call->args.push_back(std::move(second));
 
     auto s = std::make_unique<Stmt>();
     s->token = start;
-    s->kind = "expr";
+    s->kind = StmtKind::Expr;
     s->expr = std::move(call);
     failure.push_back(std::move(s));
   }
@@ -1779,22 +1763,27 @@ class Parser {
     // A literal stays in place, so the comparison type-checks exactly as a
     // written `a == 5` would and `null` keeps the other operand's type.
     struct Operand {
-      std::string kind;
+      ExprKind kind;
       Token token;
     };
     auto operand = [&](std::unique_ptr<Expr> value, const std::string &local) {
-      static const std::set<std::string> literals{"int", "real", "bool", "null", "text"};
-
-      if (literals.count(value->kind)) return Operand{value->kind, value->token};
+      switch (value->kind) {
+      case ExprKind::Int:
+      case ExprKind::Real:
+      case ExprKind::Bool:
+      case ExprKind::Null:
+      case ExprKind::Text: return Operand{value->kind, value->token};
+      default: break;
+      }
 
       auto let = std::make_unique<Stmt>();
       let->token = start;
       let->token.text = local;
-      let->kind = "let";
+      let->kind = StmtKind::Let;
       let->name = local;
       let->expr = std::move(value);
       statements.push_back(std::move(let));
-      return Operand{"name", syntheticExpr(start, "name", local)->token};
+      return Operand{ExprKind::Name, syntheticExpr(start, ExprKind::Name, local)->token};
     };
     auto read = [](const Operand &o) {
       auto e = std::make_unique<Expr>();
@@ -1804,13 +1793,13 @@ class Parser {
     };
     const auto actual = operand(std::move(arguments[0]), "$actual");
     const auto expected = operand(std::move(arguments[1]), "$expected");
-    auto equal = syntheticExpr(start, "binary", "==");
+    auto equal = syntheticExpr(start, ExprKind::Binary, "==");
     equal->args.push_back(read(actual));
     equal->args.push_back(read(expected));
-    const bool wantEqual = check.text == "AreEqual";
+    const bool wantEqual = check.text == Tok::AreEqual;
     condition = wantEqual ? syntheticNot(start, std::move(equal)) : std::move(equal);
     auto show = [&](const char *title, const Operand &o) {
-      if (o.kind != "null") assertionFailureStep(failure, start, "$T.show", read(o), syntheticText(start, title));
+      if (o.kind != ExprKind::Null) assertionFailureStep(failure, start, "$T.show", read(o), syntheticText(start, title));
     };
 
     if (wantEqual) {
@@ -1824,11 +1813,11 @@ class Parser {
   std::unique_ptr<Stmt> assertionCheck(const Token &start, std::unique_ptr<Expr> condition, std::vector<std::unique_ptr<Stmt>> failure, std::vector<std::unique_ptr<Stmt>> statements) {
     auto leave = std::make_unique<Stmt>();
     leave->token = start;
-    leave->kind = "return";
+    leave->kind = StmtKind::Return;
     failure.push_back(std::move(leave));
     auto test = std::make_unique<Stmt>();
     test->token = start;
-    test->kind = "if";
+    test->kind = StmtKind::If;
     test->expr = std::move(condition);
     test->body = std::move(failure);
 
@@ -1837,7 +1826,7 @@ class Parser {
     statements.push_back(std::move(test));
     auto group = std::make_unique<Stmt>();
     group->token = start;
-    group->kind = "block";
+    group->kind = StmtKind::Block;
     group->body = std::move(statements);
     return group;
   }
@@ -1867,19 +1856,19 @@ class Parser {
 
     std::vector<std::unique_ptr<Stmt>> failure;
     assertionFailureStep(failure, start, "$T.fail", syntheticText(start, where(start) + ": test " + currentTest + ": " + label +
-                              (check.text == "Fail" ? "" : " failed")));
+                              (check.text == Tok::Fail ? "" : " failed")));
     std::vector<std::unique_ptr<Stmt>> statements;
     std::unique_ptr<Expr> condition;
 
     if (arity->second.second == 2) {
       condition = comparisonAssertion(start, check, arguments, statements, failure);
-    } else if (check.text == "Fail") {
+    } else if (check.text == Tok::Fail) {
       // Conditional in form only: statements after T.Fail stay reachable.
-      condition = syntheticExpr(start, "bool", "true");
+      condition = syntheticExpr(start, ExprKind::Bool, "true");
 
       if (!arguments.empty()) assertionFailureStep(failure, start, "$T.show", std::move(arguments[0]), syntheticText(start, "  message:  "));
     } else
-      condition = check.text == "IsTrue" ? syntheticNot(start, std::move(arguments[0])) : std::move(arguments[0]);
+      condition = check.text == Tok::IsTrue ? syntheticNot(start, std::move(arguments[0])) : std::move(arguments[0]);
 
     return assertionCheck(start, std::move(condition), std::move(failure), std::move(statements));
   }
@@ -1908,14 +1897,14 @@ class Parser {
   }
   bool scopeStatementAhead() const {
     return at(Tok::At) && tokens.at(pos + 2).line == peek().line &&
-           (tokens.at(pos + 1).text == "start" || tokens.at(pos + 1).text == "end") && !tokens.at(pos + 1).string &&
+           (tokens.at(pos + 1).text == Tok::Start || tokens.at(pos + 1).text == Tok::End) && !tokens.at(pos + 1).string &&
            word(tokens.at(pos + 2));
   }
   std::unique_ptr<Stmt> scopeStatement() {
     auto s = std::make_unique<Stmt>();
     s->token = pop();
-    const bool starting = pop().text == "start";
-    s->kind = starting ? "scopeStart" : "scopeEnd";
+    const bool starting = pop().text == Tok::Start;
+    s->kind = starting ? StmtKind::ScopeStart : StmtKind::ScopeEnd;
 
     if (!starting && lambdaDepth)
       fail(s->token, "@end leaves the functions up to its [@Name] loop, which a lambda body cannot do");
@@ -1936,7 +1925,7 @@ class Parser {
     auto loop = statement();
     auto body = std::make_unique<Stmt>();
     body->token = mark;
-    body->kind = "scopedBody";
+    body->kind = StmtKind::ScopedBody;
     body->name = mark.text;
     body->body = std::move(loop->body);
     loop->body.clear();
@@ -1944,7 +1933,7 @@ class Parser {
     return loop;
   }
   std::unique_ptr<Stmt> doStatement(std::unique_ptr<Stmt> s) {
-    s->kind = "do";
+    s->kind = StmtKind::Do;
     s->body = controlBody();
     // A `while` on the body's last line is its condition. One on a later
     // line is too, unless it has a block of its own: that is the next
@@ -1974,11 +1963,11 @@ class Parser {
     return s;
   }
   std::unique_ptr<Stmt> conditionalStatement(std::unique_ptr<Stmt> s) {
-    s->kind = s->token.text;
+    s->kind = s->token.text == Tok::If ? StmtKind::If : StmtKind::While;
     s->expr = expression();
     s->body = controlBody();
 
-    if (s->kind == "if") {
+    if (s->kind == StmtKind::If) {
       auto saved = pos;
       lines();
 
@@ -1997,7 +1986,7 @@ class Parser {
   }
   // A single P(...) remains an ordinary function call.
   bool parallelAhead() const {
-    if (!at("P")) return false;
+    if (!at(Tok::P)) return false;
     size_t k = pos + 1;
     if (punctuation(tokens.at(k), Tok::LeftBrace)) return true;
     if (!punctuation(tokens.at(k), Tok::LeftParen) || !skipToCloseParen(k)) return false;
@@ -2006,7 +1995,7 @@ class Parser {
   std::unique_ptr<Stmt> parallelGroup() {
     auto group = std::make_unique<Stmt>();
     group->token = pop();
-    group->kind = "parallel";
+    group->kind = StmtKind::Parallel;
     do {
       if (at(Tok::LeftBrace)) {
         auto branch = std::make_unique<Expr>();
@@ -2054,14 +2043,14 @@ class Parser {
     s->token = peek();
 
     if (at(Tok::LeftBrace)) {
-      s->kind = "block";
+      s->kind = StmtKind::Block;
       s->body = block();
       return s;
     }
 
     if (at(Tok::Dollar) && punctuation(tokens.at(pos + 1), Tok::LeftBrace)) {
       pop();
-      s->kind = "ordered";
+      s->kind = StmtKind::Ordered;
       s->body = block();
       return s;
     }
@@ -2078,13 +2067,13 @@ class Parser {
     if (accept(Tok::If) || accept(Tok::While)) return conditionalStatement(std::move(s));
 
     if (accept(Tok::Break) || accept(Tok::Continue))
-      s->kind = s->token.text;
+      s->kind = s->token.text == Tok::Break ? StmtKind::Break : StmtKind::Continue;
     else if (accept(Tok::Return)) {
-      s->kind = "return";
+      s->kind = StmtKind::Return;
 
       if (accept(Tok::ColonColon)) {
         returnsOwner = true;
-        s->kind = "returnOwner";
+        s->kind = StmtKind::ReturnOwner;
       }
 
       if (!at(Tok::Newline) && !at(Tok::RightBrace)) {
@@ -2112,7 +2101,7 @@ class Parser {
   // statement list with its inner loop.
   void forClause(Stmt &s) {
     if (!forEachHeader(s)) {
-      s.kind = "for";
+      s.kind = StmtKind::For;
 
       if (!at(Tok::Semicolon))
         s.initializer = simpleStatement();
@@ -2127,7 +2116,7 @@ class Parser {
       if (!at(Tok::LeftBrace) && !at(Tok::Newline) && !at(Tok::Pipe))
         s.step = simpleStatement(true);
 
-      if (s.step && (s.step->kind == "let" || s.step->kind == "own"))
+      if (s.step && (s.step->kind == StmtKind::Let || s.step->kind == StmtKind::Own))
         fail(s.step->token, "for step cannot declare a variable");
     }
 
@@ -2204,13 +2193,13 @@ class Parser {
     if (!at(Tok::LeftBrace) && !at(Tok::Newline) && !at(Tok::Pipe))
       fail(peek(), "expected '{' or a newline after the collection of a for loop");
 
-    if (collection->kind == "range" && reverse)
+    if (collection->kind == ExprKind::Range && reverse)
       fail(collection->token, "a range already has a direction; write the high endpoint first, as 5...0");
 
-    if (collection->kind == "range" && !s.key.empty())
+    if (collection->kind == ExprKind::Range && !s.key.empty())
       fail(collection->token, "a range has no keys; write for i : a...b");
 
-    s.kind = collection->kind == "range" ? "rangefor" : "foreach";
+    s.kind = collection->kind == ExprKind::Range ? StmtKind::RangeFor : StmtKind::ForEach;
     s.reverse = reverse;
     s.expr = std::move(collection);
     return true;
@@ -2242,10 +2231,10 @@ class Parser {
   }
   // The right side of += or -=: `key : value` adds an entry to a pair, and
   // `[i]` or `[key]` after -= names the element to remove.
-  std::unique_ptr<Expr> mutationOperand(const std::string &op, bool stopAtPipe = false) {
-    if (op == "-=" && at(Tok::LeftBracket)) {
+  std::unique_ptr<Expr> mutationOperand(const TokenText &op, bool stopAtPipe = false) {
+    if (op == Tok::MinusAssign && at(Tok::LeftBracket)) {
       auto removal = std::make_unique<Expr>();
-      removal->kind = "removal";
+      removal->kind = ExprKind::Removal;
       removal->token = pop();
       lines();
       removal->args.push_back(expression());
@@ -2265,9 +2254,9 @@ class Parser {
 
     auto value = expression(1, stopAtPipe);
 
-    if (op == "+=" && at(Tok::Colon)) {
+    if (op == Tok::PlusAssign && at(Tok::Colon)) {
       auto entry = std::make_unique<Expr>();
-      entry->kind = "entry";
+      entry->kind = ExprKind::Entry;
       entry->token = pop();
       entry->args.push_back(std::move(value));
       entry->args.push_back(expression(1, stopAtPipe));
@@ -2292,7 +2281,7 @@ class Parser {
       fail(peek(), "constant declaration requires an explicit type");
 
     if (declarationType()) {
-      s->kind = "let";
+      s->kind = StmtKind::Let;
       s->type = type();
 
       if (s->type == Type::Void)
@@ -2306,7 +2295,7 @@ class Parser {
         auto arguments = callArguments();
         auto construction = [&](const Type &record) {
           auto call = std::make_unique<Expr>();
-          call->kind = "call";
+          call->kind = ExprKind::Call;
           call->token = s->token;
           call->token.text = record.record;
           call->castType = record; // Already resolved; names the constructed type.
@@ -2324,7 +2313,7 @@ class Parser {
         if (s->type.depth != 1 || !heapValue(s->type.pointee()))
           fail(s->token, "heap construction requires a typed pointer");
 
-        s->kind = "own";
+        s->kind = StmtKind::Own;
 
         if (!arguments.empty()) {
           if (!recordValue(s->type.pointee()))
@@ -2348,28 +2337,28 @@ class Parser {
       unreachableNestedType();
       auto target = expression(1, stopAtPipe);
 
-      if (at(Tok::ColonColon) && target->kind == ".") {
+      if (at(Tok::ColonColon) && target->kind == ExprKind::Member) {
         pop();
-        s->kind = "moveInto";
+        s->kind = StmtKind::MoveInto;
         s->target = std::move(target);
         s->expr = expression();
       } else if (at(Tok::Colon) || at(Tok::ColonColon)) {
-        if (target->kind != "name") fail(target->token, "expected local name");
+        if (target->kind != ExprKind::Name) fail(target->token, "expected local name");
 
-        s->kind = pop().text == Tok::ColonColon ? "own" : "let";
+        s->kind = pop().text == Tok::ColonColon ? StmtKind::Own : StmtKind::Let;
         s->expr = expression();
         s->name = declareLocal(target->token);
       } else if (at(Tok::Assign) || at(Tok::PlusPlus) || at(Tok::MinusMinus) || at(Tok::PlusAssign) || at(Tok::MinusAssign) ||
                  at(Tok::StarAssign) || at(Tok::SlashAssign) || at(Tok::PercentAssign) || at(Tok::AmpersandAssign) || at(Tok::PipeAssign) ||
                  at(Tok::CaretAssign) || at(Tok::ShiftLeftAssign) || at(Tok::ShiftRightAssign)) {
         auto op = pop().text;
-        s->kind = op == "=" ? "assign" : op;
+        s->kind = assignmentKind(op.kind());
         s->target = std::move(target);
 
-        if (op == "+=" || op == "-=") s->expr = mutationOperand(op, stopAtPipe);
-        else if (op != "++" && op != "--") s->expr = expression(1, stopAtPipe);
+        if (op == Tok::PlusAssign || op == Tok::MinusAssign) s->expr = mutationOperand(op, stopAtPipe);
+        else if (op != Tok::PlusPlus && op != Tok::MinusMinus) s->expr = expression(1, stopAtPipe);
       } else {
-        s->kind = "expr";
+        s->kind = StmtKind::Expr;
         s->expr = std::move(target);
       }
     }
@@ -2386,7 +2375,7 @@ class Parser {
       Type self = Type::Record;
       self.record = receiver;
       Token token = f.name;
-      token.text = "this";
+      token.text = Tok::This;
       f.params.push_back({token, self, true});
     }
 
@@ -2511,7 +2500,7 @@ class Parser {
                        name.text + " :: value");
 
       initializer = std::make_shared<Expr>();
-      initializer->kind = "call";
+      initializer->kind = ExprKind::Call;
       initializer->token = name;
       initializer->token.text = t.record;
       initializer->castType = t.pointee();
@@ -2533,7 +2522,7 @@ class Parser {
       if (t.depth == 1 && recordValue(t.pointee())) t.role = Type::Alias;
     }
 
-    const bool lambdaDefault = initializer && initializer->kind == "lambda";
+    const bool lambdaDefault = initializer && initializer->kind == ExprKind::Lambda;
 
     if (funcValue(t) && !t.signature) {
       if (!lambdaDefault)
@@ -2627,7 +2616,7 @@ class Parser {
   // `T{`, written without a space, attaches tests to the container before it.
   // `T {` stays an ordinary container named T.
   bool testBody() const {
-    if (!at("T")) return false;
+    if (!at(Tok::T)) return false;
 
     const auto &next = tokens.at(pos + 1);
     return !next.string && next.text == Tok::LeftBrace && next.source == peek().source && next.line == peek().line &&
@@ -2722,7 +2711,7 @@ class Parser {
       Type self = Type::Record;
       self.record = record;
       Token receiver = name;
-      receiver.text = "this";
+      receiver.text = Tok::This;
       f.params.push_back({receiver, self, true});
 
       if (getter) {
@@ -2733,14 +2722,14 @@ class Parser {
           f.body = block();
         } else {
           auto result = std::make_unique<Stmt>();
-          result->kind = "return";
+          result->kind = StmtKind::Return;
           result->token = peek();
           result->expr = expression();
           f.body.push_back(std::move(result));
         }
       } else {
         Token value = name;
-        value.text = "value";
+        value.text = Tok::ImplicitValue;
         f.params.push_back({value, t, false});
 
         if (at(Tok::LeftBrace)) f.body = block();
@@ -2977,7 +2966,7 @@ class Parser {
   // combineUnits. Its locals live for one Exec; other files never see them.
   void fileScript(Program &program, std::vector<std::unique_ptr<Stmt>> body) {
     Token name = body.front()->token;
-    name.text = "$exec.0";
+    name.text = Tok::FirstScript;
     name.string = name.character = false;
     Function script{std::move(name), Type::Void, {}, std::move(body), false, {}};
     script.script = true;
@@ -2989,7 +2978,7 @@ class Parser {
     const auto opening = peek();
     const auto tags = attributes();
 
-    if (tags.size() != 1 || tags[0].token.text != "args" || !namedType())
+    if (tags.size() != 1 || tags[0].token.text != Tok::Args || !namedType())
       fail(opening, nested ? "attributes on static members are not supported yet; only [args] can mark an enum here"
                            : "only [args] can precede a file-scope declaration, and it marks an enum");
 
@@ -3122,7 +3111,7 @@ class Parser {
       bool external = accept(Tok::Extern);
 
       if (external) {
-        if (!peek().string || peek().character || peek().text != "C")
+        if (!peek().string || peek().character || peek().text != Tok::C)
           fail(peek(), "native declarations require extern \"C\"");
 
         pop();
@@ -3176,7 +3165,7 @@ class Parser {
       functions.push_back(function(std::move(name), result, external, nativeName));
       functions.back().protectedAccess = isProtected;
 
-      if (!nested && functions.back().name.text == "Main") entryParameter(functions.back());
+      if (!nested && functions.back().name.text == Tok::Main) entryParameter(functions.back());
 
       if (!at(Tok::Eof) && !at(Tok::Newline) && !(nested && at(Tok::RightBrace)))
         fail(peek(), "expected newline between functions");
@@ -3261,7 +3250,7 @@ public:
     output = &functions;
     functions.sources.push_back(sourcePath(tokens.front().source));
     // The last statement of a file need not end in a newline.
-    tokens.insert(tokens.end() - 1, Token{"\n", tokens.back().line, tokens.back().column, false, tokens.back().source});
+    tokens.insert(tokens.end() - 1, Token{Tok::Newline, tokens.back().line, tokens.back().column, false, tokens.back().source});
     declarations(functions, "", false);
     return functions;
   }
@@ -3278,9 +3267,6 @@ Program parse(std::vector<Token> tokens) {
 namespace {
 bool punctuation(const std::vector<Token> &tokens, size_t k, Tok kind) {
   return k < tokens.size() && !tokens[k].string && tokens[k].text == kind;
-}
-bool punctuation(const std::vector<Token> &tokens, size_t k, const char *text) {
-  return k < tokens.size() && !tokens[k].string && tokens[k].text == text;
 }
 // The '}' matching the '{' at open, or the end of the tokens.
 size_t closingBrace(const std::vector<Token> &tokens, size_t open) {
@@ -3470,7 +3456,7 @@ void collectScope(const std::vector<Token> &tokens, size_t begin, size_t end,
       size_t open;
 
       // A chained T{ } block declares no type; only macros matter inside it.
-      if (last != std::string::npos && punctuation(tokens, k, "T") && punctuation(tokens, k + 1, Tok::LeftBrace) &&
+      if (last != std::string::npos && punctuation(tokens, k, Tok::T) && punctuation(tokens, k + 1, Tok::LeftBrace) &&
           tokens[k + 1].line == tokens[k].line && tokens[k + 1].column == tokens[k].column + 1) {
         const size_t close = closingBrace(tokens, k + 1);
 

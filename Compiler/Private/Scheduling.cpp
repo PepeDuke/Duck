@@ -145,7 +145,7 @@ class EffectWalker {
       return result;
     }
 
-    if (e.kind == "name") {
+    if (e.kind == ExprKind::Name) {
       if (!checkingGroups && captured(e.token.text)) return std::nullopt;
       if (auto *local = find(e.token.text)) return *local;
       const auto *receiver = find("this");
@@ -160,7 +160,7 @@ class EffectWalker {
       return self;
     }
 
-    if (e.kind == ".") {
+    if (e.kind == ExprKind::Member) {
       auto base = place(*e.args[0]);
 
       if (!base || !recordValue(base->type)) return std::nullopt;
@@ -173,7 +173,7 @@ class EffectWalker {
       return base;
     }
 
-    if (e.kind == "index" && !a.markupIndexed.count(&e)) {
+    if (e.kind == ExprKind::Index && !a.markupIndexed.count(&e)) {
       auto base = place(*e.args[0]);
 
       for (size_t i = 1; i < e.args.size(); ++i) expression(*e.args[i]);
@@ -273,7 +273,7 @@ class EffectWalker {
     }
   }
   void call(const Expr &e) {
-    const std::string &op = e.token.text;
+    const TokenText &op = e.token.text;
 
     if (a.reinitializations.count(&e) || a.completions.count(&e) || a.reflections.count(&e) ||
         a.indirectCalls.count(&e) || a.elementNames.count(&e)) {
@@ -326,7 +326,7 @@ class EffectWalker {
       return;
     }
 
-    if (op == "Print" || op == "$T.fail" || op == "$T.show") current.external = true;
+    if (op == Tok::Print || op == Tok::TestFail || op == Tok::TestShow) current.external = true;
     if (e.receiver && memberName(op) == "Clear" && !a.callTargets.count(&e)) return write(*e.receiver, true);
 
     // File methods do I/O, so they stay in order with other external effects.
@@ -340,7 +340,7 @@ class EffectWalker {
 
       return;
     }
-    if (op == "IsValid" && !e.receiver) return read(*e.args[0]);
+    if (op == Tok::IsValid && !e.receiver) return read(*e.args[0]);
 
     const auto target = a.callTargets.find(&e);
 
@@ -363,7 +363,7 @@ class EffectWalker {
 
     std::map<size_t, std::optional<Place>> bound;
 
-    if (op == "Exec" && !e.receiver) { // Its path names the script; the script takes no arguments.
+    if (op == Tok::Exec && !e.receiver) { // Its path names the script; the script takes no arguments.
       current.merge(apply(callee->second, bound));
       return;
     }
@@ -404,18 +404,26 @@ class EffectWalker {
   }
   void expression(const Expr &e) {
     if (a.threadQueries.count(&e)) {
-      if (e.token.text == "Status") expression(*e.args[0]->args[1]);
+      if (e.token.text == Tok::Status) expression(*e.args[0]->args[1]);
       return;
     }
     if (inBranch) {
       const auto type = a.expressionTypes.find(&e);
       if (type != a.expressionTypes.end() && !taskData(type->second, symbols)) current.unknown = true;
     }
-    static const std::set<std::string> constants{"int", "real", "bool", "char", "text", "null", "typeMember", "compileTime"};
+    switch (e.kind) { // Constants.
+    case ExprKind::Int:
+    case ExprKind::Real:
+    case ExprKind::Bool:
+    case ExprKind::Char:
+    case ExprKind::Text:
+    case ExprKind::Null:
+    case ExprKind::TypeMember:
+    case ExprKind::CompileTime: return;
+    default: break;
+    }
 
-    if (constants.count(e.kind)) return;
-
-    if (e.kind == "name" || e.kind == "." || e.kind == "index") {
+    if (e.kind == ExprKind::Name || e.kind == ExprKind::Member || e.kind == ExprKind::Index) {
       if (a.enumMembers.count(&e) || a.integerConstants.count(&e) || a.functionValues.count(&e)) return;
       if (a.collectionMembers.count(&e)) return read(*e.args[0]);
       if (a.enumProperties.count(&e)) return expression(*e.args[0]);
@@ -428,23 +436,23 @@ class EffectWalker {
       return read(e);
     }
 
-    if (e.kind == "call") return call(e);
+    if (e.kind == ExprKind::Call) return call(e);
 
-    if (e.kind == "unary" && (e.token.text == Tok::Ampersand || e.token.text == Tok::Star)) {
+    if (e.kind == ExprKind::Unary && (e.token.text == Tok::Ampersand || e.token.text == Tok::Star)) {
       current.unknown = true;
       return;
     }
 
-    if (e.kind == "fieldInitializer") return expression(*e.args[0]);
+    if (e.kind == ExprKind::FieldInitializer) return expression(*e.args[0]);
 
-    if (e.kind == "binary" || e.kind == "unary" || e.kind == "conditional" || e.kind == "cast" || e.kind == "construct" ||
-        e.kind == "initializer" || e.kind == "entry" || e.kind == "removal" || e.kind == "range") {
+    if (e.kind == ExprKind::Binary || e.kind == ExprKind::Unary || e.kind == ExprKind::Conditional || e.kind == ExprKind::Cast || e.kind == ExprKind::Construct ||
+        e.kind == ExprKind::Initializer || e.kind == ExprKind::Entry || e.kind == ExprKind::Removal || e.kind == ExprKind::Range) {
       for (const auto &child : e.args) expression(*child);
 
       return;
     }
 
-    if (e.kind == "macroValue") {
+    if (e.kind == ExprKind::MacroValue) {
       scopes.emplace_back();
 
       for (const auto &binding : e.bindings) statement(*binding);
@@ -454,7 +462,7 @@ class EffectWalker {
       return;
     }
 
-    if (e.kind == "mutation") {
+    if (e.kind == ExprKind::Mutation) {
       for (size_t i = 1; i < e.args.size(); ++i) expression(*e.args[i]);
 
       return write(*e.args[0], true);
@@ -672,7 +680,7 @@ class EffectWalker {
       if (found != table.end() && found->second.threadSafe) return found->second;
       return effects;
     }
-    if (e.kind == "name") {
+    if (e.kind == ExprKind::Name) {
       if (auto *p = find(e.token.text)) {
         const auto known = callableLocals.find(p->resource.root);
         if (known != callableLocals.end()) return known->second;
@@ -768,56 +776,55 @@ class EffectWalker {
     }
   }
   void effects(const Stmt &s) {
-    if (s.kind == "parallel") return parallelGroup(s);
-    static const std::set<std::string> mutations{"assign", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "++", "--"};
+    if (s.kind == StmtKind::Parallel) return parallelGroup(s);
 
-    if (s.kind == "ordered") {
+    if (s.kind == StmtKind::Ordered) {
       if (checkingGroups) return list(s.body);
       return ordered(s);
     }
-    if (s.kind == "block") return list(s.body);
+    if (s.kind == StmtKind::Block) return list(s.body);
 
-    if (s.kind == "return") {
+    if (s.kind == StmtKind::Return) {
       if (s.expr) expression(*s.expr);
 
       return;
     }
 
-    if (s.kind == "break" || s.kind == "continue") return;
-    if (s.kind == "expr") return expression(*s.expr);
-    if (s.kind == "let") return letEffects(s);
+    if (s.kind == StmtKind::Break || s.kind == StmtKind::Continue) return;
+    if (s.kind == StmtKind::Expr) return expression(*s.expr);
+    if (s.kind == StmtKind::Let) return letEffects(s);
 
-    if (mutations.count(s.kind)) {
+    if (assignment(s.kind)) {
       if (s.expr) expression(*s.expr);
 
-      if (s.target->kind == "guard" || a.properties.count(s.target.get())) {
+      if (s.target->kind == ExprKind::Guard || a.properties.count(s.target.get())) {
         current.unknown = true;
         return;
       }
 
-      return write(*s.target, s.kind != "assign");
+      return write(*s.target, s.kind != StmtKind::Assign);
     }
 
-    if (s.kind == "if") {
+    if (s.kind == StmtKind::If) {
       expression(*s.expr);
       list(s.body);
       list(s.alternate);
       return;
     }
 
-    if (s.kind == "while" || s.kind == "do") {
+    if (s.kind == StmtKind::While || s.kind == StmtKind::Do) {
       if (s.expr) expression(*s.expr);
 
       list(s.body);
       return;
     }
 
-    if (s.kind == "for") return forEffects(s);
-    if (s.kind == "rangefor") return rangeForEffects(s);
-    if (s.kind == "foreach") return forEachEffects(s);
-    if (s.kind == "switch") return switchEffects(s);
+    if (s.kind == StmtKind::For) return forEffects(s);
+    if (s.kind == StmtKind::RangeFor) return rangeForEffects(s);
+    if (s.kind == StmtKind::ForEach) return forEachEffects(s);
+    if (s.kind == StmtKind::Switch) return switchEffects(s);
 
-    if (s.kind == "case") {
+    if (s.kind == StmtKind::Case) {
       for (const auto &label : s.labels) expression(*label);
 
       list(s.body);
@@ -839,12 +846,12 @@ public:
     for (auto *group : a.parallelGroups)
       for (const auto &branch : group->labels) {
         operands.insert(branch.get());
-        if (branch->kind == "name") branchNames.insert(branch->token.text);
+        if (branch->kind == ExprKind::Name) branchNames.insert(branch->token.text);
       }
     // A mutable local used only as a branch operand still has its initializer.
     // Any other use can pass it by reference or replace the callable.
     auto expr = [&](const Expr &e) {
-      if (e.kind == "name" && !operands.count(&e)) otherUses.insert(e.token.text);
+      if (e.kind == ExprKind::Name && !operands.count(&e)) otherUses.insert(e.token.text);
     };
     auto stmt = [](const Stmt &) {};
     for (const auto &s : f.body) visitStatement(*s, expr, stmt);
@@ -856,7 +863,7 @@ public:
     for (const auto &[lambda, info] : a.lambdas) {
       bool needed = false;
       auto group = [&](const Stmt &s) {
-        if (s.kind == "parallel" && !checkedGroups.count(&s)) needed = true;
+        if (s.kind == StmtKind::Parallel && !checkedGroups.count(&s)) needed = true;
       };
       auto ignore = [](const Expr &) {};
       for (const auto &s : lambda->lambda->body) visitStatement(*s, ignore, group);
@@ -934,7 +941,7 @@ class CostModel {
     if (auto found = frame.a.expressionTypes.find(&e); found != frame.a.expressionTypes.end() && arrayValue(found->second))
       return found->second;
 
-    if (e.kind == "name") {
+    if (e.kind == ExprKind::Name) {
       for (const auto &p : frame.f.params)
         if (p.name.text == e.token.text) return p.type;
 
@@ -946,7 +953,7 @@ class CostModel {
       if (auto found = frame.a.staticFields.find(&e); found != frame.a.staticFields.end()) return symbols.statics.at(found->second).type;
     }
 
-    if (e.kind == ".") {
+    if (e.kind == ExprKind::Member) {
       if (auto found = frame.a.staticFields.find(&e); found != frame.a.staticFields.end()) return symbols.statics.at(found->second).type;
 
       const auto base = typeOf(*e.args[0], frame);
@@ -955,7 +962,7 @@ class CostModel {
       if (recordValue(base) && symbols.findField(base.record, e.token.text, member)) return member.field->type;
     }
 
-    if (e.kind == "index") {
+    if (e.kind == ExprKind::Index) {
       const auto base = typeOf(*e.args[0], frame);
 
       if (arrayValue(base)) return *base.element;
@@ -965,7 +972,7 @@ class CostModel {
   }
   // The expected element count of a collection, or a negative number.
   double sizeOf(const Expr &e, const Frame &frame) const {
-    if (e.kind == "name")
+    if (e.kind == ExprKind::Name)
       for (size_t i = 0; i < frame.f.params.size(); ++i)
         if (frame.f.params[i].name.text == e.token.text)
           if (auto given = frame.sizes.find(i); given != frame.sizes.end()) return given->second;
@@ -979,28 +986,28 @@ class CostModel {
     return -1;
   }
   double bound(const Expr &e, const Frame &frame) const {
-    if (e.kind == "int") {
+    if (e.kind == ExprKind::Int) {
       if (auto constant = frame.a.integerConstants.find(&e); constant != frame.a.integerConstants.end()) return std::stod(constant->second);
 
       return std::stod(e.token.text);
     }
 
-    if (e.kind == "." && e.token.text == "Len" && frame.a.collectionMembers.count(&e)) return sizeOf(*e.args[0], frame);
+    if (e.kind == ExprKind::Member && e.token.text == Tok::Len && frame.a.collectionMembers.count(&e)) return sizeOf(*e.args[0], frame);
 
     return -1;
   }
   double iterations(const Stmt &s, const Frame &frame) const {
     double count = -1;
 
-    if (s.kind == "foreach" && !frame.a.enumLoops.count(&s)) count = sizeOf(*s.expr, frame);
-    else if (s.kind == "rangefor") {
+    if (s.kind == StmtKind::ForEach && !frame.a.enumLoops.count(&s)) count = sizeOf(*s.expr, frame);
+    else if (s.kind == StmtKind::RangeFor) {
       const auto low = bound(*s.expr->args[0], frame), high = bound(*s.expr->args[1], frame);
 
       if (low >= 0 && high >= 0) count = std::fabs(high - low) + 1;
-    } else if ((s.kind == "for" || s.kind == "while") && s.expr && s.expr->kind == "binary" && s.expr->args.size() == 2) {
-      const std::string &op = s.expr->token.text;
+    } else if ((s.kind == StmtKind::For || s.kind == StmtKind::While) && s.expr && s.expr->kind == ExprKind::Binary && s.expr->args.size() == 2) {
+      const TokenText &op = s.expr->token.text;
 
-      if (op == "<" || op == "<=" || op == ">" || op == ">=" || op == "!=") {
+      if (op == Tok::Less || op == Tok::LessEqual || op == Tok::Greater || op == Tok::GreaterEqual || op == Tok::NotEqual) {
         count = bound(*s.expr->args[1], frame);
 
         if (count < 0) count = bound(*s.expr->args[0], frame);
@@ -1012,7 +1019,7 @@ class CostModel {
   double expression(const Expr &e, const Frame &frame) {
     double cost = 0;
 
-    if (e.kind == "call") {
+    if (e.kind == ExprKind::Call) {
       if (auto target = frame.a.callTargets.find(&e); target != frame.a.callTargets.end()) cost += call(e, target->second, frame);
     }
 
@@ -1037,7 +1044,7 @@ class CostModel {
     if (s.step) cost += statement(*s.step, frame);
 
     cost += body(s.body, frame) + body(s.alternate, frame);
-    const bool loop = s.kind == "for" || s.kind == "while" || s.kind == "do" || s.kind == "foreach" || s.kind == "rangefor";
+    const bool loop = s.kind == StmtKind::For || s.kind == StmtKind::While || s.kind == StmtKind::Do || s.kind == StmtKind::ForEach || s.kind == StmtKind::RangeFor;
     return loop ? cost * iterations(s, frame) : cost;
   }
   double function(const std::string &name, const Sizes &sizes) {
@@ -1066,7 +1073,7 @@ class CostModel {
     Frame frame{f, a, sizes, {}};
     auto noExpr = [](const Expr &) {};
     auto collect = [&](const Stmt &s) {
-      if (s.kind == "let" || s.kind == "own")
+      if (s.kind == StmtKind::Let || s.kind == StmtKind::Own)
         if (auto type = a.localTypes.find(&s); type != a.localTypes.end()) frame.locals[s.name] = type->second;
     };
 
@@ -1118,13 +1125,13 @@ class Scheduler {
 
     bool found = false;
     auto expr = [&](const Expr &e) {
-      if (e.kind == "lambda" || e.kind == "duckCall" || e.kind == "invoke" || e.kind == "markupTake" ||
-          e.kind == "scopeActive" || analysis.indirectCalls.count(&e))
+      if (e.kind == ExprKind::Lambda || e.kind == ExprKind::DuckCall || e.kind == ExprKind::Invoke || e.kind == ExprKind::MarkupTake ||
+          e.kind == ExprKind::ScopeActive || analysis.indirectCalls.count(&e))
         found = true;
     };
     auto stmt = [&](const Stmt &child) {
-      if (child.kind == "break" || child.kind == "continue" || child.kind == "return" || child.kind == "returnOwner" ||
-          child.kind == "scopeStart" || child.kind == "scopeEnd" || child.kind == "scopedBody" ||
+      if (child.kind == StmtKind::Break || child.kind == StmtKind::Continue || child.kind == StmtKind::Return || child.kind == StmtKind::ReturnOwner ||
+          child.kind == StmtKind::ScopeStart || child.kind == StmtKind::ScopeEnd || child.kind == StmtKind::ScopedBody ||
           analysis.terminatingLoops.count(&child))
         found = true;
     };
@@ -1140,8 +1147,8 @@ class Scheduler {
     return effects;
   }
   bool spawnable(const Stmt &s) {
-    if ((s.kind != "let" && s.kind != "expr") || !s.expr || s.expr->kind != "call") return false;
-    if (s.kind == "let" && !plainValue(analysis.localTypes.at(&s))) return false;
+    if ((s.kind != StmtKind::Let && s.kind != StmtKind::Expr) || !s.expr || s.expr->kind != ExprKind::Call) return false;
+    if (s.kind == StmtKind::Let && !plainValue(analysis.localTypes.at(&s))) return false;
     if (s.expr->receiver && !s.expr->receiver->addressable()) return false;
 
     const auto target = analysis.callTargets.find(s.expr.get());
@@ -1192,11 +1199,11 @@ class Scheduler {
   }
   void nested(const Stmt &s) {
     // A `${ }` body runs strictly in order, on the thread holding its locks.
-    if (s.kind == "ordered") return;
+    if (s.kind == StmtKind::Ordered) return;
     // Only statement lists spawn; for-initializers, steps, and a Switch's
     // macro argument bindings run in place.
     if (!s.body.empty()) list(s.body);
-    if (!s.alternate.empty() && s.kind != "switch") list(s.alternate);
+    if (!s.alternate.empty() && s.kind != StmtKind::Switch) list(s.alternate);
   }
 
 public:
@@ -1270,7 +1277,7 @@ EffectTable summarizeEffects(const Program &program, const std::vector<FunctionA
     bool safe = candidate(f, symbols);
 
     for (const auto &[expr, type] : analyses[i].expressionTypes)
-      safe = safe && taskData(type, symbols) && expr->kind != "duckCall" && expr->kind != "invoke";
+      safe = safe && taskData(type, symbols) && expr->kind != ExprKind::DuckCall && expr->kind != ExprKind::Invoke;
 
     for (const auto &[stmt, type] : analyses[i].localTypes) {
       (void)stmt;

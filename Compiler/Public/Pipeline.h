@@ -120,13 +120,8 @@ struct ConstructionPart {
   bool partial = false;
   std::vector<std::string> overloads;
   std::string automatic;
-  std::string id() const {
-    std::string text;
-
-    for (auto index : path) text += std::to_string(index) + ".";
-
-    return text + (partial ? "partial" : "regular");
-  }
+  // Its position in Symbols::parts(record), which is its bit in a set of parts.
+  std::uint32_t index = 0;
   // How diagnostics name the part, such as -Entity(...) or Gun(...).
   std::string text() const { return (partial ? "-" : "") + record + "(...)"; }
 };
@@ -547,8 +542,10 @@ struct FunctionAnalysis {
   std::set<const Expr *> elementNames;                       // `element.GetName()`.
   std::set<const Stmt *> markupSplices;                      // Content that is markup rather than a value.
   // Reads and writes of variables in a named scope, and their declared types.
+  // The scope's name belongs to the field in the Symbols the function was
+  // analyzed against, which outlive the analysis.
   struct ScopedPlace {
-    std::string scope;
+    const std::string *scope;
     Type type;
   };
   std::map<const Expr *, ScopedPlace> scopedPlaces;
