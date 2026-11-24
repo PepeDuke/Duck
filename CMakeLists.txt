@@ -21,6 +21,7 @@ target_compile_definitions(duck PRIVATE DUCK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_
 find_package(Threads REQUIRED)
 target_link_libraries(duck PRIVATE Threads::Threads)
 target_link_libraries(duckc PRIVATE Threads::Threads)
+target_link_libraries(duck_compiler PUBLIC Threads::Threads)
 if(MSVC)
   target_compile_options(duck_compiler PRIVATE /W4 /permissive-)
   target_compile_options(duck PRIVATE /W4 /permissive- /utf-8)

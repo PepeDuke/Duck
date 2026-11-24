@@ -596,8 +596,20 @@ struct FunctionAnalysis {
   // Locals a lambda captures by reference; they live in a shared heap box.
   std::set<std::string> captured;
 };
-FunctionAnalysis analyzeFunction(const Function &function,
-                                 const Symbols &symbols);
+// What the analyses of one module's functions share. Every method of a
+// container binds the same fields as its outermost scope, so the first one
+// builds that scope and the others reuse it. Safe to use from several threads.
+class AnalysisContext {
+public:
+  AnalysisContext();
+  ~AnalysisContext();
+  AnalysisContext(const AnalysisContext &) = delete;
+  AnalysisContext &operator=(const AnalysisContext &) = delete;
+  struct Shared;
+  std::unique_ptr<Shared> shared;
+};
+FunctionAnalysis analyzeFunction(const Function &function, const Symbols &symbols,
+                                 AnalysisContext *context = nullptr);
 // Evaluate explicit #Call expressions after all bodies have been typed, before
 // scheduling or lowering. Results use the existing typed constant tables.
 void evaluateCompileTimeCalls(const std::vector<const Function *> &functions,

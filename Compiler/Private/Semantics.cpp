@@ -8,6 +8,7 @@
 #include <limits>
 #include <locale>
 #include <algorithm>
+#include <mutex>
 #include <functional>
 #include <optional>
 #include <sstream>
@@ -221,6 +222,8 @@ public:
   size_t count(const std::string &id) const { return ids ? ids->count(id) : 0; }
   std::set<std::string>::const_iterator begin() const { return get().begin(); }
   std::set<std::string>::const_iterator end() const { return get().end(); }
+  bool operator==(const PartSet &other) const { return ids == other.ids || get() == other.get(); }
+  bool operator!=(const PartSet &other) const { return !(*this == other); }
   void erase(const std::string &id) {
     if (!count(id)) return;
 
@@ -263,9 +266,45 @@ struct Scope : std::map<std::string, Local> {
   }
 };
 
+// A scope on the stack, shared by every snapshot of the stack taken while it
+// is unchanged. Branches and loops copy the stack at each split, which only
+// copies these handles; a scope is copied once a path actually changes it
+// (edit), so the receiver's fields and outer locals are shared by all paths.
+class ScopeRef {
+  std::shared_ptr<Scope> scope = std::make_shared<Scope>();
+
+public:
+  const Scope &operator*() const { return *scope; }
+  const Scope *operator->() const { return scope.get(); }
+  // The scope to change, made private to this stack first if it is shared.
+  Scope &edit() {
+    if (scope.use_count() > 1) scope = std::make_shared<Scope>(*scope);
+
+    return *scope;
+  }
+  bool sameAs(const ScopeRef &other) const { return scope == other.scope; }
+  size_t size() const { return scope->size(); }
+  Scope::const_iterator find(const std::string &name) const { return scope->find(name); }
+  Scope::const_iterator begin() const { return scope->begin(); }
+  Scope::const_iterator end() const { return scope->end(); }
+  const Local &at(const std::string &name) const { return scope->at(name); }
+  size_t count(const std::string &name) const { return scope->count(name); }
+};
+
+} // namespace
+
+struct AnalysisContext::Shared {
+  std::mutex lock;
+  std::map<std::string, ScopeRef> fields; // Each container's field scope, by container.
+};
+AnalysisContext::AnalysisContext() : shared(std::make_unique<Shared>()) {}
+AnalysisContext::~AnalysisContext() = default;
+
+namespace {
 class Analyzer {
   const Symbols &symbols;
-  using Scopes = std::vector<Scope>;
+  AnalysisContext::Shared *shared = nullptr; // Field scopes other methods built, if any.
+  using Scopes = std::vector<ScopeRef>;
   Scopes scopes;
   struct LoopFlow {
     std::vector<Scopes> continues;
@@ -336,7 +375,7 @@ class Analyzer {
       fail(token, "type mismatch: expected " + typeName(expected) + ", got " +
                       typeName(actual));
   }
-  Local *findLocal(const Token &token) {
+  const Local *findLocal(const Token &token) {
     for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope) {
       auto local = scope->find(token.text);
 
@@ -348,8 +387,8 @@ class Analyzer {
   }
   // Finds token in the scopes lambda `level` was written in, capturing through
   // any lambdas between, and binds it in `into`, the scopes of that lambda.
-  Local *capture(size_t level, const Token &token, Scopes &into) {
-    Local *outer = nullptr;
+  const Local *capture(size_t level, const Token &token, Scopes &into) {
+    const Local *outer = nullptr;
     auto &enclosing = frames[level].scopes;
 
     for (auto scope = enclosing.rbegin(); scope != enclosing.rend() && !outer; ++scope) {
@@ -408,7 +447,17 @@ class Analyzer {
       analysis.captured.insert(captureKey(outer->declaration));
     }
 
-    return &into[0].insert_or_assign(token.text, inner).first->second;
+    return &into[0].edit().insert_or_assign(token.text, inner).first->second;
+  }
+  // The local a name refers to, to change it: lookup resolves it (capturing
+  // it, or reporting an unknown name), then the scope holding it is edited.
+  Local &editLocal(const Token &token) {
+    lookup(token);
+
+    for (size_t i = scopes.size(); i-- > 0;)
+      if (scopes[i].count(token.text)) return scopes[i].edit().at(token.text);
+
+    throw std::logic_error("assigned local '" + token.text + "' is not in scope");
   }
   // A use of the receiver that names no local: an implicit method or property.
   void useReceiver(const Token &token) {
@@ -418,7 +467,7 @@ class Analyzer {
     self.text = "this";
     findLocal(self);
   }
-  Local &lookup(const Token &token) {
+  const Local &lookup(const Token &token) {
     if (auto local = findLocal(token)) return *local;
 
     // Initializers are analyzed without fields in scope.
@@ -504,11 +553,28 @@ class Analyzer {
   }
   // Merge only bindings visible at the join, ignoring inner scopes captured
   // on a continue edge. A variable must be initialized on every incoming edge.
+  // The facts every path agrees on: initialized only if it is on every path,
+  // a part may be missing if it is on some path, and must be if on all.
   Scopes merge(Scopes visible, const std::vector<Scopes> &incoming) {
     std::vector<const Local *> others(incoming.size());
 
-    for (size_t i = 0; i < visible.size(); ++i)
-      for (auto &entry : visible[i]) {
+    for (size_t i = 0; i < visible.size(); ++i) {
+      // Every path still shares this scope unchanged, so merging changes nothing.
+      if (!incoming.empty() && std::all_of(incoming.begin(), incoming.end(), [&](const Scopes &state) {
+            return state.at(i).sameAs(visible[i]);
+          }))
+        continue;
+
+      // Merged facts for the locals that change, applied after the walk.
+      struct Change {
+        std::string name;
+        bool initialized;
+        PartSet mayMiss, mustMiss;
+        bool parts; // mayMiss and mustMiss are set.
+      };
+      std::vector<Change> changes;
+
+      for (const auto &entry : visible[i]) {
         bool initialized = !incoming.empty();
         bool anyMissing = false;
 
@@ -519,32 +585,46 @@ class Analyzer {
           anyMissing = anyMissing || !others[n]->mayMiss.empty() || !others[n]->mustMiss.empty();
         }
 
-        entry.second.initialized = initialized;
+        Change change{entry.first, initialized, PartSet(), PartSet(), !incoming.empty()};
 
-        if (incoming.empty()) continue;
+        if (anyMissing) {
+          std::set<std::string> may, must = others.front()->mustMiss;
 
-        // Nothing missing on any path: both merged sets are empty.
-        if (!anyMissing) {
-          entry.second.mayMiss = PartSet();
-          entry.second.mustMiss = PartSet();
-          continue;
+          for (const auto *other : others) {
+            may.insert(other->mayMiss.begin(), other->mayMiss.end());
+            std::set<std::string> both;
+
+            for (const auto &id : must)
+              if (other->mustMiss.count(id)) both.insert(id);
+
+            must = both;
+          }
+
+          change.mayMiss = may;
+          change.mustMiss = must;
         }
 
-        std::set<std::string> may, must = others.front()->mustMiss;
+        const auto &local = entry.second;
 
-        for (const auto *other : others) {
-          may.insert(other->mayMiss.begin(), other->mayMiss.end());
-          std::set<std::string> both;
-
-          for (const auto &id : must)
-            if (other->mustMiss.count(id)) both.insert(id);
-
-          must = both;
-        }
-
-        entry.second.mayMiss = may;
-        entry.second.mustMiss = must;
+        if (local.initialized != change.initialized ||
+            (change.parts && (local.mayMiss != change.mayMiss || local.mustMiss != change.mustMiss)))
+          changes.push_back(std::move(change));
       }
+
+      if (changes.empty()) continue;
+
+      auto &scope = visible[i].edit();
+
+      for (auto &change : changes) {
+        auto &local = scope.at(change.name);
+        local.initialized = change.initialized;
+
+        if (change.parts) {
+          local.mayMiss = std::move(change.mayMiss);
+          local.mustMiss = std::move(change.mustMiss);
+        }
+      }
+    }
 
     return visible;
   }
@@ -556,7 +636,7 @@ class Analyzer {
 
     if (local.declaration.text.empty()) local.declaration = token;
 
-    const auto [existing, added] = scopes.back().emplace(token.text, local);
+    const auto [existing, added] = scopes.back().edit().emplace(token.text, local);
 
     if (!added)
       fail(token, "duplicate variable '" + token.text + "'" +
@@ -1125,7 +1205,7 @@ class Analyzer {
     --depth; // The scope index holding the local; findLocal found it.
     // plan() restores the scopes after each trial, so look the local up again
     // after it rather than holding a pointer across it.
-    auto local = [&]() -> Local & { return scopes[depth].at(e.token.text); };
+    auto local = [&]() -> const Local & { return scopes[depth].at(e.token.text); };
     const auto record = local().type.record;
 
     if (const auto *loop = enclosingLoop(); loop && depth < loop->depth)
@@ -1151,8 +1231,9 @@ class Analyzer {
       for (const auto &part : parts)
         if (part.path == call.path && std::find(part.overloads.begin(), part.overloads.end(), call.key) !=
                                           part.overloads.end()) {
-          local().mayMiss.erase(part.id());
-          local().mustMiss.erase(part.id());
+          auto &completed = scopes[depth].edit().at(e.token.text);
+          completed.mayMiss.erase(part.id());
+          completed.mustMiss.erase(part.id());
         }
 
     analysis.completions[&e] = std::move(calls);
@@ -2219,7 +2300,27 @@ class Analyzer {
     return shape.result;
   }
   // Binds every field an instance method can name directly.
+  // The receiver's fields, bound in the scope just opened for them. They are
+  // the same for every method of a container, so with a shared context the
+  // first method builds the scope and the others take it as it is. A build
+  // that fails stores nothing, so each method still reports the error.
   void bindVisibleFields() {
+    if (!shared || scopes.back().size() != 0) return bindFields();
+
+    {
+      std::lock_guard<std::mutex> guard(shared->lock);
+
+      if (const auto found = shared->fields.find(container); found != shared->fields.end()) {
+        scopes.back() = found->second;
+        return;
+      }
+    }
+
+    bindFields();
+    std::lock_guard<std::mutex> guard(shared->lock);
+    shared->fields.emplace(container, scopes.back());
+  }
+  void bindFields() {
     for (const auto &path : symbols.visibleFields(container)) {
       Local field{path.field->scope.empty() ? path.field->type : path.field->scopedType, false, true, true};
       field.memberLambda = path.field->memberLambda;
@@ -4613,7 +4714,7 @@ class Analyzer {
           field != scopes.front().end() && field->second.receiver && field->second.type.role == Type::Owner)
         fail(s.token, "'" + s.name + "' is an owning field; write this." + s.name + " :: ... to move into it");
 
-    auto &bound = scopes.back().at(name.text);
+    auto &bound = scopes.back().edit().at(name.text);
     bound.mayMiss = bound.mustMiss = missing;
     bound.lent = lent;
     bound.declaration = name;
@@ -4750,7 +4851,7 @@ class Analyzer {
 
     if (s.target->kind == "name" && !analysis.staticFields.count(s.target.get()) &&
         !analysis.properties.count(s.target.get()))
-      lookup(s.target->token).initialized = true;
+      editLocal(s.target->token).initialized = true;
 
     return false;
   }
@@ -4850,6 +4951,7 @@ class Analyzer {
 public:
   Analyzer(const Symbols &symbols, Type result)
       : symbols(symbols), result(result) {}
+  void shareFields(AnalysisContext *context) { shared = context ? context->shared.get() : nullptr; }
   // What the function's returns can hand back, as far as is known so far: a
   // body that does not analyze yet is reported by its real analysis later.
   std::pair<bool, bool> probeReturns(const Function &function) {
@@ -4979,9 +5081,10 @@ public:
   }
 };
 } // namespace
-FunctionAnalysis analyzeFunction(const Function &function,
-                                 const Symbols &symbols) {
-  return Analyzer(symbols, function.result).run(function);
+FunctionAnalysis analyzeFunction(const Function &function, const Symbols &symbols, AnalysisContext *context) {
+  Analyzer analyzer(symbols, function.result);
+  analyzer.shareFields(context);
+  return analyzer.run(function);
 }
 void resolveProperties(Symbols &symbols, const std::vector<const Program *> &programs,
                        const std::vector<Symbols *> &tables) {

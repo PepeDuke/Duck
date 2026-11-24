@@ -1,5 +1,7 @@
 #include "Pipeline.h"
 #include "Timing.h"
+#include "Workers.h"
+#include <exception>
 #include <algorithm>
 
 namespace duck {
@@ -450,23 +452,39 @@ std::string compileModule(const Program &program, const Program &imports,
   // Signatures are settled and each body is checked on its own, so an error
   // in one function cannot cause a false one in another: report them all.
   std::vector<CompileError> errors;
-  auto analyze = [&](const Function &function) {
-    try {
-      analyses.push_back(analyzeFunction(function, symbols));
-    } catch (const CompileError &error) {
-      errors.push_back(error);
-    }
-  };
-
-  for (const auto &function : program) analyze(function);
-
   std::vector<const Function *> evaluatedFunctions;
 
   for (const auto &function : program) evaluatedFunctions.push_back(&function);
 
-  for (const auto &function : generated) {
-    evaluatedFunctions.push_back(&function);
-    analyze(function);
+  for (const auto &function : generated) evaluatedFunctions.push_back(&function);
+
+  // The workers analyze functions in any order; results and failures are
+  // kept by position and gathered in program order, as one thread would.
+  {
+    AnalysisContext context;
+    std::vector<std::optional<FunctionAnalysis>> results(evaluatedFunctions.size());
+    std::vector<std::exception_ptr> failures(evaluatedFunctions.size());
+
+    parallelFor(evaluatedFunctions.size(), [&](size_t i) {
+      try {
+        results[i] = analyzeFunction(*evaluatedFunctions[i], symbols, &context);
+      } catch (...) {
+        failures[i] = std::current_exception();
+      }
+    });
+
+    for (size_t i = 0; i < evaluatedFunctions.size(); ++i) {
+      if (!failures[i]) {
+        analyses.push_back(std::move(*results[i]));
+        continue;
+      }
+
+      try {
+        std::rethrow_exception(failures[i]);
+      } catch (const CompileError &error) {
+        errors.push_back(error);
+      }
+    }
   }
 
   if (!errors.empty()) throw CompileErrors(std::move(errors));
@@ -502,26 +520,38 @@ std::string compileModule(const Program &program, const Program &imports,
     if (!signature.nativeSymbol.empty()) nativeSymbols.insert(signature.nativeSymbol);
   }
 
-  std::vector<FunctionIR> fragments;
+  // Each function lowers on its own, so the workers take them in any order;
+  // fragments stay in program order, then the generated initializers.
+  std::vector<FunctionIR> fragments(evaluatedFunctions.size());
+  std::vector<double> seconds(evaluatedFunctions.size());
+  std::vector<std::exception_ptr> loweringFailures(evaluatedFunctions.size());
 
-  std::vector<std::pair<double, const Function *>> lowering;
-
-  for (size_t i = 0; i < program.size(); ++i) {
+  parallelFor(evaluatedFunctions.size(), [&](size_t i) {
     const auto start = std::chrono::steady_clock::now();
-    fragments.push_back(lowerFunction(program[i], symbols, analyses[i]));
-    if (timingEnabled())
-      lowering.push_back({std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(), &program[i]});
+
+    try {
+      fragments[i] = lowerFunction(*evaluatedFunctions[i], symbols, analyses[i]);
+    } catch (...) {
+      loweringFailures[i] = std::current_exception();
+    }
+
+    seconds[i] = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  });
+
+  for (const auto &failure : loweringFailures)
+    if (failure) std::rethrow_exception(failure);
+
+  // The program's functions that took longest to lower, since that phase usually dominates.
+  if (timingEnabled()) {
+    std::vector<std::pair<double, const Function *>> lowering;
+
+    for (size_t i = 0; i < program.size(); ++i) lowering.push_back({seconds[i], &program[i]});
+
+    std::sort(lowering.begin(), lowering.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+    for (size_t i = 0; i < lowering.size() && i < 10; ++i)
+      std::fprintf(stderr, "duckc:   lower %-40s %8.3fs  %s:%d\n", lowering[i].second->name.text.c_str(), lowering[i].first,
+                   sourcePath(lowering[i].second->name.source).c_str(), lowering[i].second->name.line);
   }
-
-  // The functions that took longest to lower, since that phase usually dominates.
-  std::sort(lowering.begin(), lowering.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
-  for (size_t i = 0; i < lowering.size() && i < 10; ++i)
-    std::fprintf(stderr, "duckc:   lower %-40s %8.3fs  %s:%d\n", lowering[i].second->name.text.c_str(), lowering[i].first,
-                 sourcePath(lowering[i].second->name.source).c_str(), lowering[i].second->name.line);
-
-  // Generated initializers run sequentially; they are never task candidates.
-  for (size_t i = 0; i < generated.size(); ++i)
-    fragments.push_back(lowerFunction(generated[i], symbols, analyses[program.size() + i]));
 
   phase("lower functions");
   // A heap cleanup can release a func field in a function that never touches one.
