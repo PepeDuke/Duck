@@ -681,6 +681,8 @@ struct Expr {
     return kind == ExprKind::Name || kind == ExprKind::Member || kind == ExprKind::Index || (kind == ExprKind::Unary && token.text == Tok::Star);
   }
 };
+
+// statment
 struct Stmt {
   Token token;
   StmtKind kind = StmtKind::None;
