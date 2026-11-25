@@ -618,15 +618,17 @@ static void recordNonescapingParameters(Symbols &symbols, const Function &f) {
   }
 }
 static void declareStatics(Symbols &symbols, const Program &program) {
+  std::string prefix;
+
   for (const auto &field : program.statics) {
     const std::string &name = field.name.text;
-    // Instance fields and methods are a separate namespace from statics.
-    bool clash = symbols.count(name) || symbols.records.count(name);
-
-    for (const auto &[function, signature] : symbols) {
-      (void)signature;
-      clash = clash || function.rfind(name + ".", 0) == 0;
-    }
+    // Instance fields and methods are a separate namespace from statics. A
+    // function under the name, `name.Member`, also clashes: the functions are
+    // sorted by name, so those start at the first one not before `name.`.
+    prefix.assign(name).push_back('.');
+    const auto under = symbols.lower_bound(prefix);
+    const bool clash = symbols.count(name) || symbols.records.count(name) ||
+                       (under != symbols.end() && under->first.compare(0, prefix.size(), prefix) == 0);
 
     StaticInfo info{field.name, field.type, field.constant, field.protectedAccess, field.initializer.get()};
     info.order = symbols.statics.size();

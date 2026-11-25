@@ -5761,6 +5761,35 @@ FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
 // The definitions of the native vector and matrix types a module mentions.
 // Matrices go first because defining one mentions its column vector.
 std::string emitNativeMathTypes(const Symbols &symbols, const std::string &module) {
+  // Which native math types the module mentions after "%struct." and after
+  // "@duck$default.", anywhere. The module can be tens of megabytes, so it is
+  // read once per marker, checking each mention against the types, instead
+  // of once per type and marker.
+  std::vector<const std::string *> names;
+  bool initial[256] = {};
+
+  for (const auto &[name, record] : symbols.records)
+    if (nativeMath(name)) {
+      names.push_back(&name);
+      initial[static_cast<unsigned char>(name[0])] = true;
+    }
+
+  auto mentioned = [&](const std::string &marker) {
+    std::set<const std::string *> found;
+
+    for (size_t at = module.find(marker); at != std::string::npos && found.size() < names.size();
+         at = module.find(marker, at + 1)) {
+      const size_t start = at + marker.size();
+
+      if (start >= module.size() || !initial[static_cast<unsigned char>(module[start])]) continue;
+
+      for (const auto *name : names)
+        if (module.compare(start, name->size(), *name) == 0) found.insert(name);
+    }
+
+    return found;
+  };
+  const auto types = mentioned("%struct."), defaults = mentioned("@duck$default.");
   std::string ir;
 
   for (const bool matrices : {true, false})
@@ -5769,7 +5798,7 @@ std::string emitNativeMathTypes(const Symbols &symbols, const std::string &modul
       const auto symbol = "%struct." + name;
 
       if (!shape || shape.matrix() != matrices) continue;
-      if (module.find(symbol) == std::string::npos && ir.find(symbol) == std::string::npos) continue;
+      if (!types.count(&name) && ir.find(symbol) == std::string::npos) continue;
 
       ir += symbol + " = type { ";
 
@@ -5777,7 +5806,7 @@ std::string emitNativeMathTypes(const Symbols &symbols, const std::string &modul
 
       ir += " }\n";
 
-      if (module.find("@duck$default." + name) != std::string::npos)
+      if (defaults.count(&name))
         ir += "@duck$default." + name + " = private unnamed_addr constant " + symbol + " " + recordConstant(symbols, name) + "\n";
     }
 
