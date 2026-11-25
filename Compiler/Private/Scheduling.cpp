@@ -67,6 +67,10 @@ bool candidate(const Function &f, const Symbols &symbols) {
 
 // Where the statements of one walk are recorded, for whichever pass wants them.
 struct Recording {
+  // Whether to record statements, calls and declared; off when a pass wants
+  // only the `${ }` lock plans, as copying every statement's effects is most
+  // of a walk's cost.
+  bool effects = true;
   std::map<const Stmt *, EffectSet> statements;
   std::map<const Expr *, EffectSet> calls;      // A call's effects, without evaluating its arguments.
   std::map<const Stmt *, Resource> declared;    // The local a declaration creates.
@@ -439,7 +443,7 @@ class EffectWalker {
     }
 
     bindArguments(e, signature, signature.method ? 1 : 0, 0, e.args.size(), bound);
-    if (!recording) return apply(callee->second, bound, current);
+    if (!recording || !recording->effects) return apply(callee->second, bound, current);
 
     auto mapped = apply(callee->second, bound);
     recording->calls[&e] = mapped;
@@ -614,7 +618,7 @@ class EffectWalker {
     // Effects only ever add to `current` (a `${ }` block and a lambda keep
     // their own), so without a recording the statement can add to it directly
     // instead of collecting into a fresh set that is merged back level by level.
-    if (!recording) return effects(s);
+    if (!recording || !recording->effects) return effects(s);
 
     auto outer = std::move(current);
     current = {};
@@ -650,7 +654,7 @@ class EffectWalker {
     if (callable) callableLocals.emplace(local.root, std::move(*callable));
     current.writes.insert(local);
 
-    if (recording) recording->declared[&s] = local;
+    if (recording && recording->effects) recording->declared[&s] = local;
   }
   void forEffects(const Stmt &s) {
     scopes.emplace_back();
@@ -1476,6 +1480,18 @@ EffectTable summarizeEffects(const Program &program, const std::vector<FunctionA
   return table;
 }
 
+namespace {
+// Whether a `${ }` block appears anywhere in a function, lambda bodies included.
+struct OrderedFinder {
+  bool found = false;
+  void operator()(const Stmt &s) { found = found || s.kind == StmtKind::Ordered; }
+  void operator()(const Expr &e) {
+    if (e.lambda)
+      for (const auto &s : e.lambda->body) visitStatement(*s, *this, *this);
+  }
+};
+} // namespace
+
 void planOrderedBlocks(const Function &function, const EffectTable &effects, const Symbols &symbols,
                        FunctionAnalysis &analysis, bool entry, bool parallel, const SchedulingIndex *shared) {
   if (!function.nativeSymbol.empty()) return;
@@ -1484,14 +1500,24 @@ void planOrderedBlocks(const Function &function, const EffectTable &effects, con
 
   if (!shared) shared = &own.emplace(indexScheduling(Program{}, symbols));
 
-  Recording recording;
-  EffectWalker(function, analysis, symbols, effects, !entry, shared->overridden, &recording).run();
+  // The walks only plan the locks of `${ }` blocks, so a function without one
+  // has none to plan.
+  OrderedFinder finder;
 
-  // A task body captures nothing, so its `${ }` blocks can name their locks
-  // like any function's, rather than taking the scheduler-wide exclusion
-  // that other lambdas' blocks take.
-  for (const auto *task : analysis.detached)
-    EffectWalker(*task->args[0]->lambda, analysis, symbols, effects, !entry, shared->overridden, &recording).run();
+  for (const auto &s : function.body) visitStatement(*s, finder, finder);
+
+  Recording recording;
+  recording.effects = false; // Only the lock plans are kept.
+
+  if (finder.found) {
+    EffectWalker(function, analysis, symbols, effects, !entry, shared->overridden, &recording).run();
+
+    // A task body captures nothing, so its `${ }` blocks can name their locks
+    // like any function's, rather than taking the scheduler-wide exclusion
+    // that other lambdas' blocks take.
+    for (const auto *task : analysis.detached)
+      EffectWalker(*task->args[0]->lambda, analysis, symbols, effects, !entry, shared->overridden, &recording).run();
+  }
 
   analysis.orderedLocks = std::move(recording.ordered);
   if (!analysis.parallelGroups.empty()) {
