@@ -626,14 +626,44 @@ void evaluateCompileTimeCalls(const std::vector<const Function *> &functions,
 // parameter (the receiver is parameter 0), or a local. `path` holds field
 // indices below the root, so two resources overlap when they share a root and
 // one path is a prefix of the other. Array elements collapse to their array.
+// The name a resource starts from: a static's qualified name, a local's unique
+// id, or empty for a parameter. Effect sets copy resources constantly, so a
+// root points at a string that outlives them instead of holding its own: a
+// static's key in Symbols::statics, or a local's id kept by localResourceRoot.
+// Roots compare by their text, so sets of resources keep the order of the
+// names, which decides the order of locks and of reported conflicts.
+class ResourceRoot {
+  const std::string *text_ = nullptr; // Null is the empty name.
+
+  static const std::string &empty() {
+    static const std::string none;
+    return none;
+  }
+
+public:
+  ResourceRoot() = default;
+  // `stable` must outlive every resource named by it.
+  explicit ResourceRoot(const std::string &stable) : text_(&stable) {}
+  const std::string &str() const { return text_ ? *text_ : empty(); }
+  operator const std::string &() const { return str(); }
+  int compare(const ResourceRoot &o) const { return text_ == o.text_ ? 0 : str().compare(o.str()); }
+  friend bool operator==(const ResourceRoot &a, const ResourceRoot &b) { return a.compare(b) == 0; }
+  friend bool operator!=(const ResourceRoot &a, const ResourceRoot &b) { return a.compare(b) != 0; }
+};
+// The root naming a local by its unique id. Ids are kept for the life of the
+// process, once each; this takes a lock, so call it once per declaration.
+ResourceRoot localResourceRoot(std::string id);
 struct Resource {
   enum Kind { Static, Parameter, Local };
   Kind kind = Local;
-  std::string root;     // The static's qualified name, or the local's unique id.
+  ResourceRoot root; // The static's qualified name, or the local's unique id.
   size_t parameter = 0;
   std::vector<size_t> path;
   bool operator<(const Resource &o) const {
-    return std::tie(kind, root, parameter, path) < std::tie(o.kind, o.root, o.parameter, o.path);
+    if (kind != o.kind) return kind < o.kind;
+    if (const int byRoot = root.compare(o.root)) return byRoot < 0;
+    if (parameter != o.parameter) return parameter < o.parameter;
+    return path < o.path;
   }
   bool overlaps(const Resource &o) const {
     if (kind != o.kind || root != o.root || parameter != o.parameter) return false;
@@ -655,6 +685,17 @@ struct EffectSet {
     reads.insert(o.reads.begin(), o.reads.end());
     writes.insert(o.writes.begin(), o.writes.end());
     bareStatics.insert(o.bareStatics.begin(), o.bareStatics.end());
+    unknown |= o.unknown;
+    external |= o.external;
+    locks |= o.locks;
+    exclusive |= o.exclusive;
+  }
+  // The same union, moving o's entries over instead of copying them; o keeps
+  // only the ones this set already had.
+  void merge(EffectSet &&o) {
+    reads.merge(o.reads);
+    writes.merge(o.writes);
+    bareStatics.merge(o.bareStatics);
     unknown |= o.unknown;
     external |= o.external;
     locks |= o.locks;

@@ -1,8 +1,20 @@
 #include "Pipeline.h"
+#include "Timing.h"
 #include <cmath>
+#include <mutex>
 #include <optional>
+#include <unordered_set>
 
 namespace duck {
+ResourceRoot localResourceRoot(std::string id) {
+  // Never shrinks: a set's elements stay put as it grows, and a walk numbers
+  // its locals from 0, so the same few ids recur across functions.
+  static std::mutex lock;
+  static std::unordered_set<std::string> ids;
+  std::lock_guard<std::mutex> guard(lock);
+  return ResourceRoot(*ids.insert(std::move(id)).first);
+}
+
 namespace {
 // A task may only exchange plain values with its caller. Text, pointers, and
 // containers holding them would share storage that is not thread safe.
@@ -106,7 +118,7 @@ class EffectWalker {
   }
   Resource declare(const Token &token, const Type &type) {
     Resource resource;
-    resource.root = token.text + "#" + std::to_string(counter++);
+    resource.root = localResourceRoot(token.text + "#" + std::to_string(counter++));
     locals[resource.root] = {token, type};
 
     for (auto *block : activeBlocks) block->insert(resource.root);
@@ -134,13 +146,17 @@ class EffectWalker {
     if (a.scopedPlaces.count(&e) || a.properties.count(&e)) return std::nullopt;
 
     if (auto found = a.staticFields.find(&e); found != a.staticFields.end()) {
-      const auto &info = symbols.statics.at(found->second);
+      const auto stored = symbols.statics.find(found->second);
+
+      if (stored == symbols.statics.end()) throw std::out_of_range("unknown static '" + found->second + "'");
+
+      const auto &info = stored->second;
 
       if (!info.scope.empty()) return std::nullopt;
 
       Place result;
       result.resource.kind = Resource::Static;
-      result.resource.root = found->second;
+      result.resource.root = ResourceRoot(stored->first); // Symbols outlives every pass that holds resources.
       result.type = info.type;
       return result;
     }
@@ -222,10 +238,17 @@ class EffectWalker {
   // Rewrites a callee's parameter-relative effects in the caller's terms.
   EffectSet apply(const EffectSummary &callee, const std::map<size_t, std::optional<Place>> &bound) {
     EffectSet result;
-    result.unknown = callee.unknown;
-    result.external = callee.external;
-    result.locks = callee.locks;
-    result.exclusive = callee.exclusive;
+    apply(callee, bound, result);
+    return result;
+  }
+  // The same, adding them to `result`. Adding straight to the caller's effects
+  // copies only the resources it does not have yet, where a separate set would
+  // copy every one the callee touches.
+  void apply(const EffectSummary &callee, const std::map<size_t, std::optional<Place>> &bound, EffectSet &result) {
+    result.unknown |= callee.unknown;
+    result.external |= callee.external;
+    result.locks |= callee.locks;
+    result.exclusive |= callee.exclusive;
     auto map = [&](const std::set<Resource> &from, std::set<Resource> &into) {
       for (const auto &resource : from) {
         if (resource.kind != Resource::Parameter) {
@@ -251,7 +274,7 @@ class EffectWalker {
     };
     map(callee.reads, result.reads);
     map(callee.writes, result.writes);
-    result.bareStatics = callee.bareStatics;
+    result.bareStatics.insert(callee.bareStatics.begin(), callee.bareStatics.end());
 
     // A static passed by reference is touched wherever the callee touches the
     // parameter. Parameters the callee only reaches inside `${ }` are not
@@ -270,8 +293,6 @@ class EffectWalker {
 
         if (argument && argument->resource.kind == Resource::Local) lockedLocals.insert(argument->resource.root);
       }
-
-    return result;
   }
   // Reference arguments are bound to the caller's storage; the rest are read.
   void bindArguments(const Expr &e, const Signature &signature, size_t offset, size_t first, size_t count,
@@ -336,7 +357,7 @@ class EffectWalker {
 
         std::map<size_t, std::optional<Place>> bound;
         bindArguments(e, symbols.at(part.key), 1, part.first, part.count, bound);
-        current.merge(apply(callee->second, bound));
+        apply(callee->second, bound, current);
       }
 
       return;
@@ -386,7 +407,7 @@ class EffectWalker {
     std::map<size_t, std::optional<Place>> bound;
 
     if (op == Tok::Exec && !e.receiver) { // Its path names the script; the script takes no arguments.
-      current.merge(apply(callee->second, bound));
+      apply(callee->second, bound, current);
       return;
     }
 
@@ -418,11 +439,11 @@ class EffectWalker {
     }
 
     bindArguments(e, signature, signature.method ? 1 : 0, 0, e.args.size(), bound);
-    const auto mapped = apply(callee->second, bound);
+    if (!recording) return apply(callee->second, bound, current);
 
-    if (recording) recording->calls[&e] = mapped;
-
-    current.merge(mapped);
+    auto mapped = apply(callee->second, bound);
+    recording->calls[&e] = mapped;
+    current.merge(std::move(mapped));
   }
   void expression(const Expr &e) {
     if (a.threadQueries.count(&e)) {
@@ -586,17 +607,20 @@ class EffectWalker {
 
     if (recording) recording->ordered[&s] = std::move(locks);
 
-    outer.merge(current);
+    outer.merge(std::move(current));
     current = std::move(outer);
   }
   void statement(const Stmt &s) {
+    // Effects only ever add to `current` (a `${ }` block and a lambda keep
+    // their own), so without a recording the statement can add to it directly
+    // instead of collecting into a fresh set that is merged back level by level.
+    if (!recording) return effects(s);
+
     auto outer = std::move(current);
     current = {};
     effects(s);
-
-    if (recording) recording->statements[&s] = current;
-
-    outer.merge(current);
+    recording->statements[&s] = current;
+    outer.merge(std::move(current));
     current = std::move(outer);
   }
   void letEffects(const Stmt &s) {
@@ -1322,23 +1346,78 @@ EffectTable summarizeEffects(const Program &program, const std::vector<FunctionA
 
   // Least fixpoint: effects only grow, so recursive groups settle on their
   // union. A function is walked again only when a summary it read has grown,
-  // instead of rewalking the whole module until a pass changes nothing.
-  // Passes go in name order like a full sweep, but skip functions whose inputs
-  // are unchanged. A reader later in the current pass sees the new summary anyway.
-  std::map<std::string, std::set<std::string>> readers; // Summary -> functions that read it.
-  std::set<std::string> pending;
+  // instead of rewalking the whole module until a pass changes nothing. The
+  // least fixpoint is the same in any order, so passes visit callees before
+  // their callers (a post-order of the calls the analysis resolved): most
+  // functions then read finished summaries and are walked once. A pass skips
+  // functions whose inputs are unchanged; a reader later in the current pass
+  // sees the new summary anyway.
+  std::vector<size_t> order, rank(program.size()); // Walk position -> function, and back.
+  {
+    std::vector<std::vector<size_t>> callees(program.size());
 
-  for (const auto &[name, i] : index) {
-    (void)i;
-    pending.insert(name);
+    for (const auto &[name, i] : index) {
+      (void)name;
+      std::set<std::string> targets;
+      const auto &analysis = analyses[i];
+
+      for (const auto &[call, target] : analysis.callTargets) targets.insert(target);
+      for (const auto &[call, value] : analysis.functionValues) targets.insert(value);
+      for (const auto &[call, parts] : analysis.constructions)
+        for (const auto &part : parts) targets.insert(part.key);
+
+      for (const auto &target : targets)
+        if (const auto callee = index.find(target); callee != index.end()) callees[i].push_back(callee->second);
+    }
+
+    // Iterative depth-first search from each function in name order; a
+    // function is placed after everything it reaches, except its own cycle.
+    std::vector<char> seen(program.size(), 0);
+
+    for (const auto &[name, root] : index) {
+      (void)name;
+
+      if (seen[root]) continue;
+
+      seen[root] = 1;
+      std::vector<std::pair<size_t, size_t>> stack{{root, 0}}; // Function, next callee to try.
+
+      while (!stack.empty()) {
+        const auto node = stack.back().first;
+
+        if (stack.back().second < callees[node].size()) {
+          const auto callee = callees[node][stack.back().second++];
+
+          if (!seen[callee]) {
+            seen[callee] = 1;
+            stack.push_back({callee, 0});
+          }
+
+          continue;
+        }
+
+        rank[node] = order.size();
+        order.push_back(node);
+        stack.pop_back();
+      }
+    }
   }
 
+  std::map<std::string, std::set<std::string>> readers; // Summary -> functions that read it.
+  std::set<size_t> pending; // By walk position.
+
+  for (size_t position = 0; position < order.size(); ++position) pending.insert(pending.end(), position);
+
+  size_t walks = 0, passes = 0;
+
   while (!pending.empty()) {
-    std::set<std::string> next;
+    std::set<size_t> next;
+    ++passes;
 
     for (auto current = pending.begin(); current != pending.end(); ++current) {
-      const auto &name = *current;
-      const auto i = index.at(name);
+      const auto i = order[*current];
+      const auto &name = program[i].name.text.str();
+      ++walks;
       std::set<std::string> consulted;
       EffectWalker walker(program[i], analyses[i], symbols, table, !entry, shared->overridden, nullptr);
       walker.recordReads(&consulted);
@@ -1362,11 +1441,15 @@ EffectTable summarizeEffects(const Program &program, const std::vector<FunctionA
 
       if (const auto affected = readers.find(name); affected != readers.end())
         for (const auto &reader : affected->second)
-          if (reader <= name || !pending.count(reader)) next.insert(reader);
+          if (const auto position = rank[index.at(reader)]; position <= *current || !pending.count(position))
+            next.insert(position);
     }
 
     pending = std::move(next);
   }
+
+  if (timingEnabled())
+    std::fprintf(stderr, "duckc:   effects %zu walks of %zu functions in %zu passes\n", walks, index.size(), passes);
 
   // Greatest fixpoint: one unsafe callee taints everything that reaches it.
   for (bool changed = true; changed;) {
