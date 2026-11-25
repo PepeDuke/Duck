@@ -468,7 +468,6 @@ std::string compileModule(const Program &program, const Program &imports,
   phase("symbols");
   const auto generated = generateInitializers(symbols, declarations);
   phase("generate initializers");
-  std::vector<FunctionAnalysis> analyses;
   // Signatures are settled and each body is checked on its own, so an error
   // in one function cannot cause a false one in another: report them all.
   std::vector<CompileError> errors;
@@ -478,26 +477,50 @@ std::string compileModule(const Program &program, const Program &imports,
 
   for (const auto &function : generated) evaluatedFunctions.push_back(&function);
 
-  // The workers analyze functions in any order; results and failures are
-  // kept by position and gathered in program order, as one thread would.
+  // The workers analyze functions in any order, each into its own slot, so the
+  // results are in program order, as one thread would leave them, without
+  // being moved again: a FunctionAnalysis holds dozens of maps and sets, and
+  // moving one of those allocates under MSVC. Failures are kept by position
+  // and reported in program order.
+  std::vector<FunctionAnalysis> analyses(evaluatedFunctions.size());
   {
     AnalysisContext context;
-    std::vector<std::optional<FunctionAnalysis>> results(evaluatedFunctions.size());
     std::vector<std::exception_ptr> failures(evaluatedFunctions.size());
+    std::vector<double> seconds(evaluatedFunctions.size());
 
     parallelFor(evaluatedFunctions.size(), [&](size_t i) {
+      const auto start = std::chrono::steady_clock::now();
+
       try {
-        results[i] = analyzeFunction(*evaluatedFunctions[i], symbols, &context);
+        analyses[i] = analyzeFunction(*evaluatedFunctions[i], symbols, &context);
       } catch (...) {
         failures[i] = std::current_exception();
       }
+
+      seconds[i] = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     });
 
-    for (size_t i = 0; i < evaluatedFunctions.size(); ++i) {
-      if (!failures[i]) {
-        analyses.push_back(std::move(*results[i]));
-        continue;
+    // The work done across all workers, and the functions that took longest:
+    // one long function can hold the phase up after the others finish.
+    if (timingEnabled()) {
+      std::vector<std::pair<double, const Function *>> slowest;
+      double total = 0;
+
+      for (size_t i = 0; i < evaluatedFunctions.size(); ++i) {
+        total += seconds[i];
+        slowest.push_back({seconds[i], evaluatedFunctions[i]});
       }
+
+      std::sort(slowest.begin(), slowest.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+      std::fprintf(stderr, "duckc:   analyze %zu functions, %.3fs of work on %zu workers\n", slowest.size(), total, Workers);
+
+      for (size_t i = 0; i < slowest.size() && i < 10; ++i)
+        std::fprintf(stderr, "duckc:   analyze %-38s %8.3fs  %s:%d\n", slowest[i].second->name.text.c_str(), slowest[i].first,
+                     sourcePath(slowest[i].second->name.source).c_str(), slowest[i].second->name.line);
+    }
+
+    for (size_t i = 0; i < evaluatedFunctions.size(); ++i) {
+      if (!failures[i]) continue;
 
       try {
         std::rethrow_exception(failures[i]);
