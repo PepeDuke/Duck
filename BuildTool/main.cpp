@@ -493,6 +493,7 @@ class TestBuilder {
     WorkDirectory work;
     ModuleKeys keys;
     Strings clangIdentity;
+    fs::path icon; // The duck icon resource beside the build tool, linked into each runner.
 
     struct Object {
         fs::path path;
@@ -556,10 +557,17 @@ class TestBuilder {
     }
 
 public:
-    TestBuilder(const Project& p, std::string compilerPath, std::string clangPath, const Options& options, const Plan& selected)
+    TestBuilder(const Project& p, std::string compilerPath, std::string clangPath, const Options& options, const Plan& selected,
+                const fs::path& bin)
         : project(p), compiler(std::move(compilerPath)), clang(std::move(clangPath)),
           optimize(options.profile == "debug" ? "-O0" : "-O2"), destination(p.buildDir / options.profile / "tests"),
-          work(destination), keys(moduleKeys(p, selected, compiler)), clangIdentity(toolIdentity(clang)) {}
+          work(destination), keys(moduleKeys(p, selected, compiler)), clangIdentity(toolIdentity(clang)) {
+#ifdef _WIN32
+        if (std::error_code error; fs::is_regular_file(bin / "duck.res", error)) icon = bin / "duck.res";
+#else
+        (void)bin;
+#endif
+    }
 
     struct Result {
         fs::path executable;
@@ -588,6 +596,7 @@ public:
 #ifdef _WIN32
         output += ".exe";
 #endif
+        if (!icon.empty()) link.push_back(icon.u8string());
         link.insert(link.end(), flags.begin(), flags.end());
         link.insert(link.end(), {"-o", output.u8string()});
         run(link, false);
@@ -748,7 +757,7 @@ static int test(const Options& options, const fs::path& bin) {
     const auto selected = project.plan(options.module);
     auto compiler = project.tool("compiler", options.compiler, bin);
     auto clang = project.tool("clang", options.clang, bin);
-    TestBuilder builder(project, compiler, clang, options, selected);
+    TestBuilder builder(project, compiler, clang, options, selected, bin);
     int passed = 0, failed = 0, unmatched = 0;
     bool compared = false;
     if (options.compareSchedules)

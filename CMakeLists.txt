@@ -55,6 +55,13 @@ if(WIN32)
   enable_language(RC)
   target_sources(duckc PRIVATE Branding/duckc.rc)
   target_include_directories(duckc PRIVATE Branding)
+  target_sources(duck PRIVATE Branding/duckc.rc)
+  target_include_directories(duck PRIVATE Branding)
+  # duck test links this resource into each test runner it builds.
+  add_custom_command(TARGET duck POST_BUILD
+    COMMAND "${CMAKE_RC_COMPILER}" /nologo /I "${CMAKE_CURRENT_SOURCE_DIR}/Branding"
+      /fo "$<TARGET_FILE_DIR:duck>/duck.res" "${CMAKE_CURRENT_SOURCE_DIR}/Branding/duckc.rc"
+    VERBATIM)
   find_program(DUCK_CLANG NAMES clang HINTS "C:/Program Files/LLVM/bin" REQUIRED)
   add_custom_command(OUTPUT "${net_gen}/Net.obj" "${net_gen}/Net.dki"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${net_gen}"
