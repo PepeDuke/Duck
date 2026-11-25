@@ -16,9 +16,9 @@ int main(int argc, char **argv) {
         auto tokens = duck::preprocess(duck::lex(source.str(), duck::registerSource(argv[1])));
         std::set<std::string> names;
         duck::collectContainerNames(tokens, names);
-        auto unit = duck::parse(tokens, names, {});
+        auto unit = duck::parseKeeping(tokens, names, {});
         auto ir = duck::compileModule(unit, {}, false, true, false, web ? duck::Target::Wasm64 : duck::Target::Native);
-        auto interface = duck::writeInterface("", {duck::interfaceTokens(tokens, unit)});
+        auto interface = duck::writeInterface("", {duck::interfaceTokens(std::move(tokens), unit)});
         std::ofstream module(argv[2], std::ios::binary), header(argv[3], std::ios::binary);
         return !(module << ir).flush() || !(header << interface).flush();
     } catch (const std::exception &e) {

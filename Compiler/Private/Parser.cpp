@@ -12,6 +12,13 @@ namespace {
 class Parser {
   std::vector<Token> tokens;
   size_t pos = 0;
+  // Each macro expansion, in order: where its output starts, how many tokens
+  // it is, and the call it replaced, so the tokens can be given back as written.
+  struct Splice {
+    size_t first, count;
+    std::vector<Token> replaced;
+  };
+  std::vector<Splice> splices;
   const std::set<std::string> &containerNames;
   const MacroTable &macros;
   // Names declared by macro output, innermost lexical scope last, each with
@@ -295,10 +302,26 @@ class Parser {
       out.push_back(synthetic(origin, "\n"));
     }
   }
+  // Puts `with` in place of the `count` tokens at `first` and returns those.
+  // The shared length is overwritten, so the rest of the file moves only once,
+  // by the difference.
+  std::vector<Token> splice(size_t first, size_t count, std::vector<Token> with) {
+    const auto begin = tokens.begin() + long(first);
+    std::vector<Token> removed(std::make_move_iterator(begin), std::make_move_iterator(begin + long(count)));
+    const size_t shared = std::min(count, with.size());
+    std::move(with.begin(), with.begin() + long(shared), begin);
+
+    if (with.size() > count)
+      tokens.insert(begin + long(count), std::make_move_iterator(with.begin() + long(shared)),
+                    std::make_move_iterator(with.end()));
+    else
+      tokens.erase(begin + long(with.size()), begin + long(count));
+
+    return removed;
+  }
   void replaceTokens(size_t first, size_t last, std::vector<Token> replacement) {
-    tokens.erase(tokens.begin() + long(first), tokens.begin() + long(last) + 1);
-    tokens.insert(tokens.begin() + long(first), std::make_move_iterator(replacement.begin()),
-                  std::make_move_iterator(replacement.end()));
+    const size_t count = replacement.size();
+    splices.push_back({first, count, splice(first, last + 1 - first, std::move(replacement))});
   }
   // In statement position a macro becomes a block: its parameters and locals
   // end with it, while break, continue, and return act on the caller.
@@ -3296,6 +3319,14 @@ public:
     declarations(functions, "", false);
     return functions;
   }
+  // The tokens as they were given, after parse(): every expansion is undone,
+  // latest first, then the closing newline is removed.
+  std::vector<Token> restoredTokens() && {
+    for (auto s = splices.rbegin(); s != splices.rend(); ++s) splice(s->first, s->count, std::move(s->replaced));
+
+    tokens.erase(tokens.end() - 2);
+    return std::move(tokens);
+  }
 };
 } // namespace
 Program parse(std::vector<Token> tokens) {
@@ -3555,5 +3586,11 @@ Program parse(std::vector<Token> tokens, const std::set<std::string> &names) {
 }
 Program parse(std::vector<Token> tokens, const std::set<std::string> &names, const MacroTable &macros) {
   return Parser(std::move(tokens), names, macros).parse();
+}
+Program parseKeeping(std::vector<Token> &tokens, const std::set<std::string> &names, const MacroTable &macros) {
+  Parser parser(std::move(tokens), names, macros);
+  auto program = parser.parse();
+  tokens = std::move(parser).restoredTokens();
+  return program;
 }
 } // namespace duck

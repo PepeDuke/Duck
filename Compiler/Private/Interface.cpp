@@ -79,7 +79,7 @@ public:
 };
 } // namespace
 
-std::vector<Token> interfaceTokens(const std::vector<Token> &tokens, const Program &unit) {
+std::vector<Token> interfaceTokens(std::vector<Token> tokens, const Program &unit) {
   std::map<Position, Position> skipped; // A dropped body's '{' to its '}'.
 
   auto consider = [&](const Function &f) {
@@ -89,15 +89,20 @@ std::vector<Token> interfaceTokens(const std::vector<Token> &tokens, const Progr
   for (const auto &f : unit) consider(f);
   for (const auto &f : unit.tests) consider(f);
 
-  std::vector<Token> result;
-  result.reserve(tokens.size());
+  // Kept tokens move down over dropped bodies, so the vector is reused.
+  size_t kept = 0;
 
   for (size_t k = 0; k < tokens.size(); ++k) {
-    result.push_back(tokens[k]);
+    const bool open = !tokens[k].string && tokens[k].text == Tok::LeftBrace;
+    const auto opened = at(tokens[k]);
 
-    if (tokens[k].string || tokens[k].text != Tok::LeftBrace) continue;
+    if (kept != k) tokens[kept] = std::move(tokens[k]);
 
-    const auto found = skipped.find(at(tokens[k]));
+    ++kept;
+
+    if (!open) continue;
+
+    const auto found = skipped.find(opened);
 
     if (found == skipped.end()) continue;
 
@@ -112,7 +117,8 @@ std::vector<Token> interfaceTokens(const std::vector<Token> &tokens, const Progr
     k = close - 1;
   }
 
-  return result;
+  tokens.erase(tokens.begin() + long(kept), tokens.end());
+  return tokens;
 }
 
 std::string writeInterface(const std::string &key, const std::vector<std::vector<Token>> &files) {

@@ -457,14 +457,14 @@ private:
   // consumes them, and the parse that tells which bodies importers read.
   void parse(SourceFile &source, ParsedSource &result) {
     try {
-      std::vector<duck::Token> copy;
+      if (!source.dependency && wantInterface) {
+        result.unit = duck::parseKeeping(source.tokens, inputs.containerNames, inputs.macros);
+        result.interface = duck::interfaceTokens(std::move(source.tokens), result.unit);
+      } else {
+        result.unit = duck::parse(std::move(source.tokens), inputs.containerNames, inputs.macros);
 
-      if (!source.dependency && wantInterface) copy = source.tokens;
-
-      result.unit = duck::parse(std::move(source.tokens), inputs.containerNames, inputs.macros);
-
-      if (source.dependency) stripDependencyBody(result.unit);
-      else if (wantInterface) result.interface = duck::interfaceTokens(copy, result.unit);
+        if (source.dependency) stripDependencyBody(result.unit);
+      }
     } catch (...) {
       result.failure = std::current_exception();
     }

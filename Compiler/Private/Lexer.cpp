@@ -2,7 +2,9 @@
 #include "Pipeline.h"
 #include "Unicode.h"
 #include <atomic>
+#include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -109,258 +111,330 @@ TokenText TokenText::intern(const std::string &text) {
 
 namespace {
 
-bool isDigit(char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; }
+// A set of bytes: testing a character is one load, not <cctype> calls or a
+// chain of comparisons.
+struct ByteSet {
+  bool has[256] = {};
 
-bool isTwoCharOperator(const std::string &pair) {
-  return pair == "::" || pair == "==" || pair == "!=" || pair == "<=" || pair == ">=" ||
-         pair == "++" || pair == "--" || pair == "&&" || pair == "||" ||
-         pair == "+=" || pair == "-=" || pair == "*=" || pair == "/=" ||
-         pair == "%=" || pair == "&=" || pair == "|=" || pair == "^=" ||
-         pair == "<<" || pair == ">>";
-}
+  template <class Pick> constexpr explicit ByteSet(Pick pick) {
+    for (int c = 0; c < 256; ++c) has[c] = pick(c);
+  }
+  bool operator()(char c) const { return has[static_cast<unsigned char>(c)]; }
+};
 
-// Turns one file's bytes into tokens. Newlines are tokens, including the ones
-// inside block comments, so statements keep their line structure.
+constexpr ByteSet digits([](int c) { return c >= '0' && c <= '9'; });
+constexpr ByteSet identifierBytes([](int c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+});
+// Bytes a text literal copies as they are. Any other ends a run: a quote, an
+// escape, a line break, or the '\0' that may be the end of the source.
+constexpr ByteSet plainTextBytes(
+    [](int c) { return c != '"' && c != '\'' && c != '\\' && c != '\n' && c != '\r' && c != 0; });
+
+// How many bytes each fixed spelling takes, so an operator's kind also says
+// how far to move past it.
+constexpr std::uint8_t spellingLengths[] = {
+    0, // Tok::Literal
+#define DUCK_TOKEN_LENGTH(name, text) static_cast<std::uint8_t>(sizeof(text) - 1),
+    DUCK_TOKEN_SPELLINGS(DUCK_TOKEN_LENGTH)
+#undef DUCK_TOKEN_LENGTH
+};
+
+// Turns one file's bytes into tokens in a single pass. The byte at `p` picks
+// what is read, and each later byte only checks what can still follow it, so
+// a fixed spelling becomes its Tok without any text being built or looked up.
+// The source's terminating '\0' is a sentinel: a run of letters, digits or
+// text stops there without a separate end check, and only a '\0' byte asks
+// whether it is the end. Newlines are tokens, including the ones inside block
+// comments, so statements keep their line structure.
 class Lexer {
-  const std::string &source;
   const SourceId sourceName;
+  const char *p;         // The next byte.
+  const char *const end; // The terminating '\0'.
+  const char *lineStart; // A column is the distance from here, plus one.
+  int line = 1;
   std::vector<Token> out;
-  std::string text;      // The token being read; interned once it is complete.
+  std::string text; // A text literal's decoded bytes, or a word's or number's to intern.
   TokenTextCache cache;
-  size_t i = 0;
-  int line = 1, col = 1;
 
-  bool atEnd() const { return i >= source.size(); }
-  bool nextIs(char c) const { return !atEnd() && source[i] == c; }
-  bool startsWith(const char *prefix) const { return source.compare(i, 2, prefix) == 0; }
+  Token tokenAt(const char *at, TokenText kind = Tok::Empty) const {
+    return Token{kind, line, static_cast<int>(at - lineStart) + 1, false, sourceName};
+  }
+
+  void emit(const char *at, TokenText kind) { out.push_back(tokenAt(at, kind)); }
+
+  // A fixed spelling at `p`, moved past by its length.
+  void op(Tok kind) {
+    emit(p, kind);
+    p += spellingLengths[static_cast<size_t>(kind)];
+  }
+
+  void newline() {
+    emit(p, Tok::Newline);
+    lineStart = ++p;
+    ++line;
+  }
+
+  // A byte that starts no token is a one-byte literal; the parser rejects it.
+  void oneByte() {
+    text.assign(1, *p);
+    emit(p, cache.intern(text));
+    ++p;
+  }
+
   // An error in the token being read shows the text read so far, as the
   // source line printer needs a token with text.
-  [[noreturn]] void failAt(Token t, const std::string &message) {
-    t.text = cache.intern(text);
+  [[noreturn]] void failAt(Token t, const std::string &soFar, const std::string &message) {
+    t.text = cache.intern(soFar);
     fail(t, message);
   }
-  Token startToken() const { return Token{Tok::Empty, line, col, false, sourceName}; }
 
-  char take() {
-    const char c = source[i++];
-
-    if (c == '\n') {
-      ++line;
-      col = 1;
-    } else
-      ++col;
-
-    return c;
+  void lineComment() {
+    const auto *found = static_cast<const char *>(std::memchr(p, '\n', static_cast<size_t>(end - p)));
+    p = found ? found : end;
   }
 
-  template <class Predicate> void takeWhile(Token &t, Predicate matches) {
-    while (!atEnd() && matches(source[i])) text += take();
-  }
+  void blockComment() {
+    const Token start = tokenAt(p);
+    p += 2;
 
-  void skipLineComment() {
-    while (!atEnd() && source[i] != '\n') take();
-  }
+    for (;;) {
+      const char c = *p;
 
-  void skipBlockComment() {
-    const Token start = startToken();
-    take();
-    take();
+      if (c == '*' && p[1] == '/') break;
 
-    while (!atEnd() && !startsWith("*/")) {
-      if (source[i] == '\n') out.push_back({Tok::Newline, line, col, false, sourceName});
-
-      take();
+      if (c == '\n')
+        newline();
+      else if (c == '\0' && p == end)
+        fail(start, "unterminated comment");
+      else
+        ++p;
     }
 
-    if (atEnd()) fail(start, "unterminated comment");
-
-    take();
-    take();
+    p += 2;
   }
 
-  void unicodeEscape(Token &t, int digits) {
-    uint32_t codePoint = 0;
+  void word() {
+    const char *const start = p;
 
-    for (int n = 0; n < digits; ++n) {
-      if (atEnd()) failAt(t, "incomplete Unicode escape");
+    while (identifierBytes(*++p)) {
+    }
 
-      const int digit = digitValue(take());
+    text.assign(start, p);
+    Token t = tokenAt(start, cache.intern(text));
 
-      if (digit < 0) failAt(t, "invalid Unicode escape");
+    if (t.text == Tok::Struct || t.text == Tok::Class)
+      fail(t, "'" + text + "' is reserved in Duck. Use the container name directly");
 
-      codePoint = (codePoint << 4) | static_cast<uint32_t>(digit);
+    out.push_back(std::move(t));
+  }
+
+  void number() {
+    const char *const start = p;
+    const char prefix = static_cast<char>(p[1] | 0x20);
+
+    // A prefixed integer is one token up to the end of its word, invalid
+    // digits included, so semantic diagnostics point to the whole literal.
+    // Hex e/E is a digit, never a decimal exponent marker.
+    if (*p == '0' && (prefix == 'x' || prefix == 'b'))
+      p += 2;
+    else {
+      while (digits(*++p)) {
+      }
+
+      if (*p == '.' && digits(p[1]))
+        while (digits(*++p)) {
+        }
+
+      if ((*p | 0x20) == 'e') {
+        ++p;
+
+        if (*p == '+' || *p == '-') ++p;
+
+        if (!digits(*p)) failAt(tokenAt(start), std::string(start, p), "exponent requires digits");
+
+        while (digits(*++p)) {
+        }
+      }
+    }
+
+    while (identifierBytes(*p)) ++p;
+
+    text.assign(start, p);
+    emit(start, cache.intern(text));
+  }
+
+  void unicodeEscape(const Token &t, int count) {
+    std::uint32_t codePoint = 0;
+
+    for (int n = 0; n < count; ++n, ++p) {
+      if (p == end) failAt(t, text, "incomplete Unicode escape");
+
+      const int digit = digitValue(*p);
+
+      if (digit < 0) failAt(t, text, "invalid Unicode escape");
+
+      codePoint = (codePoint << 4) | static_cast<std::uint32_t>(digit);
     }
 
     if (codePoint > 0x10FFFF || (codePoint >= 0xD800 && codePoint <= 0xDFFF))
-      failAt(t, "Unicode escape must be a scalar value");
+      failAt(t, text, "Unicode escape must be a scalar value");
 
     appendUTF8(text, codePoint);
   }
 
-  void escapeSequence(Token &t) {
-    if (atEnd()) failAt(t, "unterminated string literal");
+  void escapeSequence(const Token &t) {
+    char c = *p;
 
-    char c = take();
+    if (c == '\0' && p == end) failAt(t, text, "unterminated string literal");
+
+    ++p;
 
     switch (c) {
-    case 'u':
-      return unicodeEscape(t, 4);
-    case 'U':
-      return unicodeEscape(t, 8);
-    case '0':
-      c = '\0';
-      break;
-    case 'n':
-      c = '\n';
-      break;
-    case 'r':
-      c = '\r';
-      break;
-    case 't':
-      c = '\t';
-      break;
+    case 'u': return unicodeEscape(t, 4);
+    case 'U': return unicodeEscape(t, 8);
+    case '0': c = '\0'; break;
+    case 'n': c = '\n'; break;
+    case 'r': c = '\r'; break;
+    case 't': c = '\t'; break;
     case '\\':
     case '"':
-    case '\'':
-      break;
-    default:
-      failAt(t, "unsupported escape sequence");
+    case '\'': break;
+    default: failAt(t, text, "unsupported escape sequence");
     }
 
     text += c;
   }
 
-  // A character literal shares string escapes but must hold one scalar.
-  void textLiteral(Token &t, char quote) {
+  // A string, or a character literal, which shares its escapes but must hold
+  // one scalar. Plain bytes are copied a run at a time.
+  void textLiteral(const char quote) {
+    Token t = tokenAt(p);
     t.string = true;
     t.character = quote == '\'';
-    take();
-
-    while (!atEnd() && source[i] != quote) {
-      const char c = take();
-
-      if (c == '\n' || c == '\r')
-        failAt(t, t.character ? "newline in character literal" : "newline in string literal");
-
-      if (c == '\\')
-        escapeSequence(t);
-      else
-        text += c;
-    }
-
-    if (atEnd()) failAt(t, t.character ? "unterminated character literal" : "unterminated string literal");
-
-    take();
-
-    t.text = cache.intern(text);
-
-    if (decodeUTF8(t).size() != 1 && t.character)
-      failAt(t, "character literal must contain exactly one Unicode scalar");
-  }
-
-  void exponent(Token &t) {
-    text += take();
-
-    if (nextIs('+') || nextIs('-')) text += take();
-
-    if (atEnd() || !isDigit(source[i])) failAt(t, "exponent requires digits");
-
-    takeWhile(t, isDigit);
-  }
-
-  void number(Token &t) {
-    // Consume a prefixed integer as one token, including invalid digits, so
-    // semantic diagnostics point to the complete literal. Hex e/E is a digit,
-    // never a decimal exponent marker.
-    if (i + 1 < source.size() && integerLiteralBase(source.substr(i, 2)) != 10) {
-      text += take();
-      text += take();
-      takeWhile(t, isIdentifierChar);
-      return;
-    }
-
-    takeWhile(t, isDigit);
-
-    if (i + 1 < source.size() && source[i] == '.' && isDigit(source[i + 1])) {
-      text += take();
-      takeWhile(t, isDigit);
-    }
-
-    if (nextIs('e') || nextIs('E')) exponent(t);
-
-    takeWhile(t, isIdentifierChar);
-  }
-
-  void word(Token &t) {
-    takeWhile(t, isIdentifierChar);
-
-    if (text == "struct" || text == "class")
-      failAt(t, "'" + text + "' is reserved in Duck. Use the container name directly");
-  }
-
-  void punctuation(Token &t) {
-    text += take();
-
-    if (text == "." && source.compare(i, 2, "..") == 0) {
-      text += take();
-      text += take();
-      return;
-    }
-
-    if (text == "." && nextIs('.')) {
-      text += take(); // The duck call operator.
-      return;
-    }
-
-    if (atEnd()) return;
-
-    if (isTwoCharOperator(text + source[i])) text += take();
-
-    if ((text == "<<" || text == ">>") && nextIs('=')) text += take();
-  }
-
-  void token(char c) {
-    Token t = startToken();
     text.clear();
+    ++p;
 
-    if (c == '"' || c == '\'')
-      textLiteral(t, c);
-    else if (isDigit(c))
-      number(t);
-    else if (isIdentifierChar(c))
-      word(t);
-    else
-      punctuation(t);
+    for (;;) {
+      const char *const run = p;
 
+      while (plainTextBytes(*p)) ++p;
+
+      text.append(run, p);
+      const char c = *p;
+
+      if (c == quote) break;
+
+      if (c == '\\') {
+        ++p;
+        escapeSequence(t);
+      } else if (c == '\n' || c == '\r')
+        failAt(t, text, t.character ? "newline in character literal" : "newline in string literal");
+      else if (c == '\0' && p == end)
+        failAt(t, text, t.character ? "unterminated character literal" : "unterminated string literal");
+      else { // The other quote, or a '\0' byte inside the source.
+        text += c;
+        ++p;
+      }
+    }
+
+    ++p;
     t.text = cache.intern(text);
+
+    // ASCII text is valid as it is; anything else is decoded to be checked.
+    const bool ascii = std::all_of(text.begin(), text.end(), [](char c) { return static_cast<unsigned char>(c) < 0x80; });
+
+    if (!ascii || t.character) {
+      const size_t scalars = ascii ? text.size() : decodeUTF8(t).size();
+
+      if (t.character && scalars != 1) failAt(t, text, "character literal must contain exactly one Unicode scalar");
+    }
+
     out.push_back(std::move(t));
   }
 
 public:
-  // Room for a typical file up front: Hellfeather's median file is about
-  // 3,600 tokens, so most files never regrow the vector.
-  static constexpr size_t ExpectedTokens = 5000;
+  // Duck source averages one token per 4.5 bytes (878k tokens in 3.9 MB of
+  // .dk files), so a quarter of the size is room for almost every file in one
+  // allocation, without a large block for a small one.
+  static constexpr size_t BytesPerToken = 4, SpareTokens = 16;
 
-  Lexer(const std::string &source, SourceId sourceName) : source(source), sourceName(sourceName) {
-    out.reserve(ExpectedTokens);
+  Lexer(const std::string &source, SourceId sourceName)
+      : sourceName(sourceName), p(source.data()), end(source.data() + source.size()), lineStart(p) {
+    out.reserve(source.size() / BytesPerToken + SpareTokens);
   }
 
   std::vector<Token> run() {
-    while (!atEnd()) {
-      const char c = source[i];
+    for (;;) {
+      switch (static_cast<unsigned char>(*p)) {
+      case ' ':
+      case '\t':
+      case '\r': ++p; break;
+      case '\n': newline(); break;
+      case '\0':
+        if (p == end) {
+          emit(p, Tok::Eof);
+          return std::move(out);
+        }
 
-      if (c == ' ' || c == '\t' || c == '\r')
-        take();
-      else if (startsWith("//"))
-        skipLineComment();
-      else if (startsWith("/*"))
-        skipBlockComment();
-      else
-        token(c);
+        oneByte();
+        break;
+      case '"':
+      case '\'': textLiteral(*p); break;
+      case '0': case '1': case '2': case '3': case '4':
+      case '5': case '6': case '7': case '8': case '9': number(); break;
+      case '/':
+        if (p[1] == '/')
+          lineComment();
+        else if (p[1] == '*')
+          blockComment();
+        else
+          op(p[1] == '=' ? Tok::SlashAssign : Tok::Slash);
+        break;
+      // `..` is the duck call operator.
+      case '.': op(p[1] != '.' ? Tok::Dot : p[2] == '.' ? Tok::Ellipsis : Tok::DotDot); break;
+      case ':': op(p[1] == ':' ? Tok::ColonColon : Tok::Colon); break;
+      case '=': op(p[1] == '=' ? Tok::EqualEqual : Tok::Assign); break;
+      case '!': op(p[1] == '=' ? Tok::NotEqual : Tok::Bang); break;
+      case '+': op(p[1] == '+' ? Tok::PlusPlus : p[1] == '=' ? Tok::PlusAssign : Tok::Plus); break;
+      case '-': op(p[1] == '-' ? Tok::MinusMinus : p[1] == '=' ? Tok::MinusAssign : Tok::Minus); break;
+      case '*': op(p[1] == '=' ? Tok::StarAssign : Tok::Star); break;
+      case '%': op(p[1] == '=' ? Tok::PercentAssign : Tok::Percent); break;
+      case '^': op(p[1] == '=' ? Tok::CaretAssign : Tok::Caret); break;
+      case '&': op(p[1] == '&' ? Tok::AndAnd : p[1] == '=' ? Tok::AmpersandAssign : Tok::Ampersand); break;
+      case '|': op(p[1] == '|' ? Tok::OrOr : p[1] == '=' ? Tok::PipeAssign : Tok::Pipe); break;
+      case '<':
+        op(p[1] == '<'   ? (p[2] == '=' ? Tok::ShiftLeftAssign : Tok::ShiftLeft)
+           : p[1] == '=' ? Tok::LessEqual
+                         : Tok::Less);
+        break;
+      case '>':
+        op(p[1] == '>'   ? (p[2] == '=' ? Tok::ShiftRightAssign : Tok::ShiftRight)
+           : p[1] == '=' ? Tok::GreaterEqual
+                         : Tok::Greater);
+        break;
+      case '#': op(Tok::Hash); break;
+      case '$': op(Tok::Dollar); break;
+      case '(': op(Tok::LeftParen); break;
+      case ')': op(Tok::RightParen); break;
+      case ',': op(Tok::Comma); break;
+      case ';': op(Tok::Semicolon); break;
+      case '?': op(Tok::Question); break;
+      case '@': op(Tok::At); break;
+      case '[': op(Tok::LeftBracket); break;
+      case '\\': op(Tok::Backslash); break;
+      case ']': op(Tok::RightBracket); break;
+      case '`': op(Tok::Backtick); break;
+      case '{': op(Tok::LeftBrace); break;
+      case '}': op(Tok::RightBrace); break;
+      case '~': op(Tok::Tilde); break;
+      default:
+        if (identifierBytes(*p))
+          word();
+        else
+          oneByte();
+      }
     }
-
-    out.push_back({Tok::Eof, line, col, false, sourceName});
-    return std::move(out);
   }
 };
 

@@ -37,13 +37,18 @@ void collectMacros(const std::vector<Token> &tokens, MacroTable &macros);
 Program parse(std::vector<Token> tokens);
 Program parse(std::vector<Token> tokens, const std::set<std::string> &names);
 Program parse(std::vector<Token> tokens, const std::set<std::string> &names, const MacroTable &macros);
+// Parses in place and leaves `tokens` as they were given, macro calls
+// unexpanded, so an interface can be made from them without a copy. If
+// parsing throws, `tokens` is left unspecified.
+Program parseKeeping(std::vector<Token> &tokens, const std::set<std::string> &names, const MacroTable &macros);
 // Interface files (.dki) let a dependent module skip lexing and most parsing
 // of its dependencies. One holds each source file's preprocessed tokens with
 // the function bodies emptied that an importer never reads; the bodies kept
 // are those an importer derives signature facts from (ownership of a pointer
 // result, non-escaping heap pointer parameters, markup fields). `unit` is
-// the parse of `tokens`. `key` identifies the inputs the file was made from.
-std::vector<Token> interfaceTokens(const std::vector<Token> &tokens, const Program &unit);
+// the parse of `tokens`, which are emptied in place and returned.
+// `key` identifies the inputs the file was made from.
+std::vector<Token> interfaceTokens(std::vector<Token> tokens, const Program &unit);
 std::string writeInterface(const std::string &key, const std::vector<std::vector<Token>> &files);
 // One source file of an interface. Its tokens have no source yet: the caller
 // registers the path, on one thread, and stamps its index onto them.
