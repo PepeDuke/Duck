@@ -72,7 +72,8 @@ void freezeSources(bool frozen);
   X(Net, "Net") X(NetReceiveEvent, "NetReceiveEvent") X(NetReceiveSettings, "NetReceiveSettings")                \
   X(NetIncoming, "NetIncoming") X(WebTransportSession, "WebTransportSession")                                    \
   X(WebTransportStream, "WebTransportStream") X(TcpListener, "TcpListener") X(TcpConnection, "TcpConnection")    \
-  X(UdpSocket, "UdpSocket") X(UdpEndpoint, "UdpEndpoint")
+  X(UdpSocket, "UdpSocket") X(UdpEndpoint, "UdpEndpoint")                                                     \
+  X(Task, "task") X(Stopping, "Stopping") X(Stop, "Stop") X(Join, "Join") X(Done, "Done")
 
 enum class Tok : std::uint16_t {
   Literal, // Text from the literal table.
@@ -91,7 +92,7 @@ enum class Tok : std::uint16_t {
   X(Int, "int") X(Invoke, "invoke") X(Lambda, "lambda") X(MacroValue, "macroValue") X(MarkupTake, "markupTake")  \
   X(MoveCheck, "moveCheck") X(Mutation, "mutation") X(Name, "name") X(Null, "null") X(Range, "range")            \
   X(Real, "real") X(Removal, "removal") X(ScopeActive, "scopeActive") X(Text, "text")                            \
-  X(TypeMember, "typeMember") X(Unary, "unary") X(Member, ".")
+  X(TypeMember, "typeMember") X(Unary, "unary") X(Member, ".") X(Detached, "detached")
 #define DUCK_STMT_KINDS(X)                                                                                       \
   X(None, "") X(Assign, "assign") X(Block, "block") X(Break, "break") X(Case, "case") X(Continue, "continue")    \
   X(Do, "do") X(Expr, "expr") X(For, "for") X(ForEach, "foreach") X(If, "if") X(Let, "let")                      \
@@ -387,7 +388,8 @@ struct Type {
     Queue, Stack, Pair, // Collections; `element` (and a pair's `key`) hold their types.
     Array,              // `element` holds the element type; `extent` is 0 when dynamic.
     Func,               // A callable; `signature` is null until inferred from its initializer.
-    File                // An open file handle (the C FILE*), null while closed.
+    File,               // An open file handle (the C FILE*), null while closed.
+    Task                // A thread started by P{ }: its runtime record, null when none.
   };
   enum Role { Raw, Owner, Alias };
   Role role = Raw;
@@ -546,6 +548,10 @@ inline bool enumValue(const Type &t) { return !t.depth && t.base == Type::Enum; 
 // A file is a move-only handle: the C FILE*, null while closed. It closes
 // itself when its variable, field, or temporary dies.
 inline bool fileValue(const Type &t) { return !t.depth && t.base == Type::File; }
+// A task is a move-only handle to a thread started by `P{ }`: its runtime
+// record, null when there is none. When its variable, field, or temporary
+// dies, the task is asked to stop and then waited for.
+inline bool taskValue(const Type &t) { return !t.depth && t.base == Type::Task; }
 // A markup value holds a tree's top-level elements: a queue of element nodes.
 // Being a collection, it is a move-only handle that is null while empty.
 inline Type elementType() {

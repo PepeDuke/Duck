@@ -288,13 +288,13 @@ struct Symbols : std::map<std::string, Signature> {
   // Storage that must release, destroy, or free something when it dies.
   bool needsCleanup(const Type &type) const {
     return managedValue(type) || funcValue(type) || trackedAlias(type) || collectionValue(type) || fileValue(type) ||
-           dynamicArray(type) || (fixedArray(type) && needsCleanup(*type.element)) ||
+           taskValue(type) || dynamicArray(type) || (fixedArray(type) && needsCleanup(*type.element)) ||
            (recordValue(type) && (managedRecord(type.record) || destructible(type.record)));
   }
   // Values that cannot be copied, only moved: they own heap storage or
   // something destroyed exactly once.
   bool moveOnly(const Type &type) const {
-    return collectionValue(type) || fileValue(type) || dynamicArray(type) ||
+    return collectionValue(type) || fileValue(type) || taskValue(type) || dynamicArray(type) ||
            (fixedArray(type) && needsCleanup(*type.element)) || (recordValue(type) && destructible(type.record));
   }
   // Values whose default is all zero bits: plain scalars, and containers
@@ -428,6 +428,9 @@ struct FunctionAnalysis {
   std::set<const Expr *> threadQueries; // Read-only P scheduler properties.
   std::set<const Stmt *> parallelGroups;
   std::optional<bool> parallelWorkers; // Set after validating all explicit groups, including in sequential builds.
+  // `P{ }` task starts, whose args[0] is the body's lambda, and `P.Stopping` reads.
+  std::set<const Expr *> detached;
+  std::set<const Expr *> stoppingQueries;
   std::map<const Expr *, Type> expressionTypes;
   std::map<const Expr *, Type> conversions;
   // Field position, through parent views for an inherited field.
@@ -454,6 +457,8 @@ struct FunctionAnalysis {
   // Calls of a file's methods, by method name: Open, Create, Append, Close,
   // Read, Write, ReadText.
   std::map<const Expr *, std::string> fileCalls;
+  // t.Stop() and t.Join() on a task: Tok::Stop or Tok::Join.
+  std::map<const Expr *, Tok> taskCalls;
   // Container constructions (`Gun(5)`, `Gun g(w, 5)`, `Gun()`): the parts
   // run in order, automatic ones included. Empty without constructors.
   std::map<const Expr *, std::vector<PartCall>> constructions;
@@ -638,9 +643,13 @@ struct EffectSet {
   bool external = false;  // Observable outside the program, as Print is: also a barrier.
   bool locks = false;     // Enters a `${ }` block that acquires something.
   bool exclusive = false; // Enters a `${ }` block needing the scheduler-wide exclusion.
+  // Statics read or written outside any `${ }` block, by qualified name. A
+  // static a `P{ }` task touches this way belongs to that task alone.
+  std::set<std::string> bareStatics;
   void merge(const EffectSet &o) {
     reads.insert(o.reads.begin(), o.reads.end());
     writes.insert(o.writes.begin(), o.writes.end());
+    bareStatics.insert(o.bareStatics.begin(), o.bareStatics.end());
     unknown |= o.unknown;
     external |= o.external;
     locks |= o.locks;
@@ -678,6 +687,12 @@ SchedulingIndex indexScheduling(const Program &program, const Symbols &symbols);
 // have its methods overridden by importers, so its virtual calls are too.
 EffectTable summarizeEffects(const Program &program, const std::vector<FunctionAnalysis> &analyses,
                              const Symbols &symbols, bool entry = true, const SchedulingIndex *index = nullptr);
+// A static that a `P{ }` task reads or writes outside `${ }` belongs to that
+// task: no other code of the module, and no other task, may touch it outside
+// `${ }`. Functions only tasks call count as part of the task.
+void checkTaskStatics(const std::vector<const Function *> &functions, const std::vector<FunctionAnalysis> &analyses,
+                      const EffectTable &effects, const Symbols &symbols, bool entry,
+                      const SchedulingIndex *index = nullptr);
 // Decides what each `${ }` block locks. This is part of the program's meaning,
 // so it runs for sequential builds as well. Without an index, each call builds its own.
 void planOrderedBlocks(const Function &function, const EffectTable &effects, const Symbols &symbols,
@@ -728,7 +743,8 @@ enum class Target { Native, Wasm64 };
 std::string assembleModule(const std::vector<FunctionIR> &functions,
                            bool entry = true,
                            const std::set<std::string> &nativeSymbols = {},
-                           bool mainArguments = false, bool fileFields = false, Target target = Target::Native);
+                           bool mainArguments = false, bool fileFields = false, Target target = Target::Native,
+                           bool taskFields = false);
 std::string textRuntimeIR();
 // The native entry that builds Main's argument array.
 std::string entryArgumentsIR(Target target = Target::Native);

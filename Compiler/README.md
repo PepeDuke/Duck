@@ -1881,7 +1881,7 @@ inside larger expressions still run on the caller.
 
 ### Explicit parallel groups
 
-`P` starts a statement with at least two branches. Braces enclose a branch body and parentheses take a zero-argument callable. Both forms can appear in the same group. Each branch runs once, and the caller joins all workers before the next statement. A branch may return early from its own body. The group discards callable return values.
+`P` starts a statement with at least two branches (a lone `P{ }` starts a [task](#tasks)). Braces enclose a branch body and parentheses take a zero-argument callable. Both forms can appear in the same group. Each branch runs once, and the caller joins all workers before the next statement. A branch may return early from its own body. The group discards callable return values.
 
 ```c++
 P{ tally.FillEvens(n) }{ tally.FillOdds(n) }
@@ -1891,6 +1891,50 @@ Print(tally.Evens)
 Explicit groups bypass the task cost threshold. The caller runs the final branch and uses the existing worker limit and inline fallback for the others. `--sequential` preserves the join semantics and compile-time safety checks. A single `P(x)` still parses as an ordinary call.
 
 The bootstrap checks reads and writes through the branch body, captures, and known callees. It rejects conflicting accesses, external or unknown effects, and callable targets it cannot establish. A named function, inline lambda, or local with a known callable initializer can serve as a branch. A function parameter of type `func` has an unknown target. See [the runnable mixed-branch example](../Examples/Concurrency/11_ParallelBranches.dk).
+
+### Tasks
+
+A lone `P{ body }` starts a task: the body runs on a thread of its own, and
+the expression gives a `task`, a move-only handle like `file`.
+
+```c++
+worker : P{ Spin() }      // keep the handle; Counter.Worker = P{ ... } for a field or static
+worker.Stop()             // asks the task to stop: its body sees P.Stopping turn true
+worker.Join()             // waits until the body has returned
+Print(worker.Done)        // true once it has, and for a task that holds nothing
+P{ Flush() }              // nobody holds it: the program waits for it at exit
+```
+
+Dropping a handle stops the task and then waits for it: the end of its scope,
+its container's destruction, or another task assigned over it. Stopping only
+asks: a body that never reads `P.Stopping` makes the drop wait forever.
+`P.Stopping` is false outside a task. When `Main` returns, an exit handler asks
+every task still running to stop and waits for each, which ends tasks held in
+static fields (static storage is never destroyed) and tasks nobody holds.
+
+A task always gets its own thread. It never runs inline and does not count
+against `DUCK_WORKERS`, since its body may loop until asked to stop, and
+`--sequential` does not change that. It shows in `P.Thread[i].Status` like a
+worker. Starting a task, `Stop`, `Join`, `Done` and `P.Stopping` are unknown
+effects, so automatic tasks join before them. Waiting for a task from inside
+`${ }` (`Join`, or a drop) traps, since the task may need those locks, and so
+does a task waiting for itself. A `task` is passed by reference (`task&`), can
+be returned from a function, and can be a container field, a static, or a
+local. Tasks are unavailable on wasm64.
+
+The body shares nothing with the code that starts it, since the task can
+outlive that frame: it may not use locals, parameters, or `this`, and reaches
+shared state through statics. A static that a task and other code both touch
+is shared, and every access to it, in the task and outside it, must be inside
+`${ }`; a lock taken on one side alone orders nothing. A static only a task
+touches needs no block. `#` constants are exempt. The check covers the
+module: functions that only task bodies call (directly or through each other)
+count as part of the task, and two tasks touching one static are checked the
+same way. Accesses the compiler cannot see, through pointers or native code,
+are not checked, nor does it know whether one task body is started twice.
+`${ }` blocks in a task body name their locks like a function's, instead of
+taking the scheduler-wide exclusion other lambdas' blocks take. See
+[the runnable task example](../Examples/Concurrency/12_Tasks.dk).
 
 ### Thread inspection
 

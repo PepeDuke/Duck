@@ -186,12 +186,22 @@ class EffectWalker {
 
     return std::nullopt;
   }
+  // A static touched here counts as bare until an enclosing `${ }` claims it.
+  void touched(const Resource &resource) {
+    if (resource.kind == Resource::Static && !symbols.statics.at(resource.root).constant)
+      current.bareStatics.insert(resource.root);
+  }
   void read(const Expr &e) {
-    if (auto found = place(e); found && (!inBranch || taskData(found->type, symbols))) current.reads.insert(found->resource);
-    else current.unknown = true;
+    if (auto found = place(e); found && (!inBranch || taskData(found->type, symbols))) {
+      current.reads.insert(found->resource);
+      touched(found->resource);
+    } else
+      current.unknown = true;
   }
   void write(const Expr &e, bool alsoRead) {
     auto found = place(e);
+
+    if (found) touched(found->resource);
 
     if (!found || (inBranch && !taskData(found->type, symbols)) ||
         (recordValue(found->type) && symbols.destructible(found->type.record))) {
@@ -241,6 +251,18 @@ class EffectWalker {
     };
     map(callee.reads, result.reads);
     map(callee.writes, result.writes);
+    result.bareStatics = callee.bareStatics;
+
+    // A static passed by reference is touched wherever the callee touches the
+    // parameter. Parameters the callee only reaches inside `${ }` are not
+    // tracked apart, so any use counts as bare: the check errs toward ${ }.
+    for (const auto &[index, argument] : bound)
+      if (argument && argument->resource.kind == Resource::Static)
+        for (const auto *set : {&callee.reads, &callee.writes})
+          for (const auto &resource : *set)
+            if (resource.kind == Resource::Parameter && resource.parameter == index &&
+                !symbols.statics.at(argument->resource.root).constant)
+              result.bareStatics.insert(argument->resource.root);
 
     if (callee.locks)
       for (const auto &[index, argument] : bound) {
@@ -423,9 +445,19 @@ class EffectWalker {
     default: break;
     }
 
+    // Another thread changes what P.Stopping and t.Done read; starting a task
+    // (ExprKind::Detached, below) is unknown too. All three are barriers.
+    if (a.stoppingQueries.count(&e)) {
+      current.unknown = true;
+      return;
+    }
+
     if (e.kind == ExprKind::Name || e.kind == ExprKind::Member || e.kind == ExprKind::Index) {
       if (a.enumMembers.count(&e) || a.integerConstants.count(&e) || a.functionValues.count(&e)) return;
-      if (a.collectionMembers.count(&e)) return read(*e.args[0]);
+      if (const auto member = a.collectionMembers.find(&e); member != a.collectionMembers.end()) {
+        if (TokenText(member->second).kind() == Tok::Done) current.unknown = true;
+        return read(*e.args[0]);
+      }
       if (a.enumProperties.count(&e)) return expression(*e.args[0]);
 
       if (a.markupLookups.count(&e)) {
@@ -548,6 +580,7 @@ class EffectWalker {
     };
     outside(current.reads);
     outside(current.writes);
+    current.bareStatics.clear(); // Everything inside is touched under this block's locks.
     current.locks = current.locks || locks.exclusive || !locks.places.empty();
     current.exclusive = current.exclusive || locks.exclusive;
 
@@ -1321,7 +1354,8 @@ EffectTable summarizeEffects(const Program &program, const std::vector<FunctionA
 
       if (summary.reads.size() == effects.reads.size() && summary.writes.size() == effects.writes.size() &&
           summary.unknown == effects.unknown && summary.external == effects.external &&
-          summary.locks == effects.locks && summary.exclusive == effects.exclusive)
+          summary.locks == effects.locks && summary.exclusive == effects.exclusive &&
+          summary.bareStatics.size() == effects.bareStatics.size())
         continue;
 
       static_cast<EffectSet &>(summary) = std::move(effects);
@@ -1369,10 +1403,144 @@ void planOrderedBlocks(const Function &function, const EffectTable &effects, con
 
   Recording recording;
   EffectWalker(function, analysis, symbols, effects, !entry, shared->overridden, &recording).run();
+
+  // A task body captures nothing, so its `${ }` blocks can name their locks
+  // like any function's, rather than taking the scheduler-wide exclusion
+  // that other lambdas' blocks take.
+  for (const auto *task : analysis.detached)
+    EffectWalker(*task->args[0]->lambda, analysis, symbols, effects, !entry, shared->overridden, &recording).run();
+
   analysis.orderedLocks = std::move(recording.ordered);
   if (!analysis.parallelGroups.empty()) {
     EffectWalker(function, analysis, symbols, effects, !entry, shared->overridden, nullptr).validateGroups();
     analysis.parallelWorkers = parallel;
+  }
+}
+
+void checkTaskStatics(const std::vector<const Function *> &functions, const std::vector<FunctionAnalysis> &analyses,
+                      const EffectTable &effects, const Symbols &symbols, bool entry, const SchedulingIndex *shared) {
+  struct Task {
+    const Expr *start;
+    std::set<std::string> bare, all;
+  };
+  // Every mutable static an effect set reads or writes, inside ${ } or not.
+  auto touchedStatics = [&](const EffectSet &set) {
+    std::set<std::string> names;
+
+    for (const auto *resources : {&set.reads, &set.writes})
+      for (const auto &resource : *resources)
+        if (resource.kind == Resource::Static && !symbols.statics.at(resource.root).constant)
+          names.insert(resource.root);
+
+    names.insert(set.bareStatics.begin(), set.bareStatics.end());
+    return names;
+  };
+  std::vector<Task> tasks;
+  // Call sites inside task bodies, and functions used as values, which can be
+  // called from anywhere.
+  std::set<const Expr *> inTask;
+  std::set<std::string> escaping;
+  std::optional<SchedulingIndex> own;
+
+  for (size_t i = 0; i < functions.size(); ++i) {
+    for (const auto &[expr, target] : analyses[i].functionValues) {
+      (void)expr;
+      escaping.insert(target);
+    }
+
+    for (const auto *start : analyses[i].detached) {
+      if (!shared) shared = &own.emplace(indexScheduling(Program{}, symbols));
+
+      const auto &body = *start->args[0]->lambda;
+      auto mark = [&](const Expr &e) { inTask.insert(&e); };
+      auto ignore = [](const Stmt &) {};
+
+      for (const auto &s : body.body) visitStatement(*s, mark, ignore);
+
+      auto found = EffectWalker(body, analyses[i], symbols, effects, !entry, shared->overridden, nullptr).run();
+      tasks.push_back({start, found.bareStatics, touchedStatics(found)});
+    }
+  }
+
+  if (tasks.empty()) return;
+
+  // Who calls each function: a task body, or another function by name.
+  std::map<std::string, std::set<std::string>> callers;
+  std::set<std::string> calledFromTask;
+
+  for (size_t i = 0; i < functions.size(); ++i)
+    for (const auto &[call, target] : analyses[i].callTargets)
+      if (inTask.count(call)) calledFromTask.insert(target);
+      else callers[target].insert(functions[i]->name.text);
+
+  // Greatest fixpoint: a function belongs to the tasks when only task bodies
+  // and other such functions call it, and it is never passed around as a value.
+  std::set<std::string> taskOnly;
+
+  for (const auto &name : calledFromTask)
+    if (!escaping.count(name)) taskOnly.insert(name);
+
+  for (bool changed = true; changed;) {
+    changed = false;
+
+    for (auto it = taskOnly.begin(); it != taskOnly.end();) {
+      bool owned = true;
+
+      if (const auto found = callers.find(*it); found != callers.end())
+        for (const auto &caller : found->second)
+          if (!taskOnly.count(caller)) owned = false;
+
+      if (owned) {
+        ++it;
+        continue;
+      }
+
+      it = taskOnly.erase(it);
+      changed = true;
+    }
+  }
+
+  auto shown = [](std::string name) {
+    if (const auto at = name.find(".$"); at != std::string::npos) name.erase(at + 1, 1);
+    return name;
+  };
+  auto rule = [](const std::string &name) {
+    return "a static shared with a task needs ${ } around every access to it, in the task and outside it; "
+           "put each access to '" + name + "' in a ${ } block, or leave the static to the task alone";
+  };
+
+  // A static touched by a task and by other code is shared, and every access
+  // to it must then be inside ${ }: a lock taken on one side only orders nothing.
+  for (size_t t = 0; t < tasks.size(); ++t) {
+    const auto &task = tasks[t];
+
+    for (const auto &name : task.all) {
+      for (size_t i = 0; i < functions.size(); ++i) {
+        const auto &function = *functions[i];
+
+        if (taskOnly.count(function.name.text)) continue;
+
+        const auto summary = effects.find(function.name.text);
+
+        if (summary == effects.end() || !touchedStatics(summary->second).count(name)) continue;
+
+        const auto where = "'" + shown(function.name.text) + "' (" + sourcePath(function.name.source) + ":" +
+                           std::to_string(function.name.line) + ")";
+
+        if (task.bare.count(name))
+          fail(task.start->token, "this task uses static '" + name + "' outside ${ }, and " + where +
+                                      " uses it too; " + rule(name));
+
+        if (summary->second.bareStatics.count(name))
+          fail(task.start->token, where + " uses static '" + name + "' outside ${ }, and this task uses it too; " +
+                                      rule(name));
+      }
+
+      for (size_t other = 0; other < t; ++other)
+        if (tasks[other].all.count(name) && (task.bare.count(name) || tasks[other].bare.count(name)))
+          fail(task.start->token, "this task and the one at line " + std::to_string(tasks[other].start->token.line) +
+                                      " both use static '" + name + "', and one of them outside ${ }; " + rule(name));
+    }
   }
 }
 

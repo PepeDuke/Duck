@@ -1,0 +1,58 @@
+// EXPECT: 1, 1, 0, 3, 1.
+// `P{ body }` starts a task: the body runs on a thread of its own and the
+// expression gives back a task handle. Dropping the handle (end of scope, a
+// field's container going away, or a new task assigned over it) asks the
+// task to stop and waits for it. The body sees P.Stopping turn true.
+//
+// The body shares nothing with the code that starts it, so it reaches shared
+// state through statics. A static a task shares with other code is touched
+// only inside ${ } blocks, on both sides; one only the task touches needs none.
+
+Counter
+#{
+    int Ticks = 0
+    // Only the task touches this one, so it needs no ${ }.
+    int Private = 0
+    // A static task runs until the program exits, which stops and waits for it.
+    task Background
+}
+
+Spin()
+{
+    while !P.Stopping
+    {
+        Counter.Private++
+        ${ Counter.Ticks++ }
+    }
+}
+
+Idle()
+{
+    while !P.Stopping { }
+}
+
+Main()
+{
+    worker : P{ Spin() }
+    int seen = 0
+    while seen < 100
+    {
+        ${ seen = Counter.Ticks }
+    }
+    worker.Stop()
+    worker.Join()
+    Print(worker.Done)          // 1
+    Print(seen >= 100)          // 1
+    Print(P.Stopping)           // 0: Main is not a task
+
+    int finished = 0
+    for i : 1...3
+    {
+        brief : P{ Idle() }     // stopped and waited for at the end of each pass
+        finished++
+    }
+    Print(finished)             // 3
+
+    Counter.Background = P{ Idle() }
+    P{ Print(1) }               // nobody holds it: the program waits for it at exit
+}

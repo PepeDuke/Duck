@@ -24,7 +24,7 @@ Duck forces type safety for functions as they are the worst offenders in automat
 Duck syntax is based on my personal preferences and my imagination of the perfect syntax. I like type safety as in my opinion it makes code simpler to read especially as you get return from functions/method and you have to mouse over to see what it is actually returning, with type safety you see it right there. But on the other hand I'm not a fan of verbose syntax, as it makes the whole code unnecessarily too large.
 
 # Line in a sand
-We chose to support only 64-bit targets because most modern gaming platforms are 64-bit. This gives pointers a fixed size of 8 bytes across all supported targets.
+We chose to support only 64-bit targets because most modern gaming platforms are 64-bit. This gives pointers a fixed size of 8 bytes across all supported targets. (This is a drawback for browser support, for example: Safari and Firefox do not support Memory64, although they really should. But if we allowed the pointer size to vary, we would run into the same issues as C++.)
 
 # Project status
 Current status: **early C++ bootstrap compiler**. The language design below is
@@ -61,6 +61,12 @@ stages
 6. feature full compiler - is the syntax feature full, disk operations, memory operations, network operations and graphics.
 7. integration for debugging and IDEs - pre-compiler and pdb file emitter might be needed.
 8. Something, something advertise Duck - Quack.
+
+
+# Current implementation notes
+Although some implicit threading already happens, it is not very smart. This is a very complex problem, some would say an impossible one, so we will focus on it at a later date. For now, the compiler supports explicit `${ }` blocks for synchronization, and `P{ }` and `P{ }{ }` with the `task` type for explicit threading.
+
+Also, the compiler is currently focused on providing all the features rather than on its own speed, so it could be much faster. Although I did some basic optimization, it is far from complete.
 
 # Syntax
 *note that this is not final syntax and it is subject to change*
@@ -373,6 +379,7 @@ utiny // nonnegative tiny; results are rounded to 69 significant digits, ties to
 element // <-- single element of a tags tree
 markup // <-- hold tags tree for Mark Up  
 func // <-- holds function
+task // <-- handle to a thread started with P{ }; stops and waits for it when it goes away
 macro // <-- return type of macros
 ```
 
@@ -2128,6 +2135,40 @@ SubmitFrame()
 Here the physics branch resolves contacts after updating physics. Audio and animation can overlap that work. The explicit group overrides the compiler's cost estimate. The compiler must still establish that the branches can safely overlap, including their use of captured variables and resources accessed by their callees. If it cannot, it reports a compile-time error. The runtime worker limit still applies.
 
 See [the runnable parallel-branch example](Examples/Concurrency/11_ParallelBranches.dk) and [the bootstrap compiler’s scheduling rules](Compiler/README.md#explicit-parallel-groups).
+
+### Tasks
+
+A single `P{ }` starts a task: work that runs on its own thread for as long as it needs, such as an audio mixer or a loader, while the code that started it carries on. It gives back a `task` handle, which owns the task the way a `file` variable owns its file.
+
+```c++
+Mixer
+#{
+    float Volume = 1.0       // shared with the game: always inside ${ }
+    task Worker
+
+    Run()
+    {
+        while !P.Stopping    // true once someone asks the task to stop
+        {
+            float volume = 0.0
+            ${ volume = Volume }
+            // ... mix and submit a block ...
+        }
+    }
+}
+
+Main()
+{
+    Mixer.Worker = P{ Mixer.Run() }
+    ${ Mixer.Volume = 0.5 }
+    Mixer.Worker.Stop()      // ask
+    Mixer.Worker.Join()      // and wait
+}
+```
+
+When the handle goes away, at the end of its scope, with its container, or when another task is assigned over it, the task is asked to stop and then waited for. Tasks still running when the program ends, including those held in static fields and those started without keeping the handle, are stopped and waited for then. Stopping is a request: the body must check `P.Stopping`.
+
+A task can outlive the code that started it, so its body cannot use that code's locals, parameters, or `this`. It works through static fields. A static field a task shares with other code needs `${ }` around every access to it, in the task and outside it, and the compiler reports one that does not; a static only the task uses needs nothing. See [the runnable task example](Examples/Concurrency/12_Tasks.dk) and [the compiler's rules](Compiler/README.md#tasks).
 
 ### Inspecting scheduler threads
 

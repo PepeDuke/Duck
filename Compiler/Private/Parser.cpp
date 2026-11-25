@@ -634,7 +634,15 @@ class Parser {
            at(Tok::Float) || at(Tok::Double) || at(Tok::Bool) || at(Tok::Void) || at(Tok::Cstring) ||
            at(Tok::String) || at(Tok::Name) || at(Tok::Char) || at(Tok::Date) ||
            at(Tok::Time) || at(Tok::Datetime) || at(Tok::Big) || at(Tok::Ubig) || at(Tok::Tiny) ||
-           at(Tok::Utiny) || at(Tok::Func) || nativeMathType() || markupKeyword() || fileKeyword();
+           at(Tok::Utiny) || at(Tok::Func) || nativeMathType() || markupKeyword() || fileKeyword() || taskKeyword();
+  }
+  // `task` is a type only where one can be, as `file` is: `task worker` or
+  // `task& worker`, while `int task` still names a variable.
+  bool taskKeyword() const {
+    if (!at(Tok::Task) || containerNames.count("task")) return false;
+
+    const auto &next = tokens.at(pos + 1);
+    return !next.string && !next.text.empty() && (isIdentifierStart(next.text[0]) || next.text == Tok::Ampersand);
   }
   bool nativeMathType() const {
     const auto &token = tokens.at(pos);
@@ -868,6 +876,11 @@ class Parser {
       return Type::File;
     }
 
+    if (taskKeyword()) {
+      pop();
+      return Type::Task;
+    }
+
     if (accept(Tok::String)) return Type::String;
     if (accept(Tok::Name)) return Type::Name;
     if (accept(Tok::Char)) return Type::Char;
@@ -1027,6 +1040,23 @@ class Parser {
     e.castType = Type(Type::Func);
     e.castType.signature = signature;
     e.lambda = std::make_shared<Function>(std::move(f));
+  }
+  // `P{ body }` as a value starts a task: a thread of its own, given back as
+  // a task handle.
+  bool detachedAhead() const {
+    return at(Tok::P) && punctuation(tokens.at(pos + 1), Tok::LeftBrace) && !containerNames.count("P");
+  }
+  // After the 'P': the body, as a lambda without parameters.
+  void detachedTask(Expr &e) {
+    e.kind = ExprKind::Detached;
+    auto body = std::make_unique<Expr>();
+    body->token = peek();
+    lambdaExpression(*body, true);
+    e.args.push_back(std::move(body));
+
+    if (at(Tok::LeftBrace) || at(Tok::LeftParen))
+      fail(e.token, "a task started with P{ } has one body; P{ }{ } with two or more branches is a statement that "
+                    "runs them in parallel and waits for all of them");
   }
   static int precedence(const Token &t) {
     if (t.string)
@@ -1215,6 +1245,9 @@ class Parser {
       e->token = identifier();
     } else if (at(Tok::LeftBrace) && (markupExpected || markupAhead())) {
       markupLiteral(*e, nullptr);
+    } else if (detachedAhead()) {
+      pop();
+      detachedTask(*e);
     } else if (accept(Tok::At)) {
       lambdaExpression(*e);
     } else if (accept(Tok::LeftParen)) {
@@ -2010,7 +2043,16 @@ class Parser {
         expect(Tok::RightParen);
       }
     } while (at(Tok::LeftBrace) || at(Tok::LeftParen));
-    if (group->labels.size() < 2) fail(group->token, "P requires at least two branches");
+    // A lone `P{ }` starts a task nobody holds: the program waits for it at exit.
+    if (group->labels.size() == 1) {
+      auto task = std::make_unique<Expr>();
+      task->token = group->token;
+      task->kind = ExprKind::Detached;
+      task->args.push_back(std::move(group->labels[0]));
+      group->labels.clear();
+      group->kind = StmtKind::Expr;
+      group->expr = std::move(task);
+    }
     return group;
   }
   std::unique_ptr<Stmt> statement() {

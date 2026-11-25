@@ -18,7 +18,8 @@ std::string taskRuntimeIR(const std::set<std::string> &nativeSymbols) {
       {"CloseHandle", "declare i32 @CloseHandle(ptr)\n"},
       {"GetActiveProcessorCount", "declare i32 @GetActiveProcessorCount(i16)\n"},
       {"getenv", "declare ptr @getenv(ptr)\n"},
-      {"atoi", "declare i32 @atoi(ptr)\n"}};
+      {"atoi", "declare i32 @atoi(ptr)\n"},
+      {"atexit", "declare i32 @atexit(ptr)\n"}};
 
   for (const auto &[symbol, declaration] : imports)
     if (!nativeSymbols.count(symbol)) ir += declaration;
@@ -221,6 +222,260 @@ close:
   %finished = atomicrmw sub ptr @duck.task.active, i32 1 seq_cst
   br label %done
 done:
+  ret void
+}
+
+; Tasks started by P{ }. Each always gets a thread of its own: it never runs
+; inline and does not count against DUCK_WORKERS, since its body may loop
+; until asked to stop. A record is
+;   { i32 finished, i32 stop requested, ptr thread handle, ptr body, ptr env, ptr next }
+; and stays linked in one program-wide list until its handle is dropped, so
+; the program can stop and wait for every task still running when it exits.
+%duck.detached = type { i32, i32, ptr, ptr, ptr, ptr }
+$duck.detached.list = comdat any
+$duck.detached.lock = comdat any
+$duck.detached.exit = comdat any
+$duck$detached.self = comdat any
+@duck.detached.list = linkonce_odr global ptr null, comdat
+@duck.detached.lock = linkonce_odr global ptr null, comdat
+@duck.detached.exit = linkonce_odr global i32 0, comdat
+; The record of the task running on this thread, or null.
+@duck$detached.self = linkonce_odr thread_local global ptr null, comdat
+
+define internal i32 @duck.detached$run(ptr %task) {
+entry:
+  store ptr %task, ptr @duck$detached.self
+  %f = getelementptr %duck.detached, ptr %task, i32 0, i32 3
+  %e = getelementptr %duck.detached, ptr %task, i32 0, i32 4
+  %fn = load ptr, ptr %f
+  %env = load ptr, ptr %e
+  ; A scheduler slot makes the task visible to P.Thread[i].Status.
+  %slot = call ptr @duck.thread$reserve(ptr %fn, ptr %env)
+  %tracked = icmp ne ptr %slot, null
+  br i1 %tracked, label %enter, label %body
+enter:
+  store ptr %slot, ptr @duck$thread.self
+  store atomic i32 1, ptr %slot release, align 4
+  br label %body
+body:
+  %ignored = call i32 %fn(ptr %env)
+  br i1 %tracked, label %leave, label %finish
+leave:
+  store ptr null, ptr @duck$thread.self
+  store atomic i32 0, ptr %slot release, align 4
+  br label %finish
+finish:
+  store ptr null, ptr @duck$detached.self
+  store atomic i32 1, ptr %task release, align 4
+  ret i32 0
+}
+
+define internal ptr @duck.detached$start(ptr %fn, ptr %env) {
+entry:
+  %size = ptrtoint ptr getelementptr (%duck.detached, ptr null, i32 1) to i64
+  %task = call ptr @malloc(i64 %size)
+  %none = icmp eq ptr %task, null
+  br i1 %none, label %fail, label %fill
+fill:
+  store %duck.detached zeroinitializer, ptr %task
+  %f = getelementptr %duck.detached, ptr %task, i32 0, i32 3
+  %e = getelementptr %duck.detached, ptr %task, i32 0, i32 4
+  store ptr %fn, ptr %f
+  store ptr %env, ptr %e
+  ; Whatever is still running when Main returns is stopped and waited for.
+  %registered = atomicrmw xchg ptr @duck.detached.exit, i32 1 seq_cst
+  %first = icmp eq i32 %registered, 0
+  br i1 %first, label %hook, label %link
+hook:
+  %hooked = call i32 @atexit(ptr @duck.detached$exit)
+  br label %link
+link:
+  call void @AcquireSRWLockExclusive(ptr @duck.detached.lock)
+  %head = load ptr, ptr @duck.detached.list
+  %n = getelementptr %duck.detached, ptr %task, i32 0, i32 5
+  store ptr %head, ptr %n
+  store ptr %task, ptr @duck.detached.list
+  call void @ReleaseSRWLockExclusive(ptr @duck.detached.lock)
+  %handle = call ptr @CreateThread(ptr null, i64 0, ptr @duck.detached$run, ptr %task, i32 0, ptr null)
+  %created = icmp ne ptr %handle, null
+  br i1 %created, label %started, label %fail
+started:
+  %h = getelementptr %duck.detached, ptr %task, i32 0, i32 2
+  store atomic ptr %handle, ptr %h release, align 8
+  ret ptr %task
+fail:
+  call void @llvm.trap()
+  unreachable
+}
+
+; t.Stop(): asks the task to stop. Its body sees P.Stopping become true.
+define internal void @duck.detached$stop(ptr %task) {
+entry:
+  %none = icmp eq ptr %task, null
+  br i1 %none, label %done, label %ask
+ask:
+  %s = getelementptr %duck.detached, ptr %task, i32 0, i32 1
+  store atomic i32 1, ptr %s release, align 4
+  br label %done
+done:
+  ret void
+}
+
+; t.Done: true once the body has returned, and for a task that holds nothing.
+define internal i1 @duck.detached$done(ptr %task) {
+entry:
+  %none = icmp eq ptr %task, null
+  br i1 %none, label %yes, label %read
+read:
+  %state = load atomic i32, ptr %task acquire, align 4
+  %finished = icmp ne i32 %state, 0
+  ret i1 %finished
+yes:
+  ret i1 1
+}
+
+; P.Stopping: false outside a task.
+define internal i1 @duck.detached$stopping() {
+entry:
+  %task = load ptr, ptr @duck$detached.self
+  %none = icmp eq ptr %task, null
+  br i1 %none, label %no, label %read
+read:
+  %s = getelementptr %duck.detached, ptr %task, i32 0, i32 1
+  %asked = load atomic i32, ptr %s acquire, align 4
+  %stopping = icmp ne i32 %asked, 0
+  ret i1 %stopping
+no:
+  ret i1 0
+}
+
+; t.Join(): waits until the body has returned. A task cannot wait for itself,
+; and a thread inside ${ } must not wait on work that may need its locks.
+define internal void @duck.detached$join(ptr %task) {
+entry:
+  %none = icmp eq ptr %task, null
+  br i1 %none, label %done, label %check
+check:
+  %self = load ptr, ptr @duck$detached.self
+  %itself = icmp eq ptr %self, %task
+  %mode = load i32, ptr @duck$lock.mode
+  %locked = icmp ne i32 %mode, 0
+  %invalid = or i1 %itself, %locked
+  br i1 %invalid, label %trap, label %finished
+finished:
+  %state = load atomic i32, ptr %task acquire, align 4
+  %over = icmp ne i32 %state, 0
+  br i1 %over, label %done, label %wait
+wait:
+  %h = getelementptr %duck.detached, ptr %task, i32 0, i32 2
+  %handle = load atomic ptr, ptr %h acquire, align 8
+  call void @duck.thread$mark(i32 2)
+  %status = call i32 @WaitForSingleObject(ptr %handle, i32 -1)
+  call void @duck.thread$mark(i32 1)
+  %failed = icmp ne i32 %status, 0
+  br i1 %failed, label %trap, label %done
+trap:
+  call void @llvm.trap()
+  unreachable
+done:
+  ret void
+}
+
+; Ends a task's handle: asks it to stop, waits for it, and frees its record.
+define internal void @duck.detached$drop(ptr %task) {
+entry:
+  %none = icmp eq ptr %task, null
+  br i1 %none, label %done, label %end
+end:
+  call void @duck.detached$stop(ptr %task)
+  call void @duck.detached$join(ptr %task)
+  ; Wait for the thread itself too, so its handle can be closed.
+  %h = getelementptr %duck.detached, ptr %task, i32 0, i32 2
+  %handle = load atomic ptr, ptr %h acquire, align 8
+  %waited = call i32 @WaitForSingleObject(ptr %handle, i32 -1)
+  call void @AcquireSRWLockExclusive(ptr @duck.detached.lock)
+  br label %scan
+scan:
+  %link = phi ptr [ @duck.detached.list, %end ], [ %next, %advance ]
+  %at = load ptr, ptr %link
+  %missing = icmp eq ptr %at, null
+  br i1 %missing, label %unlinked, label %compare
+compare:
+  %found = icmp eq ptr %at, %task
+  br i1 %found, label %unlink, label %advance
+advance:
+  %next = getelementptr %duck.detached, ptr %at, i32 0, i32 5
+  br label %scan
+unlink:
+  %n = getelementptr %duck.detached, ptr %task, i32 0, i32 5
+  %after = load ptr, ptr %n
+  store ptr %after, ptr %link
+  br label %unlinked
+unlinked:
+  call void @ReleaseSRWLockExclusive(ptr @duck.detached.lock)
+  %closed = call i32 @CloseHandle(ptr %handle)
+  call void @free(ptr %task)
+  br label %done
+done:
+  ret void
+}
+
+; Drops the task held in a variable or field, leaving it null.
+define internal void @duck.detached$dropSlot(ptr %slot) {
+  %task = load ptr, ptr %slot
+  store ptr null, ptr %slot
+  call void @duck.detached$drop(ptr %task)
+  ret void
+}
+
+; At exit: asks every task still running to stop, then waits until each body
+; has returned, so none is cut off mid-step. Records are only read here, under
+; the list lock; a task's owner may still drop it meanwhile, which unlinks it
+; under the same lock first. Handles in static fields are never dropped, and
+; end here.
+define internal void @duck.detached$exit() {
+entry:
+  call void @AcquireSRWLockExclusive(ptr @duck.detached.lock)
+  br label %ask
+ask:
+  %from = phi ptr [ @duck.detached.list, %entry ], [ %link, %asked ]
+  %each = load ptr, ptr %from
+  %end = icmp eq ptr %each, null
+  br i1 %end, label %asking, label %asked
+asked:
+  call void @duck.detached$stop(ptr %each)
+  %link = getelementptr %duck.detached, ptr %each, i32 0, i32 5
+  br label %ask
+asking:
+  call void @ReleaseSRWLockExclusive(ptr @duck.detached.lock)
+  br label %find
+find:
+  ; The first task still running, other than the one calling exit, if any.
+  call void @AcquireSRWLockExclusive(ptr @duck.detached.lock)
+  %self = load ptr, ptr @duck$detached.self
+  br label %scan
+scan:
+  %at = phi ptr [ @duck.detached.list, %find ], [ %next, %skip ]
+  %task = load ptr, ptr %at
+  %none = icmp eq ptr %task, null
+  br i1 %none, label %finished, label %inspect
+inspect:
+  %next = getelementptr %duck.detached, ptr %task, i32 0, i32 5
+  %state = load atomic i32, ptr %task acquire, align 4
+  %over = icmp ne i32 %state, 0
+  %itself = icmp eq ptr %task, %self
+  %pass = or i1 %over, %itself
+  br i1 %pass, label %skip, label %wait
+skip:
+  br label %scan
+wait:
+  %h = getelementptr %duck.detached, ptr %task, i32 0, i32 2
+  %handle = load atomic ptr, ptr %h acquire, align 8
+  call void @ReleaseSRWLockExclusive(ptr @duck.detached.lock)
+  %status = call i32 @WaitForSingleObject(ptr %handle, i32 -1)
+  br label %find
+finished:
+  call void @ReleaseSRWLockExclusive(ptr @duck.detached.lock)
   ret void
 }
 )IR";

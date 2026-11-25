@@ -26,7 +26,7 @@ enum MemberField { MemberName, MemberNameBytes, MemberSignature, MemberDeclaring
 std::string irType(Type t) {
   if (funcValue(t)) return "ptr";
   if (fixedArray(t)) return "[" + std::to_string(t.extent) + " x " + irType(*t.element) + "]";
-  if (collectionValue(t) || dynamicArray(t) || fileValue(t)) return "ptr";
+  if (collectionValue(t) || dynamicArray(t) || fileValue(t) || taskValue(t)) return "ptr";
 
   if (integral(t))
     return "i" + std::to_string(integerWidth(t));
@@ -770,6 +770,11 @@ class Generator {
       return "@duck.file$drop";
     }
 
+    if (taskValue(type)) {
+      usesTaskRuntime = true;
+      return "@duck.detached$dropSlot";
+    }
+
     if (funcValue(type)) {
       usesFuncRuntime = true;
       return "@duck$slot.func";
@@ -1219,6 +1224,12 @@ class Generator {
       return;
     }
 
+    if (taskValue(value.type)) {
+      usesTaskRuntime = true;
+      emit("call void @duck.detached$drop(ptr " + value.value + ")");
+      return;
+    }
+
     if (dynamicArray(value.type)) return freeArray(value.value, value.type);
 
     if (fixedArray(value.type)) {
@@ -1631,7 +1642,7 @@ class Generator {
       return;
     }
 
-    if (fileValue(binding.type)) {
+    if (fileValue(binding.type) || taskValue(binding.type)) {
       if (destroy) release({binding.type, load(binding.value)});
 
       return;
@@ -2452,7 +2463,7 @@ class Generator {
       allocations << "  " << address << " = alloca " << irType(value.type) << '\n';
 
     if ((managedValue(value.type) || funcValue(value.type) || collectionValue(value.type) ||
-         fileValue(value.type) || dynamicArray(value.type)) &&
+         fileValue(value.type) || taskValue(value.type) || dynamicArray(value.type)) &&
         value.value.empty())
       value.value = "null";
 
@@ -2863,6 +2874,13 @@ class Generator {
     return {type, value};
   }
   Value lowerCollectionMember(const Expr &e, const std::string &name) {
+    if (TokenText(name).kind() == Tok::Done) {
+      usesTaskRuntime = true;
+      auto done = fresh();
+      emit(done + " = call i1 @duck.detached$done(ptr " + load(location(*e.args[0]).value) + ")");
+      return {Type::Bool, done};
+    }
+
     if (name == "IsOpen") {
       auto open = fresh();
       emit(open + " = icmp ne ptr " + load(location(*e.args[0]).value) + ", null");
@@ -2966,6 +2984,13 @@ class Generator {
     const TokenText &op = e.token.text;
 
     if (auto file = analysis.fileCalls.find(&e); file != analysis.fileCalls.end()) return lowerFileCall(e, file->second);
+
+    if (auto task = analysis.taskCalls.find(&e); task != analysis.taskCalls.end()) {
+      usesTaskRuntime = true;
+      const auto handle = load(location(*e.receiver).value);
+      emit("call void @duck.detached$" + std::string(task->second == Tok::Stop ? "stop" : "join") + "(ptr " + handle + ")");
+      return {Type::Void, ""};
+    }
 
     if (e.receiver && memberName(op) == "Clear")
       if (const auto held = analysis.expressionTypes.find(e.receiver.get());
@@ -3961,7 +3986,30 @@ class Generator {
          " ], [ " + b.value + ", %" + rightEnd + " ]");
     return {Type::Bool, id};
   }
+  // `P{ body }`: the body's closure holds nothing (Semantics rejects captures),
+  // so it is a constant and the new thread may outlive this frame.
+  Value detachedTask(const Expr &e) {
+    usesTaskRuntime = true;
+    const auto closure = expression(*e.args[0]);
+    const auto entry = "@duck$detached." + symbolPrefix + "." + std::to_string(tasks++);
+    thunks << "define internal i32 " << entry << "(ptr %env) {\nentry:\n"
+           << "  %slot = getelementptr i8, ptr %env, i64 16\n"
+           << "  %fn = load ptr, ptr %slot\n  call void %fn(ptr %env)\n"
+           << "  ret i32 0\n}\n\n";
+    auto handle = fresh();
+    emit(handle + " = call ptr @duck.detached$start(ptr " + entry + ", ptr " + closure.value + ")");
+    return {Type::Task, handle};
+  }
   Value lowerExpression(const Expr &e) {
+    if (e.kind == ExprKind::Detached) return detachedTask(e);
+
+    if (analysis.stoppingQueries.count(&e)) {
+      usesTaskRuntime = true;
+      auto stopping = fresh();
+      emit(stopping + " = call i1 @duck.detached$stopping()");
+      return {Type::Bool, stopping};
+    }
+
     if (analysis.threadQueries.count(&e)) {
       usesTaskRuntime = true;
       const auto result = fresh();
@@ -5622,7 +5670,9 @@ class Generator {
                s.kind == StmtKind::PipeAssign || s.kind == StmtKind::CaretAssign ||
                s.kind == StmtKind::ShiftLeftAssign || s.kind == StmtKind::ShiftRightAssign) {
       lowerAssignment(s);
-    } else
+    } else if (s.expr->kind == ExprKind::Detached)
+      expression(*s.expr); // Nobody holds a lone P{ }: the program waits for it at exit.
+    else
       release(expression(*s.expr));
 
     return false;
@@ -5935,10 +5985,11 @@ std::string emitDestroys(const Symbols &symbols, std::set<std::string> container
         continue;
       }
 
-      if (fileValue(field.type)) {
+      if (fileValue(field.type) || taskValue(field.type)) {
         const auto part = "%field" + std::to_string(i);
         ir += "  " + part + " = getelementptr %struct." + record + ", ptr %self, i32 0, i32 " + std::to_string(i) +
-              "\n  call void @duck.file$drop(ptr " + part + ")\n";
+              "\n  call void " + (fileValue(field.type) ? "@duck.file$drop" : "@duck.detached$dropSlot") +
+              "(ptr " + part + ")\n";
         continue;
       }
 

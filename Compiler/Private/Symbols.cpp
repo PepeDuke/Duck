@@ -640,11 +640,12 @@ static void declareStatics(Symbols &symbols, const Program &program) {
     const auto &t = field.type;
 
     // Array elements are checked once every container is known.
+    // A static task is never destroyed: the program stops and waits for it at exit.
     if (field.scope.empty() && !(numeric(t) || t == Type::Bool || enumValue(t) || t == Type::Pointer || recordValue(t) ||
-          managedValue(t) || arrayValue(t)))
+          managedValue(t) || arrayValue(t) || taskValue(t)))
       fail(field.name, "static fields of type " + typeName(t) +
                            " are not supported yet; use a number, bool, enum, string, name, big, "
-                           "void*, container, or array");
+                           "void*, task, container, or array");
   }
 }
 // vecN and friends are ordinary containers from here on, so copies, fields,
@@ -952,7 +953,7 @@ bool Symbols::destructible(const std::string &record) const {
 
   for (const auto &field : records.at(record).fields)
     if (field.type.role == Type::Owner || collectionValue(field.type) || fileValue(field.type) ||
-        dynamicArray(field.type) ||
+        taskValue(field.type) || dynamicArray(field.type) ||
         (fixedArray(field.type) && needsCleanup(field.type)) ||
         (recordValue(field.type) && destructible(field.type.record)))
       return true;
@@ -1419,6 +1420,9 @@ void validateLifetimes(const Symbols &symbols) {
       else if (!parameter.reference && fileValue(parameter.type))
         fail(parameter.name, "parameter '" + parameter.name.text + "' must take its file by reference (file&): "
                                  "a file is move-only");
+      else if (!parameter.reference && taskValue(parameter.type))
+        fail(parameter.name, "parameter '" + parameter.name.text + "' must take its task by reference (task&): "
+                                 "a task is move-only");
       else if (!parameter.reference && arrayValue(parameter.type) && symbols.moveOnly(parameter.type))
         fail(parameter.name, "parameter '" + parameter.name.text + "' must take " + typeName(parameter.type) +
                                  " by reference (&): " +

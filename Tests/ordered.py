@@ -198,7 +198,6 @@ Main() {
             ('Main() { P{ Print(1) }{} }', 'safe for a worker'),
             ('F(func void() f) { P(f){} }\nMain() {}', 'safe for a worker'),
             ('F(int x) {}\nMain() { P(F){} }', 'zero parameters'),
-            ('Main() { P{} }', 'at least two branches'),
         ]:
             for flags in ((), ('--sequential',)):
                 with self.subTest(source=source, flags=flags):
@@ -616,6 +615,97 @@ Main() {
         self.assertNotIn('call ptr @duck.task$spawn', self.ir(source.replace('HINT', '4*')))
         self.assertIn('call ptr @duck.task$spawn', self.ir(source.replace('HINT', '*')))
         self.assertIn('call ptr @duck.task$spawn', self.ir(source.replace('HINT', '5000*')))
+
+    def test_tasks_example(self):
+        self.example('Concurrency/12_Tasks.dk', '1\n1\n0\n3\n1\n')
+
+    def test_tasks_end_with_their_owner(self):
+        self.check('''Log #{ int Stopped = 0 }
+Spin() {
+    while !P.Stopping { }
+    ${ Log.Stopped++ }
+}
+task Make() {
+    made : P{ Spin() }
+    return made
+}
+Holder { task Inner }
+End(task& t) {
+    t.Stop()
+    t.Join()
+}
+Main() {
+    {
+        scoped : P{ Spin() }
+    }
+    ${ Print(Log.Stopped) }
+    moved : Make()
+    End(moved)
+    ${ Print(Log.Stopped) }
+    {
+        Holder h
+        h.Inner = P{ Spin() }
+    }
+    ${ Print(Log.Stopped) }
+    task again
+    again = P{ Spin() }
+    again = P{ Spin() }
+    ${ Print(Log.Stopped) }
+    task none
+    Print(none.Done)
+    none.Join()
+}''', '1\n2\n3\n4\n1\n')
+
+    def test_tasks_run_even_with_one_worker(self):
+        # A task never runs inline: Main waits on it, so inline would hang.
+        source = '''Flag #{ int Seen = 0 }
+Main() {
+    t : P{ ${ Flag.Seen = 1 } }
+    int seen = 0
+    while seen == 0 { ${ seen = Flag.Seen } }
+    Print(seen)
+}'''
+        self.check(source, '1\n')
+        ir = self.ir(source)
+        self.assertIn('call ptr @duck.detached$start(', ir)
+        self.assertNotIn('@duck.task$spawn(ptr @duck$detached', ir)
+
+    def test_task_locks_are_named(self):
+        source = '''S #{ int N = 0 }
+Main() {
+    t : P{
+        while !P.Stopping { ${ S.N++ } }
+    }
+    ${ S.N = 2 }
+}'''
+        self.assertEqual(self.entered(source), ['false', 'false'])
+
+    def test_task_diagnostics(self):
+        for source, reason in [
+            ('Main() { int x = 1\n t : P{ Print(x) } }', "cannot use 'x' from the code that starts it"),
+            ('Main() { a : P{}\n b : a }', "cannot copy task 'a'"),
+            ('F(task t) {}\nMain() {}', 'must take its task by reference (task&)'),
+            ('Main() { a : P{}\n a.Wait() }', "task has no method 'Wait'"),
+            ('Main() { a : P{}\n Print(a.Running) }', "task has no member 'Running'"),
+            ('Main() { t : P{}{} }', 'has one body'),
+            ('S #{ int N }\nMain() { t : P{ S.N++ }\n S.N = 5 }', "this task uses static 'S.N' outside ${ }"),
+            ('S #{ int N }\nMain() { t : P{ S.N++ }\n ${ S.N = 5 } }', "this task uses static 'S.N' outside ${ }"),
+            ('S #{ int N }\nMain() { t : P{ ${ S.N++ } }\n S.N = 5 }', "main.dk:2) uses static 'S.N' outside ${ }"),
+            ('S #{ int N }\nBump() { S.N++ }\nMain() { t : P{ Bump() }\n Bump() }', "main.dk:2) uses it too"),
+            ('S #{ int N }\nMain() { a : P{ S.N++ }\n b : P{ S.N++ } }', 'both use static'),
+        ]:
+            with self.subTest(source=source):
+                self.rejected(source, reason)
+
+    def test_task_statics_owned_or_locked(self):
+        for source in [
+            'S #{ int N }\nSpin() { while !P.Stopping { S.N++ } }\nMain() { t : P{ Spin() } }',
+            'S #{ int N }\nMain() { t : P{ ${ S.N++ } }\n ${ S.N = 5 } }',
+            'S #{ #int Limit = 3\n int N }\nMain() { t : P{ ${ S.N = S.Limit } }\n Print(S.Limit) }',
+            'Main() { int task = 3\n Print(task) }',
+        ]:
+            with self.subTest(source=source):
+                self.duckc(self.write(source), '-o', self.root / 'x.ll')
 
 
 if __name__ == '__main__':

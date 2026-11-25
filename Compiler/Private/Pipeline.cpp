@@ -54,9 +54,17 @@ static bool fileFields(const Symbols &symbols) {
 
   return false;
 }
+// Likewise, destroying a container with a task field stops and waits for it.
+static bool taskFields(const Symbols &symbols) {
+  for (const auto &[name, record] : symbols.records)
+    for (const auto &field : record.fields)
+      if (taskValue(field.type)) return true;
+
+  return false;
+}
 std::string assembleModule(const std::vector<FunctionIR> &functions,
                            bool entry, const std::set<std::string> &nativeSymbols,
-                           bool mainArguments, bool fileFields, Target target) {
+                           bool mainArguments, bool fileFields, Target target, bool taskFields) {
   std::string module =
       "; Duck bootstrap LLVM IR\ndeclare i32 @printf(ptr, ...)\n"
       "declare double @llvm.floor.f64(double)\ndeclare void @llvm.trap()\n"
@@ -109,14 +117,23 @@ $duck$thread.self = comdat any
   bool needsHeap = needsMarkup;
 
   for (const auto &f : functions) needsHeap = needsHeap || f.usesHeapRuntime;
-  const bool needsTasks = std::any_of(functions.begin(), functions.end(), [](const auto &f) { return f.usesTaskRuntime; });
+  const bool needsTasks =
+      taskFields || std::any_of(functions.begin(), functions.end(), [](const auto &f) { return f.usesTaskRuntime; });
   if (needsText || needsHeap || needsFunc || needsScope || needsTasks) {
     if (!nativeSymbols.count("malloc")) module += "declare ptr @malloc(i64)\n";
     if (!nativeSymbols.count("free")) module += "declare void @free(ptr)\n";
   }
 
+  // Scopes and tasks both register exit handlers: declare atexit once for both.
+  auto runtimeSymbols = nativeSymbols;
+
+  if ((needsScope || (needsTasks && target != Target::Wasm64)) && !runtimeSymbols.count("atexit")) {
+    module += "declare i32 @atexit(ptr)\n";
+    runtimeSymbols.insert("atexit");
+  }
+
   if (needsScope) {
-    module += scopeRuntimeIR(nativeSymbols);
+    module += scopeRuntimeIR(runtimeSymbols);
     std::set<std::string> names;
 
     for (const auto &f : functions) names.insert(f.scopeNames.begin(), f.scopeNames.end());
@@ -152,9 +169,12 @@ define internal i32 @duck.lock$enter(i64 %mask, i1 %exclusive) { ret i32 0 }
 define internal void @duck.lock$exit(i32 %token) { ret void }
 )IR";
     if (needsFile) throw std::runtime_error("the built-in file API is unavailable on the wasm64 target");
+    for (const auto &f : functions)
+      if (f.definition.find("@duck.detached$") != std::string::npos)
+        throw std::runtime_error("tasks started with P{ } are unavailable on the wasm64 target");
   } else {
     if (needsTasks || needsLocks) module += lockRuntimeIR(nativeSymbols);
-    if (needsTasks) module += taskRuntimeIR(nativeSymbols);
+    if (needsTasks) module += taskRuntimeIR(runtimeSymbols);
   }
   if (needsText) module += textRuntimeIR();
   if (needsFile) module += fileRuntimeIR(nativeSymbols);
@@ -501,9 +521,10 @@ std::string compileModule(const Program &program, const Program &imports,
     const auto scheduling = indexScheduling(program, symbols);
     const auto effects = summarizeEffects(program, analyses, symbols, entry, &scheduling);
     phase("summarize effects");
+    checkTaskStatics(evaluatedFunctions, analyses, effects, symbols, entry, &scheduling);
 
     for (size_t i = 0; i < evaluatedFunctions.size(); ++i)
-      if (i < program.size() || !analyses[i].parallelGroups.empty())
+      if (i < program.size() || !analyses[i].parallelGroups.empty() || !analyses[i].detached.empty())
         planOrderedBlocks(*evaluatedFunctions[i], effects, symbols, analyses[i], entry, parallel, &scheduling);
     phase("plan ordered blocks");
 
@@ -585,7 +606,8 @@ std::string compileModule(const Program &program, const Program &imports,
       emitDestroys(symbols, destroys) + emitTables(symbols, tables, types) +
       emitDeclarations(declarations) +
       assembleModule(fragments, entry, nativeSymbols,
-                     entry && !symbols.at("Main").parameters.empty(), fileFields(symbols), target) +
+                     entry && !symbols.at("Main").parameters.empty(), fileFields(symbols), target,
+                     taskFields(symbols)) +
       runner;
   phase("emit module");
   auto result = emitNativeMathTypes(symbols, module) + module;

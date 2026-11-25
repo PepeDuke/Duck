@@ -93,6 +93,7 @@ std::string typeName(Type type) {
   case Type::Char: return "char";
   case Type::Date: return "date";
   case Type::File: return "file";
+  case Type::Task: return "task";
   case Type::Time: return "time";
   case Type::DateTime: return "datetime";
   case Type::Big: return "big";
@@ -900,6 +901,10 @@ class Analyzer {
       fail(e.token, "cannot copy file '" + storageText(e) +
                         "': a file is move-only; pass it by reference (file&), or return a local to move it");
 
+    if (taskValue(type) && e.addressable() && &e != movable)
+      fail(e.token, "cannot copy task '" + storageText(e) +
+                        "': a task is move-only; pass it by reference (task&), or return a local to move it");
+
     if (arrayValue(type) && symbols.moveOnly(type) && e.addressable() && !analysis.properties.count(&e) &&
         &e != movable)
       fail(e.token, "cannot copy " + typeName(type) + " '" + storageText(e) + "': " +
@@ -1455,6 +1460,16 @@ class Analyzer {
 
       requireComplete(base);
       analysis.collectionMembers[&e] = "IsOpen";
+      analysis.expressionTypes[&e] = Type::Bool;
+      return Type::Bool;
+    }
+
+    if (taskValue(type)) {
+      if (e.token.text != Tok::Done)
+        fail(e.token, "task has no member '" + e.token.text + "'; a task has Done and the methods Stop and Join");
+
+      requireComplete(base);
+      analysis.collectionMembers[&e] = TokenText(Tok::Done).str();
       analysis.expressionTypes[&e] = Type::Bool;
       return Type::Bool;
     }
@@ -3551,6 +3566,8 @@ class Analyzer {
 
       if (fileValue(printed)) fail(e.token, "cannot print a file; print its IsOpen or ReadText() instead");
 
+      if (taskValue(printed)) fail(e.token, "cannot print a task; print its Done instead");
+
       if (printed.depth && e.args[0]->kind != ExprKind::Null)
         fail(e.token, "cannot print an opaque pointer; compare it with null instead");
 
@@ -3598,6 +3615,19 @@ class Analyzer {
       if (!stored) fail(base.token, "store the file in a variable before calling its methods");
 
       return checkFileMethod(e, base, constant);
+    }
+    if (taskValue(t)) {
+      if (!stored) fail(base.token, "store the task in a variable before calling its methods");
+
+      const auto name = memberName(e.token.text);
+      const auto method = TokenText(name).kind();
+
+      if (method != Tok::Stop && method != Tok::Join)
+        fail(e.token, "task has no method '" + name + "'; a task has Stop and Join, and the member Done");
+      if (!e.args.empty()) fail(e.token, "wrong argument count for '" + name + "'; write " + name + "()");
+
+      analysis.taskCalls[&e] = method;
+      return Type(Type::Void);
     }
     if (!recordValue(t)) fail(base.token, "method receiver requires a container");
 
@@ -3925,7 +3955,49 @@ class Analyzer {
     return root->kind == ExprKind::Name && root->token.text == Tok::P && !findLocal(root->token) &&
            staticPath(e).empty() && staticPath(*root).empty();
   }
+  // `P.Stopping`: whether the task running this code was asked to stop.
+  bool stoppingProperty(const Expr &e) {
+    if (e.kind != ExprKind::Member || e.token.text != Tok::Stopping) return false;
+    const auto &root = *e.args[0];
+    return root.kind == ExprKind::Name && root.token.text == Tok::P && !findLocal(root.token) &&
+           staticPath(e).empty() && staticPath(root).empty();
+  }
+  // `P{ body }` runs its body on a thread of its own, which can outlive the
+  // statement and the frame that started it. So the body shares nothing with
+  // that frame: no locals, parameters, or `this`. It reaches shared state
+  // through statics, and Scheduling checks how it does.
+  Type checkDetached(const Expr &e) {
+    const auto &body = *e.args[0];
+    const auto type = expression(body);
+    const auto &info = analysis.lambdas.at(&body);
+
+    if (!funcValue(type) || !type.signature || !type.signature->parameters.empty() ||
+        type.signature->result != Type::Void)
+      fail(e.token, "a task started with P{ } takes no parameters and returns nothing");
+
+    if (info.usesThis || info.bound)
+      fail(e.token, "a task started with P{ } cannot use this or its fields: the task can outlive the object; "
+                    "share state through static fields instead");
+
+    if (!info.captures.empty())
+      fail(info.captures.front().token,
+           "a task started with P{ } cannot use '" + info.captures.front().token.text +
+               "' from the code that starts it: the task can outlive that frame; share state through static "
+               "fields instead");
+
+    analysis.detached.insert(&e);
+    analysis.expressionTypes[&e] = Type::Task;
+    return Type::Task;
+  }
   Type checkExpression(const Expr &e, Type expected) {
+    if (e.kind == ExprKind::Detached) return checkDetached(e);
+
+    if (stoppingProperty(e)) {
+      analysis.stoppingQueries.insert(&e);
+      analysis.expressionTypes[&e] = Type::Bool;
+      return Type::Bool;
+    }
+
     if (threadProperty(e)) {
       static const std::map<std::string, std::string> states{{"Idle", "0"}, {"Running", "1"},
           {"WaitingForJoin", "2"}, {"WaitingForLock", "3"}, {"Starting", "4"}};
@@ -4448,7 +4520,8 @@ class Analyzer {
 
     // `return local` moves a value with a destructor out of the function.
     if (s.expr && s.expr->kind == ExprKind::Name &&
-        (collectionValue(result) || fileValue(result) || (arrayValue(result) && symbols.moveOnly(result)) ||
+        (collectionValue(result) || fileValue(result) || taskValue(result) ||
+         (arrayValue(result) && symbols.moveOnly(result)) ||
          (recordValue(result) && symbols.destructible(result.record)))) {
       const auto *local = findLocal(s.expr->token);
 
@@ -4678,7 +4751,7 @@ class Analyzer {
 
     bind(name, {type, s.constant,
                 s.kind == StmtKind::Own || s.expr != nullptr || recordValue(type) || collectionValue(type) ||
-                    fileValue(type) || arrayValue(type)});
+                    fileValue(type) || taskValue(type) || arrayValue(type)});
 
     if (s.kind == StmtKind::Own && s.type == Type::Void && method && !scopes.empty())
       if (const auto field = scopes.front().find(s.name);
