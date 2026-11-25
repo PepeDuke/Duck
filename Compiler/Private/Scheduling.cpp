@@ -1268,6 +1268,37 @@ class Scheduler {
   }
 
 public:
+  // Whether any statement could start a task, judged by the parts of
+  // spawnable that need no effect walk. Every statement is checked, more than
+  // list visits, so a function without one has nothing to schedule and no
+  // use for the walk's recording.
+  static bool anyCandidate(const Function &function, const FunctionAnalysis &analysis, const EffectTable &table) {
+    bool found = false;
+    auto expr = [](const Expr &) {};
+    auto stmt = [&](const Stmt &s) {
+      if (found || (s.kind != StmtKind::Let && s.kind != StmtKind::Expr) || !s.expr || s.expr->kind != ExprKind::Call) return;
+
+      if (s.kind == StmtKind::Let)
+        if (const auto type = analysis.localTypes.find(&s); type != analysis.localTypes.end() && !plainValue(type->second))
+          return;
+
+      if (s.expr->receiver && !s.expr->receiver->addressable()) return;
+
+      const auto target = analysis.callTargets.find(s.expr.get());
+
+      if (target == analysis.callTargets.end()) return;
+
+      const auto summary = table.find(target->second);
+
+      if (summary == table.end() || !summary->second.threadSafe || summary->second.unknown || summary->second.external) return;
+
+      found = true;
+    };
+
+    for (const auto &s : function.body) visitStatement(*s, expr, stmt);
+
+    return found;
+  }
   Scheduler(const Function &function, const EffectTable &table, FunctionAnalysis &analysis, CostModel &cost,
             const Symbols &symbols, bool library, const std::set<std::string> &overridden)
       : function(function), table(table), analysis(analysis), cost(cost) {
@@ -1657,7 +1688,7 @@ void scheduleTasks(const Program &program, size_t index, const EffectTable &effe
                    std::vector<FunctionAnalysis> &analyses, bool entry, const SchedulingIndex *shared) {
   const auto &function = program[index];
 
-  if (!function.nativeSymbol.empty()) return;
+  if (!function.nativeSymbol.empty() || !Scheduler::anyCandidate(function, analyses[index], effects)) return;
 
   std::optional<SchedulingIndex> own;
 
