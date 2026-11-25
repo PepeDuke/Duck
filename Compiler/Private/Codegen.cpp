@@ -5059,7 +5059,7 @@ class Generator {
     const bool terminated = blockThenLeaveScope(s.body);
     return terminated;
   }
-  bool sequence(const std::vector<std::unique_ptr<Stmt>> &body) {
+  bool sequence(const Stmts &body) {
     pending.emplace_back();
     bool terminated = false;
 
@@ -5076,7 +5076,7 @@ class Generator {
     pending.pop_back();
     return terminated;
   }
-  bool block(const std::vector<std::unique_ptr<Stmt>> &body) {
+  bool block(const Stmts &body) {
     scopes.emplace_back();
     bool terminated = sequence(body);
 
@@ -5173,7 +5173,7 @@ class Generator {
     emit("call void @duck.markup$splice(ptr " + holder + ", ptr " + source + ")");
   }
   // Runs a body in the innermost scope, then cleans up and leaves that scope.
-  bool blockThenLeaveScope(const std::vector<std::unique_ptr<Stmt>> &body) {
+  bool blockThenLeaveScope(const Stmts &body) {
     const bool terminated = block(body);
 
     if (!terminated) cleanupScopes(scopes.size() - 1);

@@ -4325,7 +4325,7 @@ class Analyzer {
 
     return true;
   }
-  bool sequence(const std::vector<std::unique_ptr<Stmt>> &statements) {
+  bool sequence(const Stmts &statements) {
     bool terminated = false;
 
     for (const auto &s : statements) {
@@ -4355,7 +4355,7 @@ class Analyzer {
 
     return terminated;
   }
-  bool block(const std::vector<std::unique_ptr<Stmt>> &statements) {
+  bool block(const Stmts &statements) {
     scopes.emplace_back();
     bool terminated = sequence(statements);
 

@@ -1133,42 +1133,29 @@ class Parser {
                     "runs them in parallel and waits for all of them");
   }
   static int precedence(const Token &t) {
-    if (t.string)
-      return 0;
+    if (t.string) return 0;
 
-    const std::string &s = t.text;
-
-    if (s == "||")
-      return 1;
-
-    if (s == "&&")
-      return 2;
-
-    if (s == "|")
-      return 3;
-
-    if (s == "^")
-      return 4;
-
-    if (s == "&")
-      return 5;
-
-    if (s == "==" || s == "!=")
-      return 6;
-
-    if (s == "<" || s == ">" || s == "<=" || s == ">=")
-      return 7;
-
-    if (s == "<<" || s == ">>")
-      return 8;
-
-    if (s == "+" || s == "-")
-      return 9;
-
-    if (s == "*" || s == "/" || s == "%")
-      return 10;
-
-    return 0;
+    switch (t.text.kind()) {
+    case Tok::OrOr: return 1;
+    case Tok::AndAnd: return 2;
+    case Tok::Pipe: return 3;
+    case Tok::Caret: return 4;
+    case Tok::Ampersand: return 5;
+    case Tok::EqualEqual:
+    case Tok::NotEqual: return 6;
+    case Tok::Less:
+    case Tok::Greater:
+    case Tok::LessEqual:
+    case Tok::GreaterEqual: return 7;
+    case Tok::ShiftLeft:
+    case Tok::ShiftRight: return 8;
+    case Tok::Plus:
+    case Tok::Minus: return 9;
+    case Tok::Star:
+    case Tok::Slash:
+    case Tok::Percent: return 10;
+    default: return 0;
+    }
   }
   void parenthesized(std::unique_ptr<Expr> &e, bool stopAtPipe) {
     lines();
@@ -1534,12 +1521,12 @@ class Parser {
   }
   // The braces of the block parsed last, for Function::bodyOpen/bodyClose.
   Token blockOpen{}, blockClose{};
-  std::vector<std::unique_ptr<Stmt>> block() {
+  Stmts block() {
     lines();
     const auto open = expect(Tok::LeftBrace);
     lines();
     hygiene.emplace_back();
-    std::vector<std::unique_ptr<Stmt>> result;
+    Stmts result;
 
     while (!at(Tok::RightBrace)) {
       if (at(Tok::Eof)) expected("}");
@@ -1556,7 +1543,7 @@ class Parser {
     blockOpen = open;
     return result;
   }
-  using Statements = std::vector<std::unique_ptr<Stmt>>;
+  using Statements = Stmts;
   // Builds the expression a piece of generated markup code reads or stores to.
   using Place = std::function<std::unique_ptr<Expr>(const Token &)>;
   static std::unique_ptr<Expr> localName(const Token &at, const std::string &local) {
@@ -1853,7 +1840,7 @@ class Parser {
     e->args.push_back(std::move(operand));
     return e;
   }
-  void assertionFailureStep(std::vector<std::unique_ptr<Stmt>> &failure, const Token &start, const std::string &op, std::unique_ptr<Expr> first, std::unique_ptr<Expr> second = nullptr) {
+  void assertionFailureStep(Stmts &failure, const Token &start, const std::string &op, std::unique_ptr<Expr> first, std::unique_ptr<Expr> second = nullptr) {
     auto call = syntheticExpr(start, ExprKind::Call, op);
     call->args.push_back(std::move(first));
 
@@ -1865,7 +1852,7 @@ class Parser {
     s->expr = std::move(call);
     failure.push_back(std::move(s));
   }
-  std::unique_ptr<Expr> comparisonAssertion(const Token &start, const Token &check, std::vector<std::unique_ptr<Expr>> &arguments, std::vector<std::unique_ptr<Stmt>> &statements, std::vector<std::unique_ptr<Stmt>> &failure) {
+  std::unique_ptr<Expr> comparisonAssertion(const Token &start, const Token &check, Exprs &arguments, Stmts &statements, Stmts &failure) {
     std::unique_ptr<Expr> condition;
     // A literal stays in place, so the comparison type-checks exactly as a
     // written `a == 5` would and `null` keeps the other operand's type.
@@ -1917,7 +1904,7 @@ class Parser {
 
     return condition;
   }
-  std::unique_ptr<Stmt> assertionCheck(const Token &start, std::unique_ptr<Expr> condition, std::vector<std::unique_ptr<Stmt>> failure, std::vector<std::unique_ptr<Stmt>> statements) {
+  std::unique_ptr<Stmt> assertionCheck(const Token &start, std::unique_ptr<Expr> condition, Stmts failure, Stmts statements) {
     auto leave = std::make_unique<Stmt>();
     leave->token = start;
     leave->kind = StmtKind::Return;
@@ -1961,10 +1948,10 @@ class Parser {
       fail(start, label + " expects " + std::to_string(arity->second.second) + " argument" +
                       (arity->second.second == 1 ? "" : "s"));
 
-    std::vector<std::unique_ptr<Stmt>> failure;
+    Stmts failure;
     assertionFailureStep(failure, start, "$T.fail", syntheticText(start, where(start) + ": test " + currentTest + ": " + label +
                               (check.text == Tok::Fail ? "" : " failed")));
-    std::vector<std::unique_ptr<Stmt>> statements;
+    Stmts statements;
     std::unique_ptr<Expr> condition;
 
     if (arity->second.second == 2) {
@@ -2236,7 +2223,7 @@ class Parser {
         fail(s.step->token, "for step cannot declare a variable");
     }
 
-    std::vector<std::unique_ptr<Stmt>> before, after;
+    Stmts before, after;
 
     if (accept(Tok::Pipe)) {
       lines();
@@ -2320,19 +2307,19 @@ class Parser {
     s.expr = std::move(collection);
     return true;
   }
-  std::vector<std::unique_ptr<Stmt>> controlBody() {
+  Stmts controlBody() {
     lines();
 
     if (at(Tok::LeftBrace))
       return block();
 
-    std::vector<std::unique_ptr<Stmt>> body;
+    Stmts body;
     body.push_back(statement());
     return body;
   }
   // The arguments of a call after its '(' has been read, through ')'.
-  std::vector<std::unique_ptr<Expr>> callArguments() {
-    std::vector<std::unique_ptr<Expr>> arguments;
+  Exprs callArguments() {
+    Exprs arguments;
     lines();
 
     if (!at(Tok::RightParen))
@@ -3080,7 +3067,7 @@ class Parser {
   }
   // Collects a file's statements into its hidden function, named by
   // combineUnits. Its locals live for one Exec; other files never see them.
-  void fileScript(Program &program, std::vector<std::unique_ptr<Stmt>> body) {
+  void fileScript(Program &program, Stmts body) {
     Token name = body.front()->token;
     name.text = Tok::FirstScript;
     name.string = name.character = false;
@@ -3165,7 +3152,7 @@ class Parser {
 
     lines();
   }
-  void fileStatement(std::vector<std::unique_ptr<Stmt>> &statements) {
+  void fileStatement(Stmts &statements) {
     statements.push_back(statement());
 
     if (!at(Tok::Newline)) fail(peek(), "expected newline between statements");
@@ -3183,7 +3170,7 @@ class Parser {
 
     lines();
     usingDirectives();
-    std::vector<std::unique_ptr<Stmt>> statements;
+    Stmts statements;
 
     while (!at(Tok::Eof) && !(nested && at(Tok::RightBrace))) {
       if (testBody())

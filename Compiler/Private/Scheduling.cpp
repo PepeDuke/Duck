@@ -502,7 +502,7 @@ class EffectWalker {
 
     current.unknown = true;
   }
-  void list(const std::vector<std::unique_ptr<Stmt>> &statements) {
+  void list(const Stmts &statements) {
     scopes.emplace_back();
 
     for (const auto &s : statements) statement(*s);
@@ -1061,7 +1061,7 @@ class CostModel {
 
     return cost;
   }
-  double body(const std::vector<std::unique_ptr<Stmt>> &statements, Frame &frame) {
+  double body(const Stmts &statements, Frame &frame) {
     double cost = 0;
 
     for (const auto &s : statements) cost += statement(*s, frame);
@@ -1195,7 +1195,7 @@ class Scheduler {
 
     return cost.estimate(*s.expr, target->second, function, analysis) >= TaskThreshold;
   }
-  void list(const std::vector<std::unique_ptr<Stmt>> &statements) {
+  void list(const Stmts &statements) {
     for (const auto &s : statements) nested(*s);
 
     std::vector<std::pair<const Stmt *, EffectSet>> tasks;

@@ -688,17 +688,41 @@ inline Type arbitraryCommon(const Type &a, const Type &b) {
              : (unsignedResult ? Type::UTiny : Type::Tiny);
 }
 struct Function;
+// AST nodes and their child lists come from a pool (NodePool.cpp) instead of
+// the general heap. A parse makes hundreds of thousands of small blocks, and
+// the heap spent about a third of parsing time on them. A freed block is
+// reused for the next block of its size class on the same thread; the pool
+// never returns memory to the system.
+namespace nodes {
+void *allocate(std::size_t bytes);
+void release(void *block, std::size_t bytes) noexcept;
+} // namespace nodes
+template <class T> struct NodeAllocator {
+  using value_type = T;
+  NodeAllocator() = default;
+  template <class U> NodeAllocator(const NodeAllocator<U> &) {}
+  T *allocate(std::size_t count) { return static_cast<T *>(nodes::allocate(count * sizeof(T))); }
+  void deallocate(T *block, std::size_t count) noexcept { nodes::release(block, count * sizeof(T)); }
+  template <class U> bool operator==(const NodeAllocator<U> &) const { return true; }
+  template <class U> bool operator!=(const NodeAllocator<U> &) const { return false; }
+};
+struct Expr;
+struct Stmt;
+using Exprs = std::vector<std::unique_ptr<Expr>, NodeAllocator<std::unique_ptr<Expr>>>;
+using Stmts = std::vector<std::unique_ptr<Stmt>, NodeAllocator<std::unique_ptr<Stmt>>>;
 struct Expr {
+  static void *operator new(std::size_t bytes) { return nodes::allocate(bytes); }
+  static void operator delete(void *node, std::size_t bytes) noexcept { nodes::release(node, bytes); }
   Token token;
   ExprKind kind = ExprKind::None;
   Type castType = Type::Void;
-  std::vector<std::unique_ptr<Expr>> args;
+  Exprs args;
   std::unique_ptr<Expr> receiver;
   // A lambda's generated function. Shared because field defaults are cloned.
   std::shared_ptr<Function> lambda;
   // A "macroValue": read-only locals for the macro's arguments, in scope for
   // its result in args[0] and evaluated only when the expression is reached.
-  std::vector<std::unique_ptr<struct Stmt>> bindings;
+  Stmts bindings;
   bool addressable() const {
     return kind == ExprKind::Name || kind == ExprKind::Member || kind == ExprKind::Index || (kind == ExprKind::Unary && token.text == Tok::Star);
   }
@@ -706,6 +730,8 @@ struct Expr {
 
 // statment
 struct Stmt {
+  static void *operator new(std::size_t bytes) { return nodes::allocate(bytes); }
+  static void operator delete(void *node, std::size_t bytes) noexcept { nodes::release(node, bytes); }
   Token token;
   StmtKind kind = StmtKind::None;
   std::string name;
@@ -715,12 +741,12 @@ struct Stmt {
   bool constant = false;
   std::unique_ptr<Expr> expr, target;
   std::unique_ptr<Stmt> initializer, step;
-  std::vector<std::unique_ptr<Stmt>> body, alternate;
+  Stmts body, alternate;
   // A "switch" holds its selector as the hidden local `initializer`, reads it
   // back through `target`, runs macro argument bindings from `alternate`, and
   // has one "case" statement per section in `body`. A section's labels are
   // here; stacked labels and `default` share one section.
-  std::vector<std::unique_ptr<Expr>> labels; // Also holds the callable operands of a P group.
+  Exprs labels; // Also holds the callable operands of a P group.
   bool isDefault = false;
 };
 // A `using Name.Space` directive. It applies to the declarations after it in
@@ -784,7 +810,7 @@ struct Function {
   // from its getter after parsing (see resolveProperties).
   mutable Type result;
   mutable std::vector<Parameter> params;
-  std::vector<std::unique_ptr<Stmt>> body;
+  Stmts body;
   bool method = false;
   std::string nativeSymbol; // Nonempty for a bodyless extern "C" declaration.
   bool protectedAccess = false; // A container member declared with '-'.

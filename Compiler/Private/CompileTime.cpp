@@ -466,7 +466,7 @@ class Interpreter {
     return conversion == a.conversions.end() ? result : convert(result, conversion->second);
   }
   struct Flow { enum Kind { Next, Return, Break, Continue } kind = Next; Value value; };
-  Flow sequence(const std::vector<std::unique_ptr<Stmt>> &body, size_t owner, Environment &env) {
+  Flow sequence(const Stmts &body, size_t owner, Environment &env) {
     env.emplace_back();
     Flow result;
 
@@ -667,7 +667,7 @@ class MarkerPass {
     if (s.step) statement(*s.step);
     if (loop) env.pop_back();
   }
-  void list(const std::vector<std::unique_ptr<Stmt>> &body) {
+  void list(const Stmts &body) {
     env.emplace_back();
 
     for (const auto &s : body) statement(*s);
