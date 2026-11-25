@@ -523,6 +523,28 @@ inline NativeMath nativeMath(const std::string &name) {
 
   return {};
 }
+// The same for token text: every native math name is a fixed spelling, so the
+// token's kind decides it without comparing any text.
+inline NativeMath nativeMath(const TokenText &text) {
+  switch (text.kind()) {
+  case Tok::Quat: return {Type::Float, 1, 4, true, false};
+  case Tok::Rot: return {Type::Float, 1, 3, false, true};
+  case Tok::Vec2: return {Type::Float, 1, 2};
+  case Tok::Vec3: return {Type::Float, 1, 3};
+  case Tok::Vec4: return {Type::Float, 1, 4};
+  case Tok::Ivec2: return {Type::Int, 1, 2};
+  case Tok::Ivec3: return {Type::Int, 1, 3};
+  case Tok::Ivec4: return {Type::Int, 1, 4};
+  case Tok::Dvec2: return {Type::Double, 1, 2};
+  case Tok::Dvec3: return {Type::Double, 1, 3};
+  case Tok::Dvec4: return {Type::Double, 1, 4};
+  case Tok::Mat3: return {Type::Float, 3, 3};
+  case Tok::Mat4: return {Type::Float, 4, 4};
+  case Tok::Dmat3: return {Type::Double, 3, 3};
+  case Tok::Dmat4: return {Type::Double, 4, 4};
+  default: return {};
+  }
+}
 inline NativeMath nativeMath(const Type &t) { return recordValue(t) ? nativeMath(t.record) : NativeMath{}; }
 inline Type nativeNamed(const std::string &name) {
   Type t(Type::Record);

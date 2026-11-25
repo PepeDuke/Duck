@@ -21,6 +21,24 @@ class Parser {
   std::vector<Splice> splices;
   const std::set<std::string> &containerNames;
   const MacroTable &macros;
+  // Words that stop being keywords when the program declares a container of
+  // that name. The names are fixed for the whole parse, so each is looked up once.
+  const bool taskContainer, fileContainer, markupContainer, pContainer, tContainer;
+  // typePath's working storage, kept between calls so a lookup allocates
+  // nothing: the token index of each word of the path, and a candidate name.
+  mutable std::vector<size_t> pathWords;
+  mutable std::string probe;
+  // typePath's last answer. The parser asks about one position several times
+  // (declarationType, namedType, ...) before moving on. The answer depends on
+  // the tokens there, which change only by a macro splice, the enclosing
+  // scope, and the visible usings; holding the usings keeps their address from
+  // being reused by a later list.
+  struct TypePathCache {
+    size_t at = SIZE_MAX, splices = 0, length = 0;
+    std::string scope, qualified;
+    Usings usings;
+  };
+  mutable TypePathCache typePathCache;
   // Names declared by macro output, innermost lexical scope last, each with
   // the mark of the expansion that declared it.
   std::vector<std::set<std::pair<unsigned, std::string>>> hygiene{1};
@@ -522,64 +540,94 @@ class Parser {
   // from the innermost enclosing container outward, then at file scope,
   // longest path first. `qualified` receives the type's full name.
   size_t typePath(size_t at, std::string *qualified = nullptr) const {
-    std::vector<std::string> paths;
+    auto &cache = typePathCache;
+
+    if (cache.at != at || cache.splices != splices.size() || cache.usings != usings || cache.scope != scope) {
+      cache.at = SIZE_MAX; // Stays invalid if the lookup fails.
+      const auto length = findTypePath(at, cache.qualified);
+      cache.at = at;
+      cache.splices = splices.size();
+      cache.usings = usings;
+      cache.scope = scope;
+      cache.length = length;
+    }
+
+    if (qualified && cache.length) *qualified = cache.qualified;
+
+    return cache.length;
+  }
+  // Sets `probe` to the first `count` words of the path, after the first
+  // `prefixLength` characters of `prefix` and a dot. `dot` keeps the dot even
+  // after an empty prefix, as a using's target always has one.
+  void buildProbe(const std::string &prefix, size_t prefixLength, size_t count, bool dot) const {
+    probe.assign(prefix, 0, prefixLength);
+
+    for (size_t n = 0; n < count; ++n) {
+      if (n > 0 || prefixLength > 0 || dot) probe += '.';
+
+      probe += tokens[pathWords[n]].text.str();
+    }
+  }
+  // typePath's lookup. Candidate names are built in `probe` and the enclosing
+  // scope is a length of `scope`, so trying a name allocates nothing.
+  size_t findTypePath(size_t at, std::string &found) const {
+    pathWords.clear();
 
     for (size_t k = at;; k += 2) {
-      const auto &t = tokens[k];
+      if (!isWord(tokens[k])) break;
 
-      if (!isWord(t))
-        break;
-
-      paths.push_back(paths.empty() ? t.text.str() : paths.back() + "." + t.text);
+      pathWords.push_back(k);
 
       if (tokens[k + 1].string || tokens[k + 1].text != Tok::Dot) break;
     }
 
-    for (auto enclosing = scope; !paths.empty();) {
-      for (size_t n = paths.size(); n-- > 0;) {
-        const auto name = enclosing.empty() ? paths[n] : enclosing + "." + paths[n];
+    if (pathWords.empty()) return 0;
 
-        if (containerNames.count(name)) {
-          if (qualified) *qualified = name;
+    for (size_t enclosing = scope.size();;) {
+      for (size_t n = pathWords.size(); n-- > 0;) {
+        buildProbe(scope, enclosing, n + 1, false);
 
+        if (containerNames.count(probe)) {
+          found = probe;
           return 2 * n + 1;
         }
       }
 
       // Then the containers this scope imports. Two imports providing the
       // path make it ambiguous.
-      std::string found, via;
+      const Using *via = nullptr;
       size_t length = 0;
 
       for (const auto &directive : *usings) {
-        if (directive.level != enclosing) continue;
+        if (directive.level.size() != enclosing || scope.compare(0, enclosing, directive.level) != 0) continue;
 
-        for (size_t n = paths.size(); n-- > 0;) {
-          const auto name = directive.target + "." + paths[n];
+        for (size_t n = pathWords.size(); n-- > 0;) {
+          buildProbe(directive.target, directive.target.size(), n + 1, true);
 
-          if (!containerNames.count(name)) continue;
+          if (!containerNames.count(probe)) continue;
 
-          if (!found.empty() && found != name)
-            fail(tokens[at], "'" + paths[n] + "' is ambiguous between '" + found + "' (using " +
-                                 via + ") and '" + name + "' (using " + directive.target + ")");
+          if (via && found != probe) {
+            std::string path;
 
-          found = name;
-          via = directive.target;
+            for (size_t w = 0; w <= n; ++w) path += (w ? "." : "") + tokens[pathWords[w]].text;
+
+            fail(tokens[at], "'" + path + "' is ambiguous between '" + found + "' (using " + via->target +
+                                 ") and '" + probe + "' (using " + directive.target + ")");
+          }
+
+          found = probe;
+          via = &directive;
           length = 2 * n + 1;
           break;
         }
       }
 
-      if (!found.empty()) {
-        if (qualified) *qualified = found;
+      if (via) return length;
 
-        return length;
-      }
+      if (enclosing == 0) break;
 
-      if (enclosing.empty()) break;
-
-      const auto dot = enclosing.rfind('.');
-      enclosing = dot == std::string::npos ? "" : enclosing.substr(0, dot);
+      const auto dot = scope.rfind('.', enclosing - 1);
+      enclosing = dot == std::string::npos ? 0 : dot;
     }
 
     return 0;
@@ -644,8 +692,11 @@ class Parser {
   // iN and uN name an N-byte integer. Every i/u + digits word is reserved so
   // that out-of-range widths get a precise diagnostic.
   bool byteWidthType() const {
+    // No fixed spelling is i or u followed by digits, so only literals can be.
+    if (peek().string || peek().text.kind() != Tok::Literal) return false;
+
     const std::string &t = peek().text;
-    return !peek().string && t.size() >= 2 && (t[0] == 'i' || t[0] == 'u') &&
+    return t.size() >= 2 && (t[0] == 'i' || t[0] == 'u') &&
            std::all_of(t.begin() + 1, t.end(),
                        [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
   }
@@ -662,7 +713,7 @@ class Parser {
   // `task` is a type only where one can be, as `file` is: `task worker` or
   // `task& worker`, while `int task` still names a variable.
   bool taskKeyword() const {
-    if (!at(Tok::Task) || containerNames.count("task")) return false;
+    if (!at(Tok::Task) || taskContainer) return false;
 
     const auto &next = tokens.at(pos + 1);
     return !next.string && !next.text.empty() && (isIdentifierStart(next.text[0]) || next.text == Tok::Ampersand);
@@ -674,14 +725,14 @@ class Parser {
   // `file` is a type only where one can be, as in `file log` or `file& log`:
   // it is still a usable name, as in `void* file`.
   bool fileKeyword() const {
-    if (!at(Tok::File) || containerNames.count("file")) return false;
+    if (!at(Tok::File) || fileContainer) return false;
 
     const auto &next = tokens.at(pos + 1);
     return !next.string && !next.text.empty() && (isIdentifierStart(next.text[0]) || next.text == Tok::Ampersand);
   }
   // `markup` is a type only where one can be: it is still a usable name.
   bool markupKeyword() const {
-    if (!at(Tok::Markup) || containerNames.count("markup")) return false;
+    if (!at(Tok::Markup) || markupContainer) return false;
 
     const auto &next = tokens.at(pos + 1);
     return !next.string && !next.text.empty() &&
@@ -1067,7 +1118,7 @@ class Parser {
   // `P{ body }` as a value starts a task: a thread of its own, given back as
   // a task handle.
   bool detachedAhead() const {
-    return at(Tok::P) && punctuation(tokens.at(pos + 1), Tok::LeftBrace) && !containerNames.count("P");
+    return at(Tok::P) && punctuation(tokens.at(pos + 1), Tok::LeftBrace) && !pContainer;
   }
   // After the 'P': the body, as a lambda without parameters.
   void detachedTask(Expr &e) {
@@ -1774,7 +1825,7 @@ class Parser {
         !punctuation(tokens.at(pos + 3), Tok::LeftParen))
       return false;
 
-    const bool container = containerNames.count("T") || containerNames.count("#{T");
+    const bool container = tContainer;
 
     if (assertionNames().count(tokens[pos + 2].text)) return !currentTest.empty() || !container;
 
@@ -3309,7 +3360,9 @@ class Parser {
 
 public:
   Parser(std::vector<Token> t, const std::set<std::string> &names, const MacroTable &macroTable)
-      : tokens(std::move(t)), containerNames(names), macros(macroTable) {}
+      : tokens(std::move(t)), containerNames(names), macros(macroTable), taskContainer(names.count("task") != 0),
+        fileContainer(names.count("file") != 0), markupContainer(names.count("markup") != 0),
+        pContainer(names.count("P") != 0), tContainer(names.count("T") != 0 || names.count("#{T") != 0) {}
   Program parse() {
     Program functions;
     output = &functions;

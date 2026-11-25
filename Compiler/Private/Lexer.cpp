@@ -45,13 +45,17 @@ void freezeSources(bool frozen) { sourcesFrozen.store(frozen); }
 namespace {
 // Literal text lives in fixed blocks behind a directory that never moves, so
 // a reader needs no lock: an index is only handed out after its string is
-// stored, and other threads get indexes through tokens passed to them.
+// stored, and other threads get indexes through tokens passed to them. The
+// directory is constant-initialized (all null) before any code runs, so a
+// read goes straight to it, without the first-use check of a local static.
+constexpr std::uint32_t LiteralBlockBits = 12, LiteralBlockSize = 1u << LiteralBlockBits, LiteralBlocks = 1u << 14;
+std::unique_ptr<std::string[]> literalBlocks[LiteralBlocks];
+
+// What only interning touches, under its lock.
 struct LiteralTable {
-  static constexpr std::uint32_t BlockBits = 12, BlockSize = 1u << BlockBits, MaxBlocks = 1u << 14;
   std::mutex lock;
   std::unordered_map<std::string, std::uint32_t> ids;
   std::uint32_t count = 0;
-  std::unique_ptr<std::string[]> blocks[MaxBlocks];
 };
 
 LiteralTable &literalTable() {
@@ -82,8 +86,7 @@ const std::unordered_map<std::string, Tok> &spellingKinds() {
 } // namespace
 
 const std::string &TokenText::literalText(std::uint32_t literal) {
-  const auto &table = literalTable();
-  return table.blocks[literal >> LiteralTable::BlockBits][literal & (LiteralTable::BlockSize - 1)];
+  return literalBlocks[literal >> LiteralBlockBits][literal & (LiteralBlockSize - 1)];
 }
 
 const std::string &TokenText::spelling(Tok kind) { return spellings()[static_cast<size_t>(kind)]; }
@@ -97,13 +100,13 @@ TokenText TokenText::intern(const std::string &text) {
   if (const auto found = table.ids.find(text); found != table.ids.end()) return TokenText(Tok::Literal, found->second);
 
   const auto id = table.count;
-  const auto block = id >> LiteralTable::BlockBits;
+  const auto block = id >> LiteralBlockBits;
 
-  if (block >= LiteralTable::MaxBlocks) throw std::logic_error("too many distinct token texts");
+  if (block >= LiteralBlocks) throw std::logic_error("too many distinct token texts");
 
-  if (!table.blocks[block]) table.blocks[block].reset(new std::string[LiteralTable::BlockSize]);
+  if (!literalBlocks[block]) literalBlocks[block].reset(new std::string[LiteralBlockSize]);
 
-  table.blocks[block][id & (LiteralTable::BlockSize - 1)] = text;
+  literalBlocks[block][id & (LiteralBlockSize - 1)] = text;
   table.ids.emplace(text, id);
   ++table.count;
   return TokenText(Tok::Literal, id);
