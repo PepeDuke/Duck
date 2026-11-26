@@ -780,8 +780,28 @@ struct FunctionIR {
   std::map<std::string, std::string> mathImports;
   bool usesFileRuntime = false;
 };
+// What lowering a module's functions shares: each container's dispatch
+// names, dispatch table layout and visible fields. Every method of a
+// container needs them and they depend only on the symbols, so each is built
+// once per module rather than once per function. Safe to use from several
+// threads; the symbols must not change while it is in use.
+class LoweringContext {
+public:
+  explicit LoweringContext(const Symbols &symbols);
+  ~LoweringContext();
+  LoweringContext(const LoweringContext &) = delete;
+  LoweringContext &operator=(const LoweringContext &) = delete;
+  const std::vector<std::string> &dispatchNames(const std::string &record) const;
+  const std::string &tableLayout(const std::string &record) const;
+  const std::vector<MemberPath> &visibleFields(const std::string &record) const;
+
+private:
+  struct Cache;
+  std::unique_ptr<Cache> cache;
+};
+// Without a context, the function builds what it needs for itself.
 FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
-                         const FunctionAnalysis &analysis);
+                         const FunctionAnalysis &analysis, const LoweringContext *context = nullptr);
 // nativeSymbols lists symbols already declared by the program, so runtime
 // imports are not declared twice.
 // mainArguments selects the native entry for Main(string [] args).

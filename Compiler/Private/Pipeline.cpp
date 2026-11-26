@@ -569,12 +569,13 @@ std::string compileModule(const Program &program, const Program &imports,
   std::vector<FunctionIR> fragments(evaluatedFunctions.size());
   std::vector<double> seconds(evaluatedFunctions.size());
   std::vector<std::exception_ptr> loweringFailures(evaluatedFunctions.size());
+  const LoweringContext lowering(symbols);
 
   parallelFor(evaluatedFunctions.size(), [&](size_t i) {
     const auto start = std::chrono::steady_clock::now();
 
     try {
-      fragments[i] = lowerFunction(*evaluatedFunctions[i], symbols, analyses[i]);
+      fragments[i] = lowerFunction(*evaluatedFunctions[i], symbols, analyses[i], &lowering);
     } catch (...) {
       loweringFailures[i] = std::current_exception();
     }
@@ -588,10 +589,14 @@ std::string compileModule(const Program &program, const Program &imports,
   // The program's functions that took longest to lower, since that phase usually dominates.
   if (timingEnabled()) {
     std::vector<std::pair<double, const Function *>> lowering;
+    double total = 0;
+
+    for (const auto s : seconds) total += s;
 
     for (size_t i = 0; i < program.size(); ++i) lowering.push_back({seconds[i], &program[i]});
 
     std::sort(lowering.begin(), lowering.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+    std::fprintf(stderr, "duckc:   lower %zu functions, %.3fs of work on %zu workers\n", seconds.size(), total, Workers);
     for (size_t i = 0; i < lowering.size() && i < 10; ++i)
       std::fprintf(stderr, "duckc:   lower %-40s %8.3fs  %s:%d\n", lowering[i].second->name.text.c_str(), lowering[i].first,
                    sourcePath(lowering[i].second->name.source).c_str(), lowering[i].second->name.line);

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <utility>
@@ -164,14 +165,17 @@ std::string tableSymbol(const DispatchTable &table) {
 
   return symbol + "\"";
 }
-std::string tableType(const Symbols &symbols, const std::string &record) {
+// The layout of record's dispatch table, which has `names` method slots.
+std::string tableType(const Symbols &symbols, const std::string &record, size_t names) {
   std::string type = "{ i64, i64, ptr";
-  const auto names = symbols.dispatchNames(record).size();
 
   for (size_t i = 0; i < symbols.records.at(record).parents.size(); ++i) type += ", ptr";
   for (size_t i = 0; i < names; ++i) type += ", ptr, i64, ptr";
 
   return type + " }";
+}
+std::string tableType(const Symbols &symbols, const std::string &record) {
+  return tableType(symbols, record, symbols.dispatchNames(record).size());
 }
 // The byte offset of the parent state at path within record, as a constant.
 std::string pathOffset(const std::string &record, const std::vector<size_t> &path) {
@@ -214,28 +218,33 @@ struct Binding {
   bool lent = false; // Received from a function that may lend; it may not own its object.
   bool orderedLock = false; // Not a variable: a `${ }` block's locks, released when its scope exits.
   bool heapLocal = false; // Free the backing storage after ordinary scope-exit cleanup.
+  // A field of the receiver whose address is made on first use, so a method
+  // only addresses the fields it names: its index in Generator::lazyFields,
+  // or -1. `value` stays empty until then.
+  int lazyField = -1;
 };
 class Generator {
   const Symbols &functions;
   const FunctionAnalysis &analysis;
   std::string symbolPrefix;
-  // A container's dispatch names and table layout, built once per function.
-  // Every dynamically dispatched call needs them, and building them walks all
-  // of the container's methods, which dominated lowering for big containers.
-  std::map<std::string, std::vector<std::string>> dispatchNameCache;
-  std::map<std::string, std::string> tableLayoutCache;
-  const std::vector<std::string> &dispatchNames(const std::string &record) {
-    auto found = dispatchNameCache.find(record);
-    if (found == dispatchNameCache.end()) found = dispatchNameCache.emplace(record, functions.dispatchNames(record)).first;
-    return found->second;
-  }
-  const std::string &tableLayout(const std::string &record) {
-    auto found = tableLayoutCache.find(record);
-    if (found == tableLayoutCache.end()) found = tableLayoutCache.emplace(record, tableType(functions, record)).first;
-    return found->second;
-  }
+  // A container's dispatch names, table layout and visible fields, built once
+  // per module: every dispatched call and every method needs them, and
+  // building them walks all of the container's methods or fields.
+  const LoweringContext &shared;
+  const std::vector<std::string> &dispatchNames(const std::string &record) { return shared.dispatchNames(record); }
+  const std::string &tableLayout(const std::string &record) { return shared.tableLayout(record); }
   std::vector<std::map<std::string, Binding>> scopes;
   std::ostringstream globals, code, allocations;
+  // Receiver field addresses, made on first use and placed after the entry
+  // block's allocas, where they dominate every use: the receiver is a
+  // parameter, so it is available there. A field is addressed at most once.
+  std::ostringstream fieldAddresses;
+  struct LazyField {
+    std::string record;                // The receiver's IR type.
+    std::string receiver;              // The parameter holding it.
+    const std::vector<size_t> *indices; // Into the module's LoweringContext.
+  };
+  std::vector<LazyField> lazyFields;
   struct Loop {
     std::string exit, next;
     size_t scopeDepth;
@@ -334,7 +343,7 @@ class Generator {
 
     if (e.kind != ExprKind::Name) return true;
 
-    const auto binding = findBinding(e.token);
+    const auto &binding = declaredBinding(e.token);
     return !binding.scopedBorrow &&
            (type.role != Type::Owner || binding.lent || analysis.receiverStorage.count(&e) != 0);
   }
@@ -1408,7 +1417,7 @@ class Generator {
   static std::string ownerFlag(Type type) { return type.role == Type::Owner ? "true" : "false"; }
   // Whether this owner-role value can turn out to be borrowed at run time.
   bool mayBeBorrowed(const Expr &source) const {
-    if (source.kind == ExprKind::Name) return findBinding(source.token).lent;
+    if (source.kind == ExprKind::Name) return declaredBinding(source.token).lent;
     if (source.kind != ExprKind::Call) return false;
 
     const auto target = analysis.callTargets.find(&source);
@@ -2136,16 +2145,26 @@ class Generator {
     code << name << ":\n";
     currentBlock = name;
   }
-  Binding findBinding(const Token &t) const {
-    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
-      auto found = it->find(t.text);
-
-      if (found != it->end())
-        return found->second;
-    }
+  // The binding a name refers to, as declared: for its flags, since a
+  // receiver field may not have its address yet. findBinding gives one that does.
+  const Binding &declaredBinding(const Token &t) const {
+    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it)
+      if (const auto found = it->find(t.text); found != it->end()) return found->second;
 
     throw std::logic_error(
         "lowering requires a successfully analyzed function");
+  }
+  Binding findBinding(const Token &t) {
+    auto &binding = const_cast<Binding &>(declaredBinding(t)); // Held in this generator's own scopes.
+
+    if (binding.lazyField >= 0 && binding.value.empty()) {
+      const auto &field = lazyFields[size_t(binding.lazyField)];
+      binding.value = fresh();
+      fieldAddresses << "  " << binding.value << " = getelementptr " << field.record << ", ptr " << field.receiver
+                     << ", i32 0" << indexList(*field.indices) << '\n';
+    }
+
+    return binding;
   }
   Binding variable(const Token &t) {
     auto binding = findBinding(t);
@@ -2580,12 +2599,21 @@ class Generator {
     return id;
   }
   // Binds every field an instance method can name directly to its address
-  // inside the receiver at self.
-  void bindVisibleFields(const Type &record, const std::string &self) {
-    for (const auto &path : functions.visibleFields(record.record)) {
-      auto address = fresh();
-      emit(address + " = getelementptr " + irType(record) + ", ptr " + self + ", i32 0" + indexList(path.indices));
-      Binding field{path.field->scope.empty() ? path.field->type : path.field->scopedType, address};
+  // inside the receiver at self. When self is a parameter (lazy), an address
+  // is only made for a field the body names; otherwise every one is made here.
+  void bindVisibleFields(const Type &record, const std::string &self, bool lazy) {
+    const auto type = irType(record);
+
+    for (const auto &path : shared.visibleFields(record.record)) {
+      Binding field{path.field->scope.empty() ? path.field->type : path.field->scopedType, ""};
+
+      if (lazy) {
+        field.lazyField = int(lazyFields.size());
+        lazyFields.push_back({type, self, &path.indices});
+      } else {
+        field.value = fresh();
+        emit(field.value + " = getelementptr " + type + ", ptr " + self + ", i32 0" + indexList(path.indices));
+      }
 
       if (!path.field->scope.empty()) field.scoped = path.field;
 
@@ -4272,7 +4300,7 @@ class Generator {
     const auto type = analysis.expressionTypes.at(&e);
     const auto id = std::to_string(lambdaCount++);
     const auto function = "@duck$lambda." + symbolPrefix + "." + id;
-    Generator inner(functions, analysis, symbolPrefix + "$l" + id);
+    Generator inner(functions, analysis, symbolPrefix + "$l" + id, shared);
     thunks << inner.lambdaBody(*e.lambda, info, function);
     absorb(inner);
 
@@ -4401,7 +4429,7 @@ class Generator {
       Type record = Type::Record;
       record.record = info.record;
       selfRecord = info.record;
-      bindVisibleFields(record, self);
+      bindVisibleFields(record, self, info.bound); // A bound lambda's receiver is its %env parameter.
       Token token = f.name;
       token.text = Tok::This;
       Binding binding{record, self};
@@ -4440,7 +4468,7 @@ class Generator {
       emit("ret void");
     }
 
-    output << ") {\nentry:\n" << allocations.str() << code.str() << "}\n\n" << thunks.str();
+    output << ") {\nentry:\n" << allocations.str() << fieldAddresses.str() << code.str() << "}\n\n" << thunks.str();
     return output.str();
   }
   // A global function as a value: a constant closure around a thunk that
@@ -5679,9 +5707,9 @@ class Generator {
   }
 
 public:
-  Generator(const Symbols &symbols, const FunctionAnalysis &analysis,
-            const std::string &name)
-      : functions(symbols), analysis(analysis), symbolPrefix(name) {}
+  Generator(const Symbols &symbols, const FunctionAnalysis &analysis, const std::string &name,
+            const LoweringContext &shared)
+      : functions(symbols), analysis(analysis), symbolPrefix(name), shared(shared) {}
   FunctionIR generate(const Function &f) {
     initializer = f.generated;
 
@@ -5694,7 +5722,7 @@ public:
 
     if (f.method && !f.generated) {
       const auto &self = f.params.front().type;
-      bindVisibleFields(self, "%arg0");
+      bindVisibleFields(self, "%arg0", true);
       scopes.emplace_back();
     }
 
@@ -5740,7 +5768,7 @@ public:
       emit("ret void");
     }
 
-    output << ") {\nentry:\n" << allocations.str() << code.str() << "}\n\n" << thunks.str();
+    output << ") {\nentry:\n" << allocations.str() << fieldAddresses.str() << code.str() << "}\n\n" << thunks.str();
     FunctionIR result{globals.str(), output.str(), usesTextRuntime, usesHeapRuntime, usesTaskRuntime, usesLockRuntime,
             usesCalendarRuntime, usesWideRuntime, usesBigRuntime, usesDecimalRuntime, usesCollectionRuntime,
             usesFuncRuntime, usesMetaRuntime, usesMarkupRuntime, usesScopeRuntime, cleanups, destroys, tables, helpers, types, scopeNames, mathImports};
@@ -5749,14 +5777,55 @@ public:
   }
 };
 } // namespace
+struct LoweringContext::Cache {
+  explicit Cache(const Symbols &symbols) : symbols(symbols) {}
+  const Symbols &symbols;
+  std::mutex lock;
+  // Maps, so an entry stays put while others are added.
+  std::map<std::string, std::vector<std::string>> names;
+  std::map<std::string, std::string> layouts;
+  std::map<std::string, std::vector<MemberPath>> fields;
+
+  // The entry for record, built on first use. It is built outside the lock,
+  // so two threads may build the same one; both results are equal and the
+  // first stays.
+  template <class Value, class Build>
+  const Value &entry(std::map<std::string, Value> &map, const std::string &record, Build build) {
+    {
+      std::lock_guard<std::mutex> guard(lock);
+
+      if (const auto found = map.find(record); found != map.end()) return found->second;
+    }
+
+    auto value = build();
+    std::lock_guard<std::mutex> guard(lock);
+    return map.emplace(record, std::move(value)).first->second;
+  }
+};
+LoweringContext::LoweringContext(const Symbols &symbols) : cache(std::make_unique<Cache>(symbols)) {}
+LoweringContext::~LoweringContext() = default;
+const std::vector<std::string> &LoweringContext::dispatchNames(const std::string &record) const {
+  return cache->entry(cache->names, record, [&] { return cache->symbols.dispatchNames(record); });
+}
+const std::string &LoweringContext::tableLayout(const std::string &record) const {
+  return cache->entry(cache->layouts, record,
+                      [&] { return tableType(cache->symbols, record, dispatchNames(record).size()); });
+}
+const std::vector<MemberPath> &LoweringContext::visibleFields(const std::string &record) const {
+  return cache->entry(cache->fields, record, [&] { return cache->symbols.visibleFields(record); });
+}
 FunctionIR lowerFunction(const Function &function, const Symbols &symbols,
-                         const FunctionAnalysis &analysis) {
+                         const FunctionAnalysis &analysis, const LoweringContext *context) {
   if (!function.nativeSymbol.empty()) return {};
 
   if (!analysis.parallelGroups.empty() && !analysis.parallelWorkers.has_value())
     throw std::logic_error("lowering P requires validated branch effects");
 
-  return Generator(symbols, analysis, function.name.text).generate(function);
+  std::optional<LoweringContext> own;
+
+  if (!context) context = &own.emplace(symbols);
+
+  return Generator(symbols, analysis, function.name.text, *context).generate(function);
 }
 // The definitions of the native vector and matrix types a module mentions.
 // Matrices go first because defining one mentions its column vector.
