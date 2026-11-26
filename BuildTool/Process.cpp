@@ -6,6 +6,8 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#include <psapi.h>
+#include <algorithm>
 #else
 #include <cerrno>
 #include <cstring>
@@ -54,6 +56,65 @@ fs::path executable(const std::string& value, const fs::path& root) {
 }
 
 #ifdef _WIN32
+// Every tool runs in one job object with memory limits. A compile whose memory
+// runs away (clang has needed over 20 GB on a large module) then fails with an
+// error instead of paging the whole machine into a freeze. Each process may
+// commit DUCK_TOOL_MEMORY_MB, by default 60% of physical memory, and all tools
+// together 80%; DUCK_TOOL_MEMORY_MB=0 lifts the limits. The job also ends the
+// tools if the build tool itself is killed.
+static size_t processLimit = 0;
+
+static HANDLE toolJob() {
+    static std::once_flag once;
+    static HANDLE job = nullptr;
+    std::call_once(once, [] {
+        MEMORYSTATUSEX memory{};
+        memory.dwLength = sizeof(memory);
+        if (!GlobalMemoryStatusEx(&memory)) return;
+        unsigned long long perProcess = memory.ullTotalPhys / 10 * 6, total = memory.ullTotalPhys / 10 * 8;
+        if (const char* setting = std::getenv("DUCK_TOOL_MEMORY_MB")) {
+            char* end = nullptr;
+            const auto megabytes = std::strtoull(setting, &end, 10);
+            if (end == setting || *end) throw std::runtime_error("DUCK_TOOL_MEMORY_MB must be a whole number of megabytes");
+            perProcess = megabytes << 20;
+            total = std::max(total, perProcess);
+        }
+        job = CreateJobObjectW(nullptr, nullptr);
+        if (!job) return;
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (perProcess) {
+            limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_JOB_MEMORY;
+            limits.ProcessMemoryLimit = static_cast<SIZE_T>(perProcess);
+            limits.JobMemoryLimit = static_cast<SIZE_T>(total);
+            processLimit = static_cast<size_t>(perProcess);
+        }
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+            CloseHandle(job);
+            job = nullptr;
+            processLimit = 0;
+        }
+    });
+    return job;
+}
+
+// Starts a process created suspended inside the tool job. A process the job
+// cannot take (unlikely on Windows 8 and later) still runs, without limits.
+static void startInJob(const PROCESS_INFORMATION& process) {
+    if (HANDLE job = toolJob()) AssignProcessToJobObject(job, process.hProcess);
+    ResumeThread(process.hThread);
+}
+
+// A tool that failed near its memory limit was most likely stopped by it.
+static void explainMemoryLimit(HANDLE process, DWORD status, const std::string& tool) {
+    if (status == 0 || processLimit == 0) return;
+    PROCESS_MEMORY_COUNTERS counters{};
+    if (!GetProcessMemoryInfo(process, &counters, sizeof(counters))) return;
+    if (counters.PeakPagefileUsage < processLimit / 10 * 9) return;
+    throw std::runtime_error(fs::u8path(tool).filename().u8string() + " ran out of its memory limit (" +
+                             std::to_string(processLimit >> 20) + " MB). Set DUCK_TOOL_MEMORY_MB to raise it, or 0 to lift it.");
+}
+
 // Encode each argument using the Windows CRT command-line rules, including
 // trailing backslashes and embedded quotes. No shell interprets the command.
 static std::wstring quote(const std::wstring& value) {
@@ -84,13 +145,18 @@ int execute(const std::vector<std::string>& arguments) {
     PROCESS_INFORMATION process{};
     const auto application = fs::u8path(arguments.front()).wstring();
     if (!CreateProcessW(application.c_str(), command.data(), nullptr, nullptr, TRUE,
-                        0, nullptr, nullptr, &startup, &process))
+                        CREATE_SUSPENDED, nullptr, nullptr, &startup, &process))
         throw std::runtime_error("cannot launch tool: " + arguments.front() +
                                  " (Windows error " + std::to_string(GetLastError()) + ")");
+    startInJob(process);
     CloseHandle(process.hThread);
     DWORD status = 1;
     bool finished = WaitForSingleObject(process.hProcess, INFINITE) == WAIT_OBJECT_0 &&
         GetExitCodeProcess(process.hProcess, &status);
+    if (finished) {
+        try { explainMemoryLimit(process.hProcess, status, arguments.front()); }
+        catch (...) { CloseHandle(process.hProcess); throw; }
+    }
     CloseHandle(process.hProcess);
     if (!finished) throw std::runtime_error("cannot wait for tool: " + arguments.front());
 #else
@@ -140,12 +206,13 @@ static int captureRaw(const std::vector<std::string>& arguments, std::string& ou
     startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     PROCESS_INFORMATION process{};
     const auto application = fs::u8path(arguments.front()).wstring();
-    if (!CreateProcessW(application.c_str(), command.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &startup, &process)) {
+    if (!CreateProcessW(application.c_str(), command.data(), nullptr, nullptr, TRUE, CREATE_SUSPENDED, nullptr, nullptr, &startup, &process)) {
         const auto error = GetLastError();
         CloseHandle(readEnd);
         CloseHandle(writeEnd);
         throw std::runtime_error("cannot launch tool: " + arguments.front() + " (Windows error " + std::to_string(error) + ")");
     }
+    startInJob(process);
     CloseHandle(writeEnd);
     launch.unlock();
     CloseHandle(process.hThread);
@@ -155,6 +222,10 @@ static int captureRaw(const std::vector<std::string>& arguments, std::string& ou
     DWORD status = 1;
     bool finished = WaitForSingleObject(process.hProcess, INFINITE) == WAIT_OBJECT_0 &&
         GetExitCodeProcess(process.hProcess, &status);
+    if (finished) {
+        try { explainMemoryLimit(process.hProcess, status, arguments.front()); }
+        catch (...) { CloseHandle(process.hProcess); throw; }
+    }
     CloseHandle(process.hProcess);
     if (!finished) throw std::runtime_error("cannot wait for tool: " + arguments.front());
     return static_cast<int>(status);

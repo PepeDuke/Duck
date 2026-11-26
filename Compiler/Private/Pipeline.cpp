@@ -72,7 +72,8 @@ static void assembleModuleInto(std::string &module, const std::vector<FunctionIR
   module +=
       "; Duck bootstrap LLVM IR\ndeclare i32 @printf(ptr, ...)\n"
       "declare double @llvm.floor.f64(double)\ndeclare void @llvm.trap()\n"
-      "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n";
+      "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n"
+      "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)\n";
   if (!nativeSymbols.count("fflush")) module += "declare i32 @fflush(ptr)\n";
 
   // All entry points register slot zero, even when only an imported module

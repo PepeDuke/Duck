@@ -11,6 +11,8 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 namespace duck {
 namespace {
@@ -25,6 +27,77 @@ const char *const memberLayout = "{ ptr, ptr, ptr, ptr, ptr, i32, i32, ptr, ptr,
 const char *const tagLayout = "{ ptr, i32 }";
 enum MemberField { MemberName, MemberNameBytes, MemberSignature, MemberDeclaring, MemberDeclaringBytes,
                    MemberFlags, MemberTagCount, MemberTags, MemberFunction, MemberOffset, MemberTable };
+// Rewrites a record copied through a value, `%v = load %struct.T, ptr %a`
+// directly followed by `store %struct.T %v, ptr %b` with no other use of %v,
+// as one llvm.memmove. LLVM expands an aggregate load or store into every
+// scalar the record holds, and a large container built into many locals made
+// a test module need tens of gigabytes to compile. The bytes copied are the
+// same; memmove stays defined if %a and %b turn out to be the same storage.
+std::string copyRecordsInMemory(const std::string &body) {
+  if (body.find(" = load %struct.") == std::string::npos) return body;
+
+  auto isNameChar = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '$'; };
+  std::unordered_map<std::string_view, int> uses;
+
+  for (size_t i = 0; i < body.size(); ++i) {
+    if (body[i] != '%') continue;
+
+    size_t end = i + 1;
+    while (end < body.size() && isNameChar(body[end])) ++end;
+    ++uses[std::string_view(body).substr(i, end - i)];
+    i = end - 1;
+  }
+
+  std::vector<std::string_view> lines;
+  for (size_t start = 0; start < body.size();) {
+    size_t end = body.find('\n', start);
+    if (end == std::string::npos) end = body.size();
+    lines.push_back(std::string_view(body).substr(start, end - start));
+    start = end + 1;
+  }
+
+  std::string result;
+  result.reserve(body.size());
+  const std::string_view loadMark = " = load %struct.", storeMark = "  store %struct.";
+
+  for (size_t i = 0; i < lines.size(); ++i) {
+    const auto line = lines[i];
+    const auto at = line.find(loadMark);
+
+    if (at != std::string_view::npos && i + 1 < lines.size() && line.substr(0, 2) == "  ") {
+      const auto value = line.substr(2, at - 2);
+      const auto rest = line.substr(at + loadMark.size() - 8); // "%struct.T, ptr %a"
+      const auto comma = rest.find(", ptr ");
+      const auto next = lines[i + 1];
+
+      if (comma != std::string_view::npos && rest.find(',', comma + 1) == std::string_view::npos) {
+        const auto type = rest.substr(0, comma), source = rest.substr(comma + 6);
+        const std::string expected = std::string(storeMark.substr(0, 8)) + std::string(type) + " " + std::string(value) + ", ptr ";
+
+        if (next.substr(0, expected.size()) == expected && uses[value] == 2) {
+          const auto target = next.substr(expected.size());
+
+          if (target.find(',') == std::string_view::npos) {
+            result += "  call void @llvm.memmove.p0.p0.i64(ptr ";
+            result += target;
+            result += ", ptr ";
+            result += source;
+            result += ", i64 ptrtoint (ptr getelementptr (";
+            result += type;
+            result += ", ptr null, i32 1) to i64), i1 false)\n";
+            ++i;
+            continue;
+          }
+        }
+      }
+    }
+
+    result += line;
+    if (i + 1 < lines.size() || body.back() == '\n') result += '\n';
+  }
+
+  return result;
+}
 std::string irType(Type t) {
   if (funcValue(t)) return "ptr";
   if (fixedArray(t)) return "[" + std::to_string(t.extent) + " x " + irType(*t.element) + "]";
@@ -721,6 +794,41 @@ class Generator {
 
       if (recordValue(field.type)) eachManaged({field.type, part}, runtime);
       else if (funcValue(field.type)) {
+        usesFuncRuntime = true;
+        emit("call void @duck.cell$" + runtime + "(ptr " + part + ")");
+      } else if (trackedAlias(field.type)) {
+        usesHeapRuntime = true;
+        emit("call void @duck.heap$" + runtime + "(ptr " + part + ")");
+      } else {
+        usesTextRuntime = true;
+        emit("call void @duck.text." + runtime + "(ptr " + part + ")");
+      }
+    }
+  }
+  // Like eachManaged, for a record in memory at address: it loads only the
+  // managed fields. Loading the whole record as one value would make LLVM
+  // expand the copy into every scalar in it, and a local of a large container
+  // released on each exit path multiplied that into gigabytes of compile memory.
+  void eachManagedAt(const std::string &address, const Type &type, const std::string &runtime) {
+    const auto &fields = functions.records.at(type.record).fields;
+
+    for (size_t i = 0; i < fields.size(); ++i) {
+      const auto &field = fields[i];
+
+      if (!functions.managed(field.type)) continue;
+
+      auto at = fresh();
+      emit(at + " = getelementptr " + irType(type) + ", ptr " + address + ", i32 0, i32 " + std::to_string(i));
+
+      if (recordValue(field.type)) {
+        eachManagedAt(at, field.type, runtime);
+        continue;
+      }
+
+      auto part = fresh();
+      emit(part + " = load " + irType(field.type) + ", ptr " + at);
+
+      if (funcValue(field.type)) {
         usesFuncRuntime = true;
         emit("call void @duck.cell$" + runtime + "(ptr " + part + ")");
       } else if (trackedAlias(field.type)) {
@@ -1726,12 +1834,13 @@ class Generator {
     if (destroy && destructible) destroyAt(binding.type.record, binding.value);
     if (!functions.managed(binding.type)) return;
 
+    // A record's references are dropped from its storage, field by field. A
+    // destructible one was destroyed in place; only its references remain.
+    if (recordValue(binding.type)) return eachManagedAt(binding.value, binding.type, "release");
+
     auto old = fresh();
     emit(old + " = load " + irType(binding.type) + ", ptr " + binding.value);
-
-    // The object was destroyed in place; only its references remain to drop.
-    if (destructible) eachManaged({binding.type, old}, "release");
-    else release({binding.type, old});
+    release({binding.type, old});
   }
   void cleanupScopes(size_t first, const std::string &moved = "") {
     // Locals die in reverse declaration order, innermost scope first.
@@ -4515,7 +4624,7 @@ class Generator {
       emit("ret void");
     }
 
-    output << ") {\nentry:\n" << allocations.str() << fieldAddresses.str() << code.str() << "}\n\n" << thunks.str();
+    output << ") {\nentry:\n" << allocations.str() << fieldAddresses.str() << copyRecordsInMemory(code.str()) << "}\n\n" << thunks.str();
     return output.str();
   }
   // A global function as a value: a constant closure around a thunk that
@@ -5815,7 +5924,7 @@ public:
       emit("ret void");
     }
 
-    output << ") {\nentry:\n" << allocations.str() << fieldAddresses.str() << code.str() << "}\n\n" << thunks.str();
+    output << ") {\nentry:\n" << allocations.str() << fieldAddresses.str() << copyRecordsInMemory(code.str()) << "}\n\n" << thunks.str();
     FunctionIR result{globals.str(), output.str(), usesTextRuntime, usesHeapRuntime, usesTaskRuntime, usesLockRuntime,
             usesCalendarRuntime, usesWideRuntime, usesBigRuntime, usesDecimalRuntime, usesCollectionRuntime,
             usesFuncRuntime, usesMetaRuntime, usesMarkupRuntime, usesScopeRuntime, cleanups, destroys, tables, helpers, types, scopeNames, mathImports};
