@@ -4,6 +4,7 @@
 #include "WideInteger.h"
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -90,31 +91,77 @@ std::string enumTextSymbol(const std::string &name, size_t index) {
 std::string enumLabelSymbol(const std::string &name, size_t index) {
   return "@enum." + name + ".label." + std::to_string(index);
 }
-// An immortal managed string or name literal (reference count -1) holding
-// text.text, which is UTF-8. string stores UTF-16 code units, name bytes.
-std::string managedTextGlobal(const std::string &symbol, const Token &text, Type type) {
+bool asciiText(const std::string &text) {
+  return std::all_of(text.begin(), text.end(), [](char c) { return static_cast<unsigned char>(c) < 0x80; });
+}
+// Writes the global of appendManagedText, given its `count` code units, which
+// each(put) passes to put in order.
+template <class Each> void writeManagedText(std::string &ir, const std::string &symbol, Type type, size_t count, Each each) {
+  const char *unit = type == Type::String ? "i16" : "i8";
+  const auto array = "[" + std::to_string(count + 1) + " x " + unit + "]";
+  ir += symbol;
+  ir += " = private unnamed_addr constant { i64, i64, ";
+  ir += array;
+  ir += " } { i64 -1, i64 ";
+  ir += std::to_string(count);
+  ir += ", ";
+  ir += array;
+  ir += " [";
+  char digits[16];
+
+  each([&](uint32_t value) {
+    ir += unit;
+    ir += ' ';
+    ir.append(digits, std::to_chars(digits, digits + sizeof digits, value).ptr);
+    ir += ", ";
+  });
+
+  ir += unit;
+  ir += " 0] }, align 8\n";
+}
+// Appends an immortal managed string or name literal (reference count -1)
+// holding text.text, which is UTF-8. string stores UTF-16 code units, name
+// bytes. ASCII text is its own code units, so only other text is decoded.
+void appendManagedText(std::string &ir, const std::string &symbol, const Token &text, Type type) {
+  const std::string &bytes = text.text;
+
+  if (type == Type::Name || asciiText(bytes))
+    return writeManagedText(ir, symbol, type, bytes.size(), [&](auto put) {
+      for (unsigned char byte : bytes) put(byte);
+    });
+
   std::vector<uint32_t> units;
+  units.reserve(bytes.size());
 
-  if (type == Type::Name) {
-    for (unsigned char byte : text.text) units.push_back(byte);
-  } else
-    for (auto cp : decodeUTF8(text)) {
-      if (cp < 0x10000) units.push_back(cp);
-      else {
-        cp -= 0x10000;
-        units.push_back(0xD800 | (cp >> 10));
-        units.push_back(0xDC00 | (cp & 1023));
-      }
+  for (auto cp : decodeUTF8(text)) {
+    if (cp < 0x10000) units.push_back(cp);
+    else {
+      cp -= 0x10000;
+      units.push_back(0xD800 | (cp >> 10));
+      units.push_back(0xDC00 | (cp & 1023));
     }
+  }
 
-  const std::string unit = type == Type::String ? "i16" : "i8";
-  const auto array = "[" + std::to_string(units.size() + 1) + " x " + unit + "]";
-  std::string ir = symbol + " = private unnamed_addr constant { i64, i64, " + array +
-                   " } { i64 -1, i64 " + std::to_string(units.size()) + ", " + array + " [";
+  writeManagedText(ir, symbol, type, units.size(), [&](auto put) {
+    for (auto value : units) put(value);
+  });
+}
+// The same for text that is not in a token: a token is only made, and the
+// text interned, when it has to be decoded.
+void appendManagedText(std::string &ir, const std::string &symbol, const std::string &text, Type type) {
+  if (type == Type::Name || asciiText(text))
+    return writeManagedText(ir, symbol, type, text.size(), [&](auto put) {
+      for (unsigned char byte : text) put(byte);
+    });
 
-  for (auto value : units) ir += unit + " " + std::to_string(value) + ", ";
-
-  return ir + unit + " 0] }, align 8\n";
+  Token token;
+  token.text = text;
+  appendManagedText(ir, symbol, token, type);
+}
+std::string managedTextGlobal(const std::string &symbol, const Token &text, Type type) {
+  std::string ir;
+  appendManagedText(ir, symbol, text, type);
+  return ir;
 }
 // Managed storage is never null. A string, name, or big field or static
 // without an initializer holds an immortal empty value: "" or zero, defined
@@ -6146,9 +6193,7 @@ std::string typeDescriptor(const Symbols &symbols, const std::string &record, st
   const auto members = symbols.members(record);
   std::string ir;
   auto text = [&](const std::string &name, const std::string &value, Type type) {
-    Token token;
-    token.text = value;
-    ir += managedTextGlobal(name, token, type);
+    appendManagedText(ir, name, value, type);
     return name;
   };
   const auto typeName_ = text(symbol + ".name", record, Type::String);

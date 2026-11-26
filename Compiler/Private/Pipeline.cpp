@@ -62,10 +62,13 @@ static bool taskFields(const Symbols &symbols) {
 
   return false;
 }
-std::string assembleModule(const std::vector<FunctionIR> &functions,
-                           bool entry, const std::set<std::string> &nativeSymbols,
-                           bool mainArguments, bool fileFields, Target target, bool taskFields) {
-  std::string module =
+// Appends what assembleModule returns to `module`. The function bodies are
+// most of a module, often tens of megabytes, so the string grows once to
+// hold them and is never copied whole.
+static void assembleModuleInto(std::string &module, const std::vector<FunctionIR> &functions, bool entry,
+                               const std::set<std::string> &nativeSymbols, bool mainArguments, bool fileFields,
+                               Target target, bool taskFields) {
+  module +=
       "; Duck bootstrap LLVM IR\ndeclare i32 @printf(ptr, ...)\n"
       "declare double @llvm.floor.f64(double)\ndeclare void @llvm.trap()\n"
       "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n";
@@ -194,6 +197,14 @@ define internal void @duck.lock$exit(i32 %token) { ret void }
   if (needsBig) module += bigRuntimeIR();
   if (needsDecimal) module += decimalRuntimeIR();
 
+  // Room for every function, plus the entry point and what the caller adds
+  // after the module (a test runner) or before it (native math types).
+  size_t bodies = 0;
+
+  for (const auto &f : functions) bodies += f.globals.size() + f.definition.size();
+
+  module.reserve(module.size() + bodies + 64 * 1024);
+
   for (const auto &f : functions)
     module += f.globals;
 
@@ -202,15 +213,23 @@ define internal void @duck.lock$exit(i32 %token) { ret void }
   for (const auto &f : functions)
     module += f.definition;
 
-  if (!entry)
-    return module;
+  if (!entry) return;
 
-  if (mainArguments)
-    return module + entryArgumentsIR(target);
+  if (mainArguments) {
+    module += entryArgumentsIR(target);
+    return;
+  }
 
-  const char *entrySignature = target == Target::Wasm64 ? "@__main_argc_argv(i32 %argc, ptr %argv)" : "@main()";
-  return module + "define i32 " + entrySignature +
-         " {\nentry:\n  store ptr @duck$thread.main, ptr @duck$thread.self\n  call void @duck.Main()\n  ret i32 0\n}\n";
+  module += "define i32 ";
+  module += target == Target::Wasm64 ? "@__main_argc_argv(i32 %argc, ptr %argv)" : "@main()";
+  module += " {\nentry:\n  store ptr @duck$thread.main, ptr @duck$thread.self\n  call void @duck.Main()\n  ret i32 0\n}\n";
+}
+std::string assembleModule(const std::vector<FunctionIR> &functions,
+                           bool entry, const std::set<std::string> &nativeSymbols,
+                           bool mainArguments, bool fileFields, Target target, bool taskFields) {
+  std::string module;
+  assembleModuleInto(module, functions, entry, nativeSymbols, mainArguments, fileFields, target, taskFields);
+  return module;
 }
 std::string compile(const Program &program, bool parallel) {
   return compileModule(program, {}, true, parallel);
@@ -629,18 +648,24 @@ std::string compileModule(const Program &program, const Program &imports,
   }
 
   const std::string runner = tests ? buildTestRunner(program, nativeSymbols) : std::string();
-  const std::string module =
-      emitRecords(symbols) + helperIR + emitEnums(symbols) + emitStatics(symbols) + emitCleanups(symbols, cleanups) +
-      emitDestroys(symbols, destroys) + emitTables(symbols, tables, types) +
-      emitDeclarations(declarations) +
-      assembleModule(fragments, entry, nativeSymbols,
-                     entry && !symbols.at("Main").parameters.empty(), fileFields(symbols), target,
-                     taskFields(symbols)) +
-      runner;
+  // Built in one string: each part is appended in place, the function bodies
+  // included, so the module is not copied on the way out.
+  std::string module = emitRecords(symbols);
+  module += helperIR;
+  module += emitEnums(symbols);
+  module += emitStatics(symbols);
+  module += emitCleanups(symbols, cleanups);
+  module += emitDestroys(symbols, destroys);
+  module += emitTables(symbols, tables, types);
+  module += emitDeclarations(declarations);
+  assembleModuleInto(module, fragments, entry, nativeSymbols, entry && !symbols.at("Main").parameters.empty(),
+                     fileFields(symbols), target, taskFields(symbols));
+  module += runner;
   phase("emit module");
-  auto result = emitNativeMathTypes(symbols, module) + module;
+  // The types go first; inserting shifts the module within its own storage.
+  module.insert(0, emitNativeMathTypes(symbols, module));
   phase("emit native math types");
-  if (target == Target::Wasm64) result.insert(0, "target triple = \"wasm64-unknown-emscripten\"\n");
-  return result;
+  if (target == Target::Wasm64) module.insert(0, "target triple = \"wasm64-unknown-emscripten\"\n");
+  return module;
 }
 } // namespace duck
