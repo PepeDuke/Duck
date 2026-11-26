@@ -1,6 +1,7 @@
 #include "Pipeline.h"
 #include "Timing.h"
 #include "Workers.h"
+#include <atomic>
 #include <exception>
 #include <algorithm>
 
@@ -231,6 +232,8 @@ std::string assembleModule(const std::vector<FunctionIR> &functions,
   assembleModuleInto(module, functions, entry, nativeSymbols, mainArguments, fileFields, target, taskFields);
   return module;
 }
+static std::atomic<bool> keepStateUntilExit{false};
+void keepCompileStateUntilExit(bool keep) { keepStateUntilExit = keep; }
 std::string compile(const Program &program, bool parallel) {
   return compileModule(program, {}, true, parallel);
 }
@@ -485,7 +488,7 @@ std::string compileModule(const Program &program, const Program &imports,
   declarations.enums.insert(symbols.enums.begin(), symbols.enums.end());
 
   phase("symbols");
-  const auto generated = generateInitializers(symbols, declarations);
+  auto generated = generateInitializers(symbols, declarations);
   phase("generate initializers");
   // Signatures are settled and each body is checked on its own, so an error
   // in one function cannot cause a false one in another: report them all.
@@ -666,6 +669,20 @@ std::string compileModule(const Program &program, const Program &imports,
   module.insert(0, emitNativeMathTypes(symbols, module));
   phase("emit native math types");
   if (target == Target::Wasm64) module.insert(0, "target triple = \"wasm64-unknown-emscripten\"\n");
+
+  if (keepStateUntilExit) {
+    // Deliberately never freed (see keepCompileStateUntilExit): moving these
+    // out leaves nothing large for the return to destroy.
+    struct Kept {
+      Symbols symbols, imported, declarations;
+      std::vector<Function> generated;
+      std::vector<FunctionAnalysis> analyses;
+      std::vector<FunctionIR> fragments;
+    };
+    new Kept{std::move(symbols),   std::move(imported), std::move(declarations),
+             std::move(generated), std::move(analyses), std::move(fragments)};
+  }
+
   return module;
 }
 } // namespace duck

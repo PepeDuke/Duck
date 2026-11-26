@@ -858,6 +858,12 @@ std::string compile(const Program &program, bool parallel = true);
 // any, is compiled but not called. It requires entry = false.
 std::string compileModule(const Program &program, const Program &imports,
                           bool entry, bool parallel = true, bool tests = false, Target target = Target::Native);
+// For a process that exits once its module is written, as duckc does:
+// compileModule then leaves the symbols, analyses and lowered functions it
+// built for the system to reclaim at exit, instead of freeing them, which
+// takes longer than the exit. Off by default, so a caller that compiles
+// several modules frees each one.
+void keepCompileStateUntilExit(bool keep);
 // Moves the program's T{ } tests in among its functions and rejects duplicates.
 void enableTests(Program &program);
 } // namespace duck

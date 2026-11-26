@@ -9,6 +9,8 @@
 #endif
 #include <algorithm>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -522,6 +524,7 @@ std::string compileInputs(Loader &loader, const Options &options) {
 
   duck::phase("combine units");
   auto ir = duck::compileModule(program, imports, options.entry && !options.test, options.parallel, options.test, options.target);
+  duck::phase("release module state");
 
 #ifdef DUCK_NET_LIBRARY
   if (needsNet) {
@@ -544,6 +547,10 @@ std::string compileInputs(Loader &loader, const Options &options) {
     duck::phase("write interface");
   }
 
+  // duckc exits once the module is written, and the system reclaims the
+  // parsed programs faster than freeing them would: they are left in place.
+  new duck::Program(std::move(program));
+  new duck::Program(std::move(imports));
   return ir;
 }
 
@@ -572,13 +579,19 @@ int main(int argc, char **argv) {
   try {
     const fs::path outputPath(argv[argc - 1]);
     Options options;
+    duck::keepCompileStateUntilExit(true); // This process exits once the module is written.
     Loader loader(readArguments(argc, argv, options), outputPath);
     loader.lexAll(texts);
     duck::phase("read, lex, preprocess");
     const auto ir = compileInputs(loader, options);
+    duck::phase("release program");
     writeOutput(outputPath, ir);
     duck::phase("write output");
-    return 0;
+    // The output is written and closed. Ending here skips freeing everything
+    // still held (the loader's tokens and texts, the module text) and static
+    // teardown, all of which the system reclaims faster at exit.
+    std::fflush(nullptr);
+    std::_Exit(0);
   } catch (const duck::CompileErrors &e) {
     printErrors(e.errors, texts);
     return 1;
